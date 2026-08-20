@@ -90,19 +90,40 @@ export function fileGraphFromFragments(
 }
 
 /** Test / extractor helper for pending cross-file refs. */
-export function rawRef(input: {
-  owner: string;
-  refName: string;
-  refKind?: string;
-  line: number;
-  occurrence?: number;
-  ownerIsFile?: boolean;
-  importedName?: string;
-  localName?: string;
-  sourceLanguage?: string;
-}): RawRef {
-  const refKind = input.refKind ?? "call";
-  return {
+export function rawRef(
+  input:
+    | {
+        type?: "symbol";
+        owner: string;
+        refName: string;
+        refKind?: string;
+        line: number;
+        occurrence?: number;
+        sourceLanguage?: string;
+      }
+    | {
+        type: "import";
+        owner: string;
+        refName: string;
+        line: number;
+        occurrence?: number;
+      }
+    | {
+        type: "import_binding";
+        owner: string;
+        refName: string;
+        line: number;
+        occurrence?: number;
+        importedName: string;
+        localName: string;
+        sourceLanguage: string;
+      },
+): RawRef {
+  const refKind =
+    input.type === "symbol" || !input.type
+      ? (input.refKind ?? "call")
+      : "import";
+  const base = {
     owner: input.owner,
     id: makeRefId(
       input.owner,
@@ -114,11 +135,19 @@ export function rawRef(input: {
     ref_name: input.refName,
     ref_kind: refKind,
     line: input.line,
-    owner_is_file: input.ownerIsFile,
-    imported_name: input.importedName,
-    local_name: input.localName,
-    source_language: input.sourceLanguage,
   };
+  if (input.type === "import_binding")
+    return {
+      ...base,
+      type: "import_binding",
+      ref_kind: "import",
+      imported_name: input.importedName,
+      local_name: input.localName,
+      source_language: input.sourceLanguage,
+    };
+  if (input.type === "import")
+    return { ...base, type: "import", ref_kind: "import" };
+  return { ...base, type: "symbol", source_language: input.sourceLanguage };
 }
 
 function uniquePublicCodeFragments(

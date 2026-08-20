@@ -1,5 +1,5 @@
 import type { GraphReader, SymRef } from "../types.js";
-import type { ExploreCallPath } from "./subgraph.js";
+import type { ExploreCallPath } from "./types.js";
 
 const MAX_PATH_SEEDS = 8;
 const MAX_PATH_ATTEMPTS = 32;

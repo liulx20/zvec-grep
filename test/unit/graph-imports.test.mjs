@@ -38,11 +38,10 @@ test("expandFileNeighbors applies limit independently to every seed", async () =
     [],
     targets.slice(0, 3).map((_, index) =>
       rawRef({
+        type: "import",
         owner: first.id,
         refName: `./t${index}`,
-        refKind: "import",
         line: index + 1,
-        ownerIsFile: true,
       }),
     ),
   );
@@ -52,11 +51,10 @@ test("expandFileNeighbors applies limit independently to every seed", async () =
     [],
     [
       rawRef({
+        type: "import",
         owner: second.id,
         refName: "./t3",
-        refKind: "import",
         line: 1,
-        ownerIsFile: true,
       }),
     ],
   );
@@ -218,7 +216,7 @@ export function formatDate() {
       (r) =>
         r.ref_kind === "import" &&
         r.ref_name === "./utils" &&
-        r.owner_is_file === true &&
+        (r.type === "import" || r.type === "import_binding") &&
         r.owner === a.id,
     ),
   );

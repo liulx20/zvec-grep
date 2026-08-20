@@ -51,12 +51,11 @@ export async function extractFileGraph(
   );
   for (const [occurrence, spec] of importSpecs.entries()) {
     const ref = rawRef({
+      type: "import",
       owner: source.file.id,
       refName: spec.spec,
-      refKind: "import",
       line: spec.line,
       occurrence,
-      ownerIsFile: true,
     });
     if (!seenRefIds.has(ref.id)) {
       seenRefIds.add(ref.id);
@@ -64,12 +63,11 @@ export async function extractFileGraph(
     }
     for (const [bindingIndex, binding] of (spec.bindings ?? []).entries()) {
       const bindingRef = rawRef({
+        type: "import_binding",
         owner: source.file.id,
         refName: spec.spec,
-        refKind: "import",
         line: spec.line,
         occurrence: occurrence * 1_000 + bindingIndex + 1,
-        ownerIsFile: true,
         importedName: binding.imported,
         localName: binding.local,
         sourceLanguage: source.file.format,

@@ -1,8 +1,5 @@
-export {
-  exploreGraph,
-  exploreSubgraph,
-  resolveExploreSeeds,
-} from "./explore/subgraph.js";
+export { exploreGraph, exploreSubgraph } from "./explore/subgraph.js";
+export { resolveExploreSeeds } from "./explore/policy.js";
 export type {
   ExploreBlastRadius,
   ExploreCallPath,
@@ -16,4 +13,4 @@ export type {
   ExploreSubgraphResult,
   ExploreSubgraphStorage,
   ExploreSymbolSnippet,
-} from "./explore/subgraph.js";
+} from "./explore/types.js";

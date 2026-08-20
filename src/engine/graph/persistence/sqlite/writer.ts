@@ -121,13 +121,15 @@ export class SqliteGraphWriter {
       .run(
         ref.id,
         ref.owner || fallbackOwner,
-        ref.owner_is_file || !ref.owner ? 1 : 0,
+        ref.type === "symbol" ? 0 : 1,
         ref.ref_name,
         ref.ref_kind,
         ref.line,
-        ref.imported_name ?? null,
-        ref.local_name ?? null,
-        ref.source_language ?? null,
+        ref.type === "import_binding" ? ref.imported_name : null,
+        ref.type === "import_binding" ? ref.local_name : null,
+        ref.type === "symbol" || ref.type === "import_binding"
+          ? (ref.source_language ?? null)
+          : null,
       );
   }
 
@@ -157,6 +159,7 @@ export class SqliteGraphWriter {
 
   private snapshotRef(snapshot: EdgeRow, occurrence: number): RawRef {
     return {
+      type: "symbol",
       owner: snapshot.src_id,
       id: makeRefId(
         snapshot.src_id,
@@ -198,7 +201,7 @@ export class SqliteGraphWriter {
     occurrence: number,
   ): RawRef {
     const binding = "local_name" in snapshot ? snapshot : undefined;
-    return {
+    const base = {
       owner: snapshot.src_file_id,
       id: makeRefId(
         snapshot.src_file_id,
@@ -210,10 +213,17 @@ export class SqliteGraphWriter {
       ref_name: snapshot.spec,
       ref_kind: "import",
       line: 0,
-      owner_is_file: true,
-      imported_name: binding?.imported_name,
-      local_name: binding?.local_name,
     };
+    if (binding)
+      return {
+        ...base,
+        type: "import_binding",
+        ref_kind: "import",
+        imported_name: binding.imported_name,
+        local_name: binding.local_name,
+        source_language: "unknown",
+      };
+    return { ...base, type: "import", ref_kind: "import" };
   }
 
   private symbolIdsForFile(fileId: string): string[] {

@@ -199,10 +199,9 @@ test("failed ref retry batches rotate instead of starving later rows", async () 
       [
         {
           ...rawRef({
+            type: "import",
             owner: caller.id,
-            ownerIsFile: true,
             refName: "./target",
-            refKind: "import",
             line: 1,
           }),
           id: `aaa-${String(index).padStart(3, "0")}`,
@@ -217,10 +216,9 @@ test("failed ref retry batches rotate instead of starving later rows", async () 
     [
       {
         ...rawRef({
+          type: "import",
           owner: validFile.id,
-          ownerIsFile: true,
           refName: "./target",
-          refKind: "import",
           line: 1,
         }),
         id: "zzz-valid",

@@ -96,19 +96,33 @@ export type LocalEdge = {
   kind: "CALLS" | "REFS" | "INHERITS" | "CONTAINS";
 };
 
-export type RawRef = {
-  /** Sym.id，或 import 时为 File.id（配合 owner_is_file）。 */
+type RawRefBase = {
   owner: string;
   id: string;
   ref_name: string;
   ref_kind: string;
   line: number;
-  /** true → HAS_REF 挂在 File 上（import/include）。 */
-  owner_is_file?: boolean;
-  imported_name?: string;
-  local_name?: string;
+};
+
+export type SymbolRawRef = RawRefBase & {
+  type: "symbol";
   source_language?: string;
 };
+
+export type ImportRawRef = RawRefBase & {
+  type: "import";
+  ref_kind: "import";
+};
+
+export type ImportBindingRawRef = RawRefBase & {
+  type: "import_binding";
+  ref_kind: "import";
+  imported_name: string;
+  local_name: string;
+  source_language: string;
+};
+
+export type RawRef = SymbolRawRef | ImportRawRef | ImportBindingRawRef;
 
 export type PendingRef = {
   src: string;
