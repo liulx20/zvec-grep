@@ -27,9 +27,17 @@ import { serverStatus } from "../daemon/server-controller.js";
 import { findNearestWorkspace } from "../engine/service/root.js";
 import type { ParsedArgs, CliOptions } from "./types.js";
 import {
+  exploreWorkspaceGraph,
+  queryWorkspaceGraph,
+} from "../engine/graph/index.js";
+import {
   contextWarningLines,
   printCliContextResult,
 } from "./format/context.js";
+import {
+  printExploreResult,
+  printNeighborhoodResult,
+} from "./format/explore.js";
 import { printDebug } from "./format/debug.js";
 import { createIndexProgressReporter } from "./format/progress.js";
 import {
@@ -75,6 +83,14 @@ export async function runParsedCommand(parsed: ParsedArgs): Promise<void> {
   switch (parsed.command) {
     case "query":
       await runQuery(parsed);
+      return;
+    case "explore":
+      await runExplore(parsed);
+      return;
+    case "callers":
+    case "callees":
+    case "impact":
+      await runGraphNeighborhood(parsed);
       return;
     case "index":
       await runIndex(parsed);
@@ -564,6 +580,37 @@ async function runStatus(parsed: ParsedArgs): Promise<void> {
   if (parsed.options.checkReady && state !== "ready") {
     throw new Error(`Workspace index is not ready (state: ${state})`);
   }
+}
+
+async function runExplore(parsed: ParsedArgs): Promise<void> {
+  const query = parsed.positionals[0]!;
+  const result = exploreWorkspaceGraph({
+    query,
+    seedId: parsed.options.seedId,
+    searchLimit: parsed.options.limit,
+    traversalDepth: parsed.options.depth,
+    maxFiles: parsed.options.maxFiles,
+  });
+  printExploreResult(result);
+}
+
+async function runGraphNeighborhood(parsed: ParsedArgs): Promise<void> {
+  const direction = parsed.command;
+  if (
+    direction !== "callers" &&
+    direction !== "callees" &&
+    direction !== "impact"
+  ) {
+    throw new Error(`unexpected graph command: ${parsed.command}`);
+  }
+  const result = queryWorkspaceGraph({
+    direction,
+    query: parsed.positionals[0]!,
+    depth: parsed.options.depth,
+    limit: parsed.options.limit,
+    seedId: parsed.options.seedId,
+  });
+  printNeighborhoodResult(result);
 }
 
 async function runQuery(parsed: ParsedArgs): Promise<void> {

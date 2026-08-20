@@ -1,3 +1,4 @@
+import { join } from "node:path";
 import {
   workspaceIndexDetail,
   detail,
@@ -11,8 +12,12 @@ import {
   indexWorkspacePaths,
 } from "../pipeline/indexing/index.js";
 import { searchWorkspaceIndex } from "../pipeline/search/index.js";
+import type { GraphReader, GraphStorage } from "../graph/index.js";
+import { openGraphStorage } from "../graph/index.js";
 import {
   createWorkspaceIndexStorage,
+  type StoredEntity,
+  type StorageSearchHit,
   type WorkspaceIndexStorage,
 } from "../storage/index.js";
 import type {
@@ -33,6 +38,7 @@ export type WorkspaceIndexOptions = {
 
 export class WorkspaceIndex {
   private readonly storage: WorkspaceIndexStorage;
+  private readonly graphStorage: GraphStorage;
   private readonly embedding: WorkspaceIndexEmbeddingSchema;
   private readonly embeddingModel?: EmbeddingModel;
   private closed = false;
@@ -60,6 +66,13 @@ export class WorkspaceIndex {
         readOnly: true,
       });
     }
+    this.graphStorage = openGraphStorage(join(info.path, "code-graph"), {
+      readOnly: options.mode === "read",
+    });
+  }
+
+  get graph(): GraphReader {
+    return this.graphStorage;
   }
 
   get name(): string {
@@ -80,6 +93,7 @@ export class WorkspaceIndex {
       workspaceIndex: this.info,
       embeddingModel,
       storage: this.storage,
+      graph: this.graphStorage,
       embeddingConcurrency: options.embeddingConcurrency,
       onProgress: options.onProgress,
       signal: options.signal,
@@ -98,7 +112,39 @@ export class WorkspaceIndex {
       workspaceIndex: this.info,
       embeddingModel: this.embeddingModel,
       storage: this.storage,
+      graph: this.graphStorage,
     });
+  }
+
+  getEntity(entityId: string) {
+    return this.storage.getEntity(entityId);
+  }
+
+  listEntitiesByFile(
+    fileId: string,
+    options?: { limit?: number; offset?: number },
+  ) {
+    return this.storage.listEntitiesByFile(fileId, options);
+  }
+
+  findSymbolsByName(name: string, limit = 20) {
+    const trimmed = name.trim();
+    if (!trimmed || limit <= 0) return [];
+    return uniqueStoredEntities(
+      this.storage.searchFts(trimmed, limit, { symbolNames: [trimmed] }),
+      this.storage,
+      false,
+    );
+  }
+
+  findSymbolsByQuery(query: string, limit = 40) {
+    const trimmed = query.trim();
+    if (!trimmed || limit <= 0) return [];
+    return uniqueStoredEntities(
+      this.storage.searchFts(trimmed, limit),
+      this.storage,
+      true,
+    );
   }
 
   close(): void {
@@ -106,6 +152,7 @@ export class WorkspaceIndex {
       return;
     }
 
+    this.graphStorage.close();
     this.storage.close();
     this.closed = true;
   }
@@ -202,6 +249,25 @@ export class WorkspaceIndex {
 
     return this.embeddingModel;
   }
+}
+
+function uniqueStoredEntities(
+  hits: readonly StorageSearchHit[],
+  storage: WorkspaceIndexStorage,
+  codeOnly: boolean,
+): StoredEntity[] {
+  const out: StoredEntity[] = [];
+  const seen = new Set<string>();
+  for (const hit of hits) {
+    const id = hit.fragment.group ?? hit.fragment.id;
+    if (seen.has(id)) continue;
+    const stored = storage.getEntity(id);
+    if (!stored || (codeOnly && stored.entity.metadata?.kind !== "code"))
+      continue;
+    seen.add(id);
+    out.push(stored);
+  }
+  return out;
 }
 
 function workspaceIndexOperationDetails(

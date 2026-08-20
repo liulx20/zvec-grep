@@ -6,7 +6,7 @@ import type {
   WorkspaceIndexEmbeddingSchema,
 } from "../types.js";
 
-type StoredEntity = {
+export type StoredEntity = {
   entity: Entity;
   file: FileInfo;
 };
@@ -20,14 +20,14 @@ type FileIndexDiagnostics = {
   truncatedFragmentCount?: number;
 };
 
-type StorageSearchFilter = {
+export type StorageSearchFilter = {
   fileIds?: readonly string[];
   groupIds?: readonly string[];
   symbolNames?: readonly string[];
   symbolTypes?: readonly CodeSymbolType[];
 };
 
-type StorageSearchHit = {
+export type StorageSearchHit = {
   fragment: EntityFragment;
   file: FileInfo;
   path: "fts" | "vector";

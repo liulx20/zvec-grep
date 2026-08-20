@@ -13,6 +13,7 @@ export type {
   ZvecGrepContextItemKind,
   ZvecGrepContextOptions,
   ZvecGrepContextResult,
+  ZvecGrepGraphRelationship,
   ZvecGrepContextRoute,
   ZvecGrepContextSource,
   ZvecGrepStructureEnrichmentDiagnostics,

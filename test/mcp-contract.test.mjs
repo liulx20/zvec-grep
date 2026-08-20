@@ -177,7 +177,7 @@ test("MCP toolset resolution prefers explicit configuration and defaults to agen
   assert.throws(() => parseMcpToolset("all"), /Expected "agent" or "full"/);
 });
 
-test("default agent contract exposes only indexed search", async (t) => {
+test("default agent contract exposes indexed search and code graph tools", async (t) => {
   const backend = createBackend();
   let managementCalls = 0;
   backend.index = async (input) => {
@@ -204,6 +204,10 @@ test("default agent contract exposes only indexed search", async (t) => {
 
   const listed = await client.listTools();
   assert.deepEqual(listed.tools.map((tool) => tool.name).toSorted(), [
+    "zvec_grep_callees",
+    "zvec_grep_callers",
+    "zvec_grep_explore",
+    "zvec_grep_impact",
     "zvec_grep_search",
   ]);
 
@@ -302,6 +306,10 @@ test("full server contract exposes all tools with stable annotations", async (t)
   assert.deepEqual(
     tools.map((tool) => tool.name),
     [
+      "zvec_grep_callees",
+      "zvec_grep_callers",
+      "zvec_grep_explore",
+      "zvec_grep_impact",
       "zvec_grep_index",
       "zvec_grep_index_drop",
       "zvec_grep_index_status",
@@ -378,6 +386,10 @@ test("full server contract exposes all tools with stable annotations", async (t)
   assert.equal(annotations.zvec_grep_search.readOnlyHint, false);
   assert.equal(annotations.zvec_grep_search.openWorldHint, true);
   assert.equal(annotations.zvec_grep_rg.openWorldHint, false);
+  assert.equal(annotations.zvec_grep_explore.readOnlyHint, true);
+  assert.equal(annotations.zvec_grep_callers.readOnlyHint, true);
+  assert.equal(annotations.zvec_grep_callees.readOnlyHint, true);
+  assert.equal(annotations.zvec_grep_impact.readOnlyHint, true);
   assert.equal(annotations.zvec_grep_index_status.readOnlyHint, true);
   assert.equal(annotations.zvec_grep_server_status.readOnlyHint, true);
   const index = tools.find((tool) => tool.name === "zvec_grep_index");
@@ -455,9 +467,15 @@ test("full server contract exposes all tools with stable annotations", async (t)
   );
   assert.equal(rg.outputSchema, undefined);
   assert.equal(search.outputSchema, undefined);
-  for (const tool of tools.filter(
-    (tool) => tool.name !== "zvec_grep_rg" && tool.name !== "zvec_grep_search",
-  )) {
+  const textOnlyTools = new Set([
+    "zvec_grep_rg",
+    "zvec_grep_search",
+    "zvec_grep_explore",
+    "zvec_grep_callers",
+    "zvec_grep_callees",
+    "zvec_grep_impact",
+  ]);
+  for (const tool of tools.filter((tool) => !textOnlyTools.has(tool.name))) {
     assert.ok(tool.outputSchema, `${tool.name} must declare structured output`);
   }
 });

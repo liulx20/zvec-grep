@@ -16,7 +16,21 @@ import type { ChunkOptions } from "../types.js";
 import { extractPlainTextFragments } from "../text/extractor.js";
 import { chunkOptionsForMetadata } from "../vector-content.js";
 import { resolveAdapter, type LanguageAdapter } from "./adapter.js";
+import {
+  collectCallSites,
+  extractCallName,
+  isCallNode,
+  type CallSite,
+} from "./call-sites.js";
 import { hasJavascriptTypescriptFunctionValue } from "./families/js-ts.js";
+import {
+  collectInheritanceSites as collectInheritanceSitesFromNode,
+  type InheritanceSite,
+} from "./inheritance-sites.js";
+import {
+  collectRefSites as collectRefSitesFromNode,
+  type RefSite,
+} from "./ref-sites.js";
 
 const DEFAULT_CODE_CHUNK_CHARS = 3600;
 const DEFAULT_CODE_CHUNK_OVERLAP_CHARS = 540;
@@ -824,49 +838,167 @@ function collectFunctionCallNames(node: TSNode): string[] {
   return calls;
 }
 
-function isCallNode(node: TSNode): boolean {
-  return (
-    node.type === "call" ||
-    node.type === "call_expression" ||
-    node.type === "function_call_expression" ||
-    node.type === "method_invocation" ||
-    node.type === "object_creation_expression" ||
-    node.type === "new_expression"
+/**
+ * Collect call sites per indexed function entity.
+ * Must finish inside withParser — SyntaxNode handles are invalid after the tree is freed.
+ */
+export async function collectFunctionCallSites(
+  source: TextSource,
+): Promise<readonly FunctionCallSites[]> {
+  if (source.file.kind !== "code") {
+    return [];
+  }
+  if (isScriptBlockFormat(source.file.format)) {
+    return [];
+  }
+  const adapter = resolveAdapter(source.file.format);
+  if (!adapter || !hasGrammar(source.file.format)) {
+    return [];
+  }
+
+  const collected = await withParser(
+    source.text,
+    source.file.format,
+    (tree) => {
+      const entities: CodeEntity[] = [];
+      walkCodeNode(tree.rootNode, adapter, [], entities);
+      const out: FunctionCallSites[] = [];
+      for (const entity of entities) {
+        if (entity.symbolType !== "function") {
+          continue;
+        }
+        out.push({
+          name: entity.name,
+          symbolType: entity.symbolType,
+          startOffset: entity.node.startIndex,
+          startLine: entity.node.startPosition.row + 1,
+          sites: collectCallSites(entity.node, adapter),
+        });
+      }
+      return out;
+    },
   );
+
+  return collected ?? [];
 }
 
-function extractCallName(node: TSNode): string | undefined {
-  const target =
-    node.childForFieldName("function") ??
-    node.childForFieldName("name") ??
-    node.childForFieldName("constructor") ??
-    node.childForFieldName("type") ??
-    node.namedChildren[0];
-
-  if (!target) {
-    return undefined;
+/**
+ * Collect extends/implements sites per indexed type entity.
+ * Must finish inside withParser — SyntaxNode handles are invalid after free.
+ */
+export async function collectTypeInheritanceSites(
+  source: TextSource,
+): Promise<readonly TypeInheritanceSites[]> {
+  if (source.file.kind !== "code") {
+    return [];
+  }
+  if (isScriptBlockFormat(source.file.format)) {
+    return [];
+  }
+  const adapter = resolveAdapter(source.file.format);
+  if (!adapter || !hasGrammar(source.file.format)) {
+    return [];
   }
 
-  return normalizeCallName(target.text);
+  const language = source.file.format;
+  const collected = await withParser(source.text, language, (tree) => {
+    const entities: CodeEntity[] = [];
+    walkCodeNode(tree.rootNode, adapter, [], entities);
+    const out: TypeInheritanceSites[] = [];
+    for (const entity of entities) {
+      if (entity.symbolType !== "class" && entity.symbolType !== "interface") {
+        continue;
+      }
+      const sites = collectInheritanceSitesFromNode(entity.node, language);
+      if (sites.length === 0) {
+        continue;
+      }
+      out.push({
+        name: entity.name,
+        symbolType: entity.symbolType,
+        startOffset: entity.node.startIndex,
+        startLine: entity.node.startPosition.row + 1,
+        sites,
+      });
+    }
+    return out;
+  });
+
+  return collected ?? [];
 }
 
-function normalizeCallName(value: string): string | undefined {
-  const cleaned = value
-    .replace(/\s+/g, " ")
-    .replace(/^new\s+/, "")
-    .trim();
+export type FunctionCallSites = {
+  name?: string;
+  symbolType: CodeSymbolType;
+  startOffset: number;
+  startLine: number;
+  sites: readonly CallSite[];
+};
 
-  if (
-    cleaned.length === 0 ||
-    cleaned.length > OUTLINE_MAX_LINE_CHARS ||
-    /[\n\r]/.test(cleaned) ||
-    !/[A-Za-z_$][A-Za-z0-9_$]*/.test(cleaned)
-  ) {
-    return undefined;
+export type TypeInheritanceSites = {
+  name?: string;
+  symbolType: CodeSymbolType;
+  startOffset: number;
+  startLine: number;
+  sites: readonly InheritanceSite[];
+};
+
+/**
+ * Collect type / member / decorator refs per indexed symbol entity.
+ * Must finish inside withParser — SyntaxNode handles are invalid after free.
+ */
+export async function collectSymbolRefSites(
+  source: TextSource,
+): Promise<readonly SymbolRefSites[]> {
+  if (source.file.kind !== "code") {
+    return [];
+  }
+  if (isScriptBlockFormat(source.file.format)) {
+    return [];
+  }
+  const adapter = resolveAdapter(source.file.format);
+  if (!adapter || !hasGrammar(source.file.format)) {
+    return [];
   }
 
-  return cleaned;
+  const language = source.file.format;
+  const collected = await withParser(source.text, language, (tree) => {
+    const entities: CodeEntity[] = [];
+    walkCodeNode(tree.rootNode, adapter, [], entities);
+    const out: SymbolRefSites[] = [];
+    for (const entity of entities) {
+      if (
+        entity.symbolType !== "function" &&
+        entity.symbolType !== "class" &&
+        entity.symbolType !== "interface"
+      ) {
+        continue;
+      }
+      const sites = collectRefSitesFromNode(entity.node, adapter, language);
+      if (sites.length === 0) {
+        continue;
+      }
+      out.push({
+        name: entity.name,
+        symbolType: entity.symbolType,
+        startOffset: entity.node.startIndex,
+        startLine: entity.node.startPosition.row + 1,
+        sites,
+      });
+    }
+    return out;
+  });
+
+  return collected ?? [];
 }
+
+export type SymbolRefSites = {
+  name?: string;
+  symbolType: CodeSymbolType;
+  startOffset: number;
+  startLine: number;
+  sites: readonly RefSite[];
+};
 
 function sameNode(left: TSNode, right: TSNode): boolean {
   return (

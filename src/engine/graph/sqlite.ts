@@ -1,0 +1,901 @@
+import { mkdirSync } from "node:fs";
+import { createRequire } from "node:module";
+import { join } from "node:path";
+import type { DatabaseSync as NodeDatabaseSync } from "node:sqlite";
+import { FilePathIndex } from "./imports/path-index.js";
+import { resolveImportPath } from "./imports/resolve-path.js";
+import { NameIndex } from "./name-index.js";
+import { makeRefId } from "./ref-id.js";
+import { resolveRef } from "./resolve.js";
+import type {
+  ContainerNeighbor,
+  FileNeighbor,
+  GraphEdge,
+  GraphEdgeKind,
+  GraphStats,
+  GraphStorage,
+  LocalEdge,
+  PendingRef,
+  RawRef,
+  ResolvePendingOptions,
+  SeedNeighbor,
+  SymContext,
+  SymNode,
+  SymRef,
+  TraverseOpts,
+  UsageRef,
+} from "./types.js";
+
+const SQLITE_GRAPH_SCHEMA_VERSION = 1;
+const SQLITE_GRAPH_SCHEMA = `
+PRAGMA foreign_keys = ON;
+CREATE TABLE IF NOT EXISTS graph_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;
+CREATE TABLE IF NOT EXISTS files (id TEXT PRIMARY KEY) STRICT;
+CREATE TABLE IF NOT EXISTS symbols (
+ id TEXT PRIMARY KEY, file_id TEXT NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+ name TEXT, kind TEXT NOT NULL, is_exported INTEGER NOT NULL CHECK (is_exported IN (0,1))
+) STRICT;
+CREATE TABLE IF NOT EXISTS pending_refs (
+ id TEXT PRIMARY KEY, owner_id TEXT NOT NULL,
+ owner_is_file INTEGER NOT NULL CHECK (owner_is_file IN (0,1)),
+ ref_name TEXT NOT NULL, ref_kind TEXT NOT NULL, line INTEGER NOT NULL,
+ status TEXT NOT NULL CHECK (status IN ('pending','failed'))
+) STRICT;
+CREATE TABLE IF NOT EXISTS contains (
+ parent_id TEXT NOT NULL REFERENCES symbols(id) ON DELETE CASCADE,
+ child_id TEXT NOT NULL REFERENCES symbols(id) ON DELETE CASCADE,
+ PRIMARY KEY(parent_id,child_id)
+) STRICT, WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS symbol_edges (
+ src_id TEXT NOT NULL REFERENCES symbols(id) ON DELETE CASCADE,
+ dst_id TEXT NOT NULL REFERENCES symbols(id) ON DELETE CASCADE,
+ kind TEXT NOT NULL CHECK (kind IN ('CALLS','REFS','INHERITS')),
+ rel TEXT NOT NULL, count INTEGER NOT NULL DEFAULT 1,
+ first_line INTEGER NOT NULL DEFAULT 0, ref_name TEXT NOT NULL DEFAULT '',
+ PRIMARY KEY(src_id,dst_id,kind,rel)
+) STRICT, WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS file_imports (
+ src_file_id TEXT NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+ dst_file_id TEXT NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+ spec TEXT NOT NULL, PRIMARY KEY(src_file_id,dst_file_id,spec)
+) STRICT, WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS symbols_file_id_idx ON symbols(file_id);
+CREATE INDEX IF NOT EXISTS symbols_name_idx ON symbols(name) WHERE name IS NOT NULL;
+CREATE INDEX IF NOT EXISTS symbol_edges_src_kind_idx ON symbol_edges(src_id,kind);
+CREATE INDEX IF NOT EXISTS symbol_edges_dst_kind_idx ON symbol_edges(dst_id,kind);
+CREATE INDEX IF NOT EXISTS contains_child_idx ON contains(child_id);
+CREATE INDEX IF NOT EXISTS file_imports_dst_idx ON file_imports(dst_file_id);
+CREATE INDEX IF NOT EXISTS pending_refs_name_idx ON pending_refs(ref_name,status);
+CREATE INDEX IF NOT EXISTS pending_refs_owner_idx ON pending_refs(owner_id);
+`;
+
+type EdgeRow = {
+  src_id: string;
+  dst_id: string;
+  kind: "CALLS" | "REFS" | "INHERITS";
+  rel: string;
+  count: number;
+  first_line: number;
+  ref_name: string;
+};
+type RefRow = {
+  id: string;
+  owner_id: string;
+  owner_is_file: number;
+  ref_name: string;
+  ref_kind: string;
+  line: number;
+  status: "pending" | "failed";
+};
+type SymbolRow = {
+  id: string;
+  file_id: string;
+  name: string | null;
+  kind: string;
+  is_exported: number;
+};
+const REL_KINDS = new Set<GraphEdgeKind>(["CALLS", "REFS", "INHERITS"]);
+const ALL_EDGE_KINDS: readonly GraphEdgeKind[] = [
+  "CALLS",
+  "REFS",
+  "INHERITS",
+  "CONTAINS",
+  "DEFINES",
+  "IMPORTS",
+];
+const PER_NAME_CEILING = 500;
+const require = createRequire(import.meta.url);
+
+/** Direct SQLite graph: persistence and indexed queries without loading the full graph. */
+export class SqliteGraphStorage implements GraphStorage {
+  readonly available = true;
+  private readonly db: NodeDatabaseSync;
+  private readonly readOnly: boolean;
+  private closed = false;
+
+  constructor(
+    directory: string,
+    options: { readOnly?: boolean; inMemory?: boolean } = {},
+  ) {
+    if (!options.inMemory) mkdirSync(directory, { recursive: true });
+    this.readOnly = options.readOnly ?? false;
+    const { DatabaseSync } =
+      require("node:sqlite") as typeof import("node:sqlite");
+    this.db = new DatabaseSync(
+      options.inMemory ? ":memory:" : join(directory, "graph.sqlite"),
+      {
+        readOnly: this.readOnly,
+        allowExtension: false,
+        enableForeignKeyConstraints: true,
+      },
+    );
+    if (!this.readOnly) {
+      this.db.exec("PRAGMA journal_mode=WAL");
+      this.db.exec("PRAGMA synchronous=NORMAL");
+      this.initializeSchema();
+    } else if (this.hasSchema()) this.ensureVersion();
+  }
+
+  private initializeSchema(): void {
+    this.assertOpen();
+    if (!this.readOnly) {
+      this.db.exec(SQLITE_GRAPH_SCHEMA);
+      this.ensureVersion();
+    }
+  }
+  async checkpoint(): Promise<void> {
+    this.assertOpen();
+    if (!this.readOnly) this.db.exec("PRAGMA wal_checkpoint(PASSIVE)");
+  }
+  close(): void {
+    if (!this.closed) {
+      this.db.close();
+      this.closed = true;
+    }
+  }
+
+  upsertFileGraph(
+    fileId: string,
+    nodes: readonly SymNode[],
+    edges: readonly LocalEdge[],
+    refs: readonly RawRef[],
+  ): void {
+    this.assertWritable();
+    const oldIds = this.symbolIdsForFile(fileId);
+    const incoming = this.incomingSnapshots(fileId);
+    this.transaction(() => {
+      this.deletePendingOwners(fileId, oldIds);
+      this.db.prepare("INSERT OR IGNORE INTO files(id) VALUES (?)").run(fileId);
+      this.db.prepare("DELETE FROM symbols WHERE file_id=?").run(fileId);
+      this.db
+        .prepare("DELETE FROM file_imports WHERE src_file_id=?")
+        .run(fileId);
+      const insert = this.db.prepare(
+        "INSERT INTO symbols(id,file_id,name,kind,is_exported) VALUES (?,?,?,?,?)",
+      );
+      for (const node of nodes)
+        insert.run(
+          node.id,
+          fileId,
+          node.name ?? null,
+          node.kind,
+          node.is_exported ? 1 : 0,
+        );
+      for (const edge of edges) this.insertLocalEdge(edge);
+      for (const ref of refs) this.insertRef(ref, fileId);
+      let occurrence = 0;
+      for (const snap of incoming)
+        for (let i = 0; i < Math.max(1, snap.count); i++)
+          this.insertRef(
+            {
+              owner: snap.src_id,
+              id: makeRefId(
+                snap.src_id,
+                snap.ref_name,
+                snap.rel,
+                snap.first_line,
+                occurrence++,
+              ),
+              ref_name: snap.ref_name,
+              ref_kind: snap.rel,
+              line: snap.first_line,
+            },
+            fileId,
+          );
+    });
+  }
+
+  deleteFileGraph(fileId: string): void {
+    this.assertWritable();
+    const oldIds = this.symbolIdsForFile(fileId);
+    const incoming = this.incomingSnapshots(fileId);
+    this.transaction(() => {
+      this.deletePendingOwners(fileId, oldIds);
+      this.db.prepare("DELETE FROM files WHERE id=?").run(fileId);
+      let occurrence = 0;
+      for (const snap of incoming)
+        for (let i = 0; i < Math.max(1, snap.count); i++)
+          this.insertRef(
+            {
+              owner: snap.src_id,
+              id: makeRefId(
+                snap.src_id,
+                snap.ref_name,
+                snap.rel,
+                snap.first_line,
+                occurrence++,
+              ),
+              ref_name: snap.ref_name,
+              ref_kind: snap.rel,
+              line: snap.first_line,
+            },
+            fileId,
+          );
+    });
+  }
+
+  async resolvePending(options: ResolvePendingOptions = {}): Promise<void> {
+    this.assertWritable();
+    const names = new NameIndex();
+    names.load(
+      this.all<SymbolRow>(
+        "SELECT id,file_id,name,kind,is_exported FROM symbols WHERE name IS NOT NULL",
+      ).map((r) => ({
+        id: r.id,
+        fileId: r.file_id,
+        name: r.name!,
+        kind: r.kind,
+      })),
+    );
+    const paths = new FilePathIndex(options.files ?? []);
+    this.transaction(() => {
+      for (const ref of this.retryableRefs()) {
+        if (ref.owner_is_file || ref.ref_kind === "import") {
+          this.resolveImport(ref, paths);
+        } else {
+          this.resolveSymbol(ref, names);
+        }
+      }
+    });
+  }
+
+  symbolScope(root: string, depth: number, limit: number): string[] {
+    return this.traverse(root, {
+      edgeKinds: ["CALLS", "REFS"],
+      direction: "both",
+      maxDepth: depth,
+      limit,
+    }).map((r) => r.id);
+  }
+  fileScope(fileId: string, depth: number, limit: number): string[] {
+    return this.bfs(fileId, ["IMPORTS"], "both", depth, limit).map((r) => r.id);
+  }
+
+  expandSeeds(symIds: readonly string[], limit: number): SeedNeighbor[] {
+    const wanted = new Set(symIds),
+      per = new Map(symIds.map((id) => [id, 0])),
+      out: SeedNeighbor[] = [];
+    for (const edge of this.adjacentEdges(symIds, ["CALLS"], "both"))
+      for (const sid of [edge.src, edge.dst]) {
+        if (!wanted.has(sid) || (per.get(sid) ?? 0) >= limit) continue;
+        out.push({
+          sid,
+          id: edge.src === sid ? edge.dst : edge.src,
+          count: edge.count,
+          direction: edge.src === sid ? "out" : "in",
+        });
+        per.set(sid, (per.get(sid) ?? 0) + 1);
+      }
+    return out;
+  }
+
+  expandContainers(
+    symIds: readonly string[],
+    limit: number,
+  ): ContainerNeighbor[] {
+    const out: ContainerNeighbor[] = [];
+    for (const sid of symIds) {
+      const parent = this.one<{ parent_id: string }>(
+        "SELECT parent_id FROM contains WHERE child_id=?",
+        sid,
+      )?.parent_id;
+      if (!parent) continue;
+      const sibs = this.all<{ child_id: string }>(
+        "SELECT child_id FROM contains WHERE parent_id=? AND child_id<>? LIMIT ?",
+        parent,
+        sid,
+        limit,
+      );
+      if (sibs.length === 0) out.push({ sid, parent_id: parent, sib_id: null });
+      else
+        for (const s of sibs)
+          out.push({ sid, parent_id: parent, sib_id: s.child_id });
+    }
+    return out;
+  }
+
+  expandFileNeighbors(
+    fileIds: readonly string[],
+    limit: number,
+  ): FileNeighbor[] {
+    const wanted = new Set(fileIds),
+      per = new Map(fileIds.map((id) => [id, 0])),
+      out: FileNeighbor[] = [];
+    for (const edge of this.adjacentEdges(fileIds, ["IMPORTS"], "both"))
+      for (const fid of [edge.src, edge.dst]) {
+        if (!wanted.has(fid) || (per.get(fid) ?? 0) >= limit) continue;
+        out.push({ fid, id: edge.src === fid ? edge.dst : edge.src });
+        per.set(fid, (per.get(fid) ?? 0) + 1);
+      }
+    return out;
+  }
+
+  callers(id: string, depth: number, limit: number): SymRef[] {
+    return this.bfs(id, ["CALLS"], "incoming", depth, limit);
+  }
+  callees(id: string, depth: number, limit: number): SymRef[] {
+    if (depth <= 1)
+      return this.all<EdgeRow>(
+        "SELECT * FROM symbol_edges WHERE src_id=? AND kind='CALLS' ORDER BY count DESC LIMIT ?",
+        id,
+        limit,
+      ).map((e) => ({
+        id: e.dst_id,
+        kind: this.symbolKind(e.dst_id),
+        count: e.count,
+      }));
+    return this.bfs(id, ["CALLS"], "outgoing", depth, limit);
+  }
+  impact(id: string, depth: number, limit: number): SymRef[] {
+    return this.bfs(id, ["CALLS", "REFS"], "incoming", depth, limit);
+  }
+  usages(id: string, limit: number): UsageRef[] {
+    return this.all<EdgeRow>(
+      "SELECT * FROM symbol_edges WHERE dst_id=? ORDER BY first_line LIMIT ?",
+      id,
+      limit,
+    ).map((e) => ({
+      id: e.src_id,
+      rel: e.rel,
+      first_line: e.first_line,
+      count: e.count,
+    }));
+  }
+
+  pathBetween(from: string, to: string, maxDepth: number): SymRef[] | null {
+    if (from === to) return [{ id: from, kind: this.symbolKind(from) }];
+    const parent = new Map<string, string | null>([[from, null]]);
+    let frontier = [from];
+    for (
+      let depth = 0;
+      depth < clampDepth(maxDepth) && frontier.length;
+      depth++
+    ) {
+      const next: string[] = [];
+      for (const edge of this.adjacentEdges(frontier, ["CALLS"], "outgoing")) {
+        if (parent.has(edge.dst)) continue;
+        parent.set(edge.dst, edge.src);
+        if (edge.dst === to) return this.reconstructPath(parent, to);
+        next.push(edge.dst);
+      }
+      frontier = next;
+    }
+    return null;
+  }
+
+  hierarchy(
+    id: string,
+    direction: "bases" | "derived",
+    limit: number,
+  ): SymRef[] {
+    return this.bfs(
+      id,
+      ["INHERITS"],
+      direction === "bases" ? "outgoing" : "incoming",
+      10,
+      limit,
+    );
+  }
+  members(id: string): SymRef[] {
+    return this.all<{ id: string; kind: string }>(
+      "SELECT s.id,s.kind FROM contains c JOIN symbols s ON s.id=c.child_id WHERE c.parent_id=?",
+      id,
+    );
+  }
+  deadCode(limit: number): SymRef[] {
+    return this.all<{ id: string; kind: string }>(
+      `SELECT s.id,s.kind FROM symbols s WHERE s.is_exported=0 AND s.kind IN ('function','method') AND NOT EXISTS(SELECT 1 FROM symbol_edges e WHERE e.dst_id=s.id AND e.kind='CALLS') LIMIT ?`,
+      limit,
+    );
+  }
+
+  context(id: string): SymContext {
+    const containers: SymRef[] = [];
+    let current = id;
+    for (let i = 0; i < 5; i++) {
+      const p = this.one<{ parent_id: string }>(
+        "SELECT parent_id FROM contains WHERE child_id=?",
+        current,
+      );
+      if (!p) break;
+      containers.push({ id: p.parent_id, kind: this.symbolKind(p.parent_id) });
+      current = p.parent_id;
+    }
+    const outgoing = this.all<EdgeRow>(
+      "SELECT * FROM symbol_edges WHERE src_id=? LIMIT 100",
+      id,
+    ).map((e) => ({ id: e.dst_id, rel: e.rel }));
+    return {
+      focal: { id, kind: this.symbolKind(id) },
+      containers,
+      members: this.members(id),
+      incoming: this.usages(id, 100),
+      outgoing,
+    };
+  }
+
+  traverse(id: string, opts: TraverseOpts): SymRef[] {
+    const found = this.bfs(
+      id,
+      opts.edgeKinds,
+      opts.direction,
+      opts.maxDepth,
+      opts.limit,
+    );
+    return opts.includeStart
+      ? [{ id, kind: this.symbolKind(id) }, ...found].slice(0, opts.limit)
+      : found;
+  }
+
+  outgoingEdges(
+    nodeIds: readonly string[],
+    edgeKinds: readonly GraphEdgeKind[] = ALL_EDGE_KINDS,
+    limit = 1_000,
+  ): GraphEdge[] {
+    return this.queryDirectionalEdges(nodeIds, edgeKinds, "outgoing").slice(
+      0,
+      Math.max(0, limit),
+    );
+  }
+
+  incomingEdges(
+    nodeIds: readonly string[],
+    edgeKinds: readonly GraphEdgeKind[] = ALL_EDGE_KINDS,
+    limit = 1_000,
+  ): GraphEdge[] {
+    return this.queryDirectionalEdges(nodeIds, edgeKinds, "incoming").slice(
+      0,
+      Math.max(0, limit),
+    );
+  }
+
+  edges(
+    nodeIds: readonly string[],
+    edgeKinds: readonly GraphEdgeKind[],
+  ): GraphEdge[] {
+    if (nodeIds.length === 0) return [];
+    const ids = JSON.stringify([...new Set(nodeIds)]),
+      out: GraphEdge[] = [];
+    const rel = edgeKinds.filter((k) => REL_KINDS.has(k));
+    if (rel.length) {
+      const p = rel.map(() => "?").join(",");
+      out.push(
+        ...this.all<EdgeRow>(
+          `SELECT * FROM symbol_edges WHERE src_id IN(SELECT value FROM json_each(?)) AND dst_id IN(SELECT value FROM json_each(?)) AND kind IN(${p})`,
+          ids,
+          ids,
+          ...rel,
+        ).map(toGraphEdge),
+      );
+    }
+    if (edgeKinds.includes("CONTAINS"))
+      out.push(
+        ...this.all<{ parent_id: string; child_id: string }>(
+          `SELECT * FROM contains WHERE parent_id IN(SELECT value FROM json_each(?)) AND child_id IN(SELECT value FROM json_each(?))`,
+          ids,
+          ids,
+        ).map((r) =>
+          structuralEdge(r.parent_id, r.child_id, "CONTAINS", "contains"),
+        ),
+      );
+    if (edgeKinds.includes("DEFINES"))
+      out.push(
+        ...this.all<{ file_id: string; id: string }>(
+          `SELECT file_id,id FROM symbols WHERE file_id IN(SELECT value FROM json_each(?)) AND id IN(SELECT value FROM json_each(?))`,
+          ids,
+          ids,
+        ).map((r) => structuralEdge(r.file_id, r.id, "DEFINES", "defines")),
+      );
+    if (edgeKinds.includes("IMPORTS"))
+      out.push(
+        ...this.all<{ src_file_id: string; dst_file_id: string; spec: string }>(
+          `SELECT * FROM file_imports WHERE src_file_id IN(SELECT value FROM json_each(?)) AND dst_file_id IN(SELECT value FROM json_each(?))`,
+          ids,
+          ids,
+        ).map((r) =>
+          structuralEdge(r.src_file_id, r.dst_file_id, "IMPORTS", r.spec),
+        ),
+      );
+    return out;
+  }
+
+  stats(): GraphStats {
+    const count = (table: string, where = "") =>
+      Number(
+        this.one<{ count: number }>(
+          `SELECT count(*) count FROM ${table} ${where}`,
+        )?.count ?? 0,
+      );
+    return {
+      symCount: count("symbols"),
+      fileCount: count("files"),
+      refCount: count("pending_refs"),
+      callsCount: count("symbol_edges", "WHERE kind='CALLS'"),
+      refsCount: count("symbol_edges", "WHERE kind='REFS'"),
+      inheritsCount: count("symbol_edges", "WHERE kind='INHERITS'"),
+    };
+  }
+
+  private bfs(
+    start: string,
+    kinds: readonly GraphEdgeKind[],
+    direction: "outgoing" | "incoming" | "both",
+    maxDepth: number,
+    limit: number,
+  ): SymRef[] {
+    if (limit <= 0) return [];
+    const seen = new Set([start]),
+      ordered: string[] = [];
+    let frontier = [start];
+    for (
+      let depth = 0;
+      depth < clampDepth(maxDepth) && frontier.length;
+      depth++
+    ) {
+      const next: string[] = [];
+      const active = new Set(frontier);
+      for (const edge of this.adjacentEdges(frontier, kinds, direction))
+        for (const id of adjacentTargets(edge, active, direction)) {
+          if (seen.has(id)) continue;
+          seen.add(id);
+          ordered.push(id);
+          next.push(id);
+          if (ordered.length >= Math.max(0, limit))
+            return this.refsForIds(ordered);
+        }
+      frontier = next;
+    }
+    return this.refsForIds(ordered);
+  }
+
+  private adjacentEdges(
+    idsInput: readonly string[],
+    kinds: readonly GraphEdgeKind[],
+    direction: "outgoing" | "incoming" | "both",
+  ): GraphEdge[] {
+    if (direction === "outgoing") {
+      return this.outgoingEdges(idsInput, kinds, Number.MAX_SAFE_INTEGER);
+    }
+    if (direction === "incoming") {
+      return this.incomingEdges(idsInput, kinds, Number.MAX_SAFE_INTEGER);
+    }
+    return dedupeEdges([
+      ...this.outgoingEdges(idsInput, kinds, Number.MAX_SAFE_INTEGER),
+      ...this.incomingEdges(idsInput, kinds, Number.MAX_SAFE_INTEGER),
+    ]);
+  }
+
+  private queryDirectionalEdges(
+    idsInput: readonly string[],
+    kinds: readonly GraphEdgeKind[],
+    direction: "outgoing" | "incoming",
+  ): GraphEdge[] {
+    if (!idsInput.length) return [];
+    const ids = JSON.stringify([...new Set(idsInput)]),
+      out: GraphEdge[] = [];
+    const rel = kinds.filter((k) => REL_KINDS.has(k));
+    if (rel.length) {
+      const p = rel.map(() => "?").join(",");
+      const sides = [direction === "outgoing" ? "src_id" : "dst_id"];
+      for (const side of sides)
+        out.push(
+          ...this.all<EdgeRow>(
+            `SELECT * FROM symbol_edges WHERE ${side} IN(SELECT value FROM json_each(?)) AND kind IN(${p})`,
+            ids,
+            ...rel,
+          ).map(toGraphEdge),
+        );
+    }
+    if (kinds.includes("CONTAINS")) {
+      const sides = [direction === "outgoing" ? "parent_id" : "child_id"];
+      for (const side of sides)
+        out.push(
+          ...this.all<{ parent_id: string; child_id: string }>(
+            `SELECT * FROM contains WHERE ${side} IN(SELECT value FROM json_each(?))`,
+            ids,
+          ).map((r) =>
+            structuralEdge(r.parent_id, r.child_id, "CONTAINS", "contains"),
+          ),
+        );
+    }
+    if (kinds.includes("DEFINES")) {
+      const sides = [direction === "outgoing" ? "file_id" : "id"];
+      for (const side of sides)
+        out.push(
+          ...this.all<{ file_id: string; id: string }>(
+            `SELECT file_id,id FROM symbols WHERE ${side} IN(SELECT value FROM json_each(?))`,
+            ids,
+          ).map((r) => structuralEdge(r.file_id, r.id, "DEFINES", "defines")),
+        );
+    }
+    if (kinds.includes("IMPORTS")) {
+      const sides = [direction === "outgoing" ? "src_file_id" : "dst_file_id"];
+      for (const side of sides)
+        out.push(
+          ...this.all<{
+            src_file_id: string;
+            dst_file_id: string;
+            spec: string;
+          }>(
+            `SELECT * FROM file_imports WHERE ${side} IN(SELECT value FROM json_each(?))`,
+            ids,
+          ).map((r) =>
+            structuralEdge(r.src_file_id, r.dst_file_id, "IMPORTS", r.spec),
+          ),
+        );
+    }
+    return dedupeEdges(out);
+  }
+
+  private refsForIds(ids: readonly string[]): SymRef[] {
+    if (!ids.length) return [];
+    const kinds = new Map(
+      this.all<{ id: string; kind: string }>(
+        "SELECT id,kind FROM symbols WHERE id IN(SELECT value FROM json_each(?))",
+        JSON.stringify(ids),
+      ).map((r) => [r.id, r.kind]),
+    );
+    return ids.map((id) => ({ id, kind: kinds.get(id) }));
+  }
+
+  private resolveSymbol(ref: RefRow, names: NameIndex): void {
+    const owner = this.one<{ file_id: string }>(
+      "SELECT file_id FROM symbols WHERE id=?",
+      ref.owner_id,
+    );
+    if (!owner) return this.failRef(ref.id);
+    const pending: PendingRef = {
+      src: ref.owner_id,
+      src_file: owner.file_id,
+      ref_id: ref.id,
+      ref_name: ref.ref_name,
+      ref_kind: ref.ref_kind,
+      line: ref.line,
+      status: ref.status,
+    };
+    const preferred = this.all<{ dst_file_id: string }>(
+      "SELECT dst_file_id FROM file_imports WHERE src_file_id=?",
+      owner.file_id,
+    ).map((r) => r.dst_file_id);
+    const result = resolveRef(pending, names, preferred);
+    if (result.status === "external") return this.deleteRef(ref.id);
+    if (result.status !== "resolved") return this.failRef(ref.id);
+    this.db
+      .prepare(
+        `INSERT INTO symbol_edges(src_id,dst_id,kind,rel,count,first_line,ref_name) VALUES(?,?,?,?,1,?,?) ON CONFLICT(src_id,dst_id,kind,rel) DO UPDATE SET count=count+1,first_line=min(first_line,excluded.first_line)`,
+      )
+      .run(
+        ref.owner_id,
+        result.dst,
+        result.edgeKind,
+        ref.ref_kind,
+        ref.line,
+        ref.ref_name,
+      );
+    this.deleteRef(ref.id);
+  }
+
+  private resolveImport(ref: RefRow, paths: FilePathIndex): void {
+    const from = paths.getById(ref.owner_id);
+    if (!from) return this.failRef(ref.id);
+    const result = resolveImportPath(
+      ref.ref_name,
+      ref.owner_id,
+      from.format,
+      paths,
+    );
+    if (result.status === "external") return this.deleteRef(ref.id);
+    if (result.status !== "resolved") return this.failRef(ref.id);
+    this.db
+      .prepare(
+        "INSERT OR IGNORE INTO file_imports(src_file_id,dst_file_id,spec) VALUES(?,?,?)",
+      )
+      .run(ref.owner_id, result.fileId, ref.ref_name);
+    this.deleteRef(ref.id);
+  }
+
+  private retryableRefs(): RefRow[] {
+    const refs = this.all<RefRow>("SELECT * FROM pending_refs"),
+      counts = new Map<string, number>();
+    for (const r of refs)
+      if (r.status === "failed")
+        counts.set(r.ref_name, (counts.get(r.ref_name) ?? 0) + 1);
+    return refs.filter(
+      (r) =>
+        r.status === "pending" ||
+        (counts.get(r.ref_name) ?? 0) <= PER_NAME_CEILING,
+    );
+  }
+
+  private insertLocalEdge(e: LocalEdge): void {
+    if (e.kind === "CONTAINS") {
+      this.db
+        .prepare(
+          "INSERT OR REPLACE INTO contains(parent_id,child_id) VALUES(?,?)",
+        )
+        .run(e.src, e.dst);
+      return;
+    }
+    this.db
+      .prepare(
+        "INSERT OR REPLACE INTO symbol_edges(src_id,dst_id,kind,rel,count,first_line,ref_name) VALUES(?,?,?,?,?,?,?)",
+      )
+      .run(e.src, e.dst, e.kind, e.rel, e.count, e.first_line, e.ref_name);
+  }
+  private insertRef(r: RawRef, fallback: string): void {
+    this.db
+      .prepare(
+        "INSERT OR REPLACE INTO pending_refs(id,owner_id,owner_is_file,ref_name,ref_kind,line,status) VALUES(?,?,?,?,?,?,'pending')",
+      )
+      .run(
+        r.id,
+        r.owner || fallback,
+        r.owner_is_file || !r.owner ? 1 : 0,
+        r.ref_name,
+        r.ref_kind,
+        r.line,
+      );
+  }
+  private incomingSnapshots(fileId: string): EdgeRow[] {
+    return this.all<EdgeRow>(
+      `SELECT e.* FROM symbol_edges e JOIN symbols d ON d.id=e.dst_id JOIN symbols s ON s.id=e.src_id WHERE d.file_id=? AND s.file_id<>?`,
+      fileId,
+      fileId,
+    );
+  }
+  private symbolIdsForFile(fileId: string): string[] {
+    return this.all<{ id: string }>(
+      "SELECT id FROM symbols WHERE file_id=?",
+      fileId,
+    ).map((r) => r.id);
+  }
+  private deletePendingOwners(fileId: string, ids: readonly string[]): void {
+    this.db
+      .prepare("DELETE FROM pending_refs WHERE owner_is_file=1 AND owner_id=?")
+      .run(fileId);
+    if (ids.length)
+      this.db
+        .prepare(
+          "DELETE FROM pending_refs WHERE owner_id IN(SELECT value FROM json_each(?))",
+        )
+        .run(JSON.stringify(ids));
+  }
+  private reconstructPath(
+    parent: Map<string, string | null>,
+    end: string,
+  ): SymRef[] {
+    const ids: string[] = [];
+    let cur: string | null = end;
+    while (cur) {
+      ids.push(cur);
+      cur = parent.get(cur) ?? null;
+    }
+    return this.refsForIds(ids.reverse());
+  }
+  private symbolKind(id: string): string | undefined {
+    return this.one<{ kind: string }>("SELECT kind FROM symbols WHERE id=?", id)
+      ?.kind;
+  }
+  private failRef(id: string): void {
+    this.db
+      .prepare("UPDATE pending_refs SET status='failed' WHERE id=?")
+      .run(id);
+  }
+  private deleteRef(id: string): void {
+    this.db.prepare("DELETE FROM pending_refs WHERE id=?").run(id);
+  }
+  private transaction(work: () => void): void {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      work();
+      this.db.exec("COMMIT");
+    } catch (e) {
+      this.db.exec("ROLLBACK");
+      throw e;
+    }
+  }
+  private all<T>(sql: string, ...params: Array<string | number>): T[] {
+    this.assertOpen();
+    return this.db.prepare(sql).all(...params) as T[];
+  }
+  private one<T>(
+    sql: string,
+    ...params: Array<string | number>
+  ): T | undefined {
+    this.assertOpen();
+    return this.db.prepare(sql).get(...params) as T | undefined;
+  }
+  private assertOpen(): void {
+    if (this.closed) throw new Error("SqliteGraphStorage is closed");
+  }
+  private assertWritable(): void {
+    this.assertOpen();
+    if (this.readOnly) throw new Error("SqliteGraphStorage is read-only");
+  }
+  private hasSchema(): boolean {
+    return (
+      this.db
+        .prepare(
+          "SELECT 1 FROM sqlite_master WHERE type='table' AND name='graph_meta'",
+        )
+        .get() !== undefined
+    );
+  }
+  private ensureVersion(): void {
+    const row = this.db
+      .prepare("SELECT value FROM graph_meta WHERE key='schema_version'")
+      .get() as { value: string } | undefined;
+    if (!row) {
+      if (this.readOnly)
+        throw new Error("SQLite graph schema version is missing");
+      this.db
+        .prepare("INSERT INTO graph_meta(key,value) VALUES('schema_version',?)")
+        .run(String(SQLITE_GRAPH_SCHEMA_VERSION));
+    } else if (Number(row.value) !== SQLITE_GRAPH_SCHEMA_VERSION)
+      throw new Error(
+        `Unsupported SQLite graph schema version: ${row.value}; expected ${SQLITE_GRAPH_SCHEMA_VERSION}`,
+      );
+  }
+}
+
+function toGraphEdge(r: EdgeRow): GraphEdge {
+  return {
+    src: r.src_id,
+    dst: r.dst_id,
+    kind: r.kind,
+    rel: r.rel,
+    count: r.count,
+    first_line: r.first_line,
+    ref_name: r.ref_name,
+  };
+}
+function structuralEdge(
+  src: string,
+  dst: string,
+  kind: GraphEdgeKind,
+  rel: string,
+): GraphEdge {
+  return { src, dst, kind, rel, count: 1, first_line: 0, ref_name: rel };
+}
+function dedupeEdges(edges: readonly GraphEdge[]): GraphEdge[] {
+  const seen = new Set<string>();
+  return edges.filter((e) => {
+    const k = `${e.src}\0${e.dst}\0${e.kind}\0${e.rel}`;
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+}
+function adjacentTargets(
+  edge: GraphEdge,
+  active: ReadonlySet<string>,
+  direction: "outgoing" | "incoming" | "both",
+): string[] {
+  const out: string[] = [];
+  if (direction !== "incoming" && active.has(edge.src)) out.push(edge.dst);
+  if (direction !== "outgoing" && active.has(edge.dst)) out.push(edge.src);
+  return out;
+}
+function clampDepth(n: number): number {
+  return Math.max(0, Math.min(32, Math.floor(n)));
+}
