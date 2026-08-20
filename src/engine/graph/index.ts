@@ -5,6 +5,7 @@ export type {
   GraphBackend,
   GraphEdge,
   GraphEdgeKind,
+  InducedEdgesResult,
   GraphReader,
   GraphStats,
   GraphStorage,

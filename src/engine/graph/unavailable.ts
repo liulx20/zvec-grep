@@ -90,8 +90,8 @@ export class UnavailableGraphStorage implements GraphStorage {
   incomingEdges(): GraphEdge[] {
     return [];
   }
-  edges(): GraphEdge[] {
-    return [];
+  edges(): { edges: GraphEdge[]; truncated: boolean } {
+    return { edges: [], truncated: false };
   }
   stats(): GraphStats {
     return {

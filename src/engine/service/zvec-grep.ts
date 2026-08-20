@@ -1073,6 +1073,7 @@ async function exploreOpenWorkspaceIndex(
     roots: result.roots.map(mapExploreNode),
     nodes: result.nodes.map(mapExploreNode),
     edges: result.edges.map((edge) => ({ ...edge })),
+    edgesTruncated: result.edgesTruncated,
     callPaths: result.callPaths.map((path) => ({
       ...path,
       nodes: [...path.nodes],
@@ -1296,20 +1297,39 @@ function mergeSearchRelationships(
 
 function mergeGraphExpandDiagnostics(
   parts: readonly (
-    { available: boolean; seeds: number; neighborsAdded: number } | undefined
+    | {
+        available: boolean;
+        unavailableReason?: string;
+        seeds: number;
+        neighborsAdded: number;
+      }
+    | undefined
   )[],
-): { available: boolean; seeds: number; neighborsAdded: number } | undefined {
+):
+  | {
+      available: boolean;
+      unavailableReason?: string;
+      seeds: number;
+      neighborsAdded: number;
+    }
+  | undefined {
   const present = parts.filter(
     (
       part,
-    ): part is { available: boolean; seeds: number; neighborsAdded: number } =>
-      part !== undefined,
+    ): part is {
+      available: boolean;
+      unavailableReason?: string;
+      seeds: number;
+      neighborsAdded: number;
+    } => part !== undefined,
   );
   if (present.length === 0) {
     return undefined;
   }
   return {
     available: present.some((part) => part.available),
+    unavailableReason: present.find((part) => part.unavailableReason)
+      ?.unavailableReason,
     seeds: present.reduce((sum, part) => sum + part.seeds, 0),
     neighborsAdded: present.reduce((sum, part) => sum + part.neighborsAdded, 0),
   };

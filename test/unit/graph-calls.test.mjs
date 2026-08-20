@@ -101,6 +101,34 @@ export function run() { return map(); }
   );
 });
 
+test("qualified builtin calls do not fall back to a local bare name", async () => {
+  const file = codeFile("qualified-builtin.ts");
+  const source = {
+    kind: "text",
+    file,
+    text: `
+export function log() { return 1; }
+export function run() { console.log("external"); }
+`,
+  };
+  const fragments = await new CodeExtractor().extract(source);
+  const graphInput = await extractFileGraph(source, fragments);
+  const log = graphInput.nodes.find((node) => node.name === "log");
+  const run = graphInput.nodes.find((node) => node.name === "run");
+  assert.ok(log && run);
+  assert.equal(
+    graphInput.edges.some(
+      (edge) =>
+        edge.kind === "CALLS" && edge.src === run.id && edge.dst === log.id,
+    ),
+    false,
+  );
+  assert.equal(
+    graphInput.refs.some((ref) => ref.ref_name === "console.log"),
+    false,
+  );
+});
+
 test("language-aware pending refs resolve cross-file builtin names", async () => {
   const graph = new SqliteGraphStorage("", { inMemory: true });
   const callerFile = { ...codeFile("caller.ts"), id: "caller-file" };

@@ -56,6 +56,11 @@ export type GraphEdge = {
   ref_name: string;
 };
 
+export type InducedEdgesResult = {
+  edges: GraphEdge[];
+  truncated: boolean;
+};
+
 export type TraverseOpts = {
   edgeKinds: readonly GraphEdgeKind[];
   direction: "outgoing" | "incoming" | "both";
@@ -176,7 +181,8 @@ export interface GraphReader {
   edges(
     nodeIds: readonly string[],
     edgeKinds: readonly GraphEdgeKind[],
-  ): GraphEdge[];
+    limit: number,
+  ): InducedEdgesResult;
 
   stats(): GraphStats;
 }

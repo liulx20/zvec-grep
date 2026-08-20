@@ -123,17 +123,21 @@ export class SqlitePendingRefResolver extends SqliteGraphWriter {
   }
 
   private retryableRefs(): RefRow[] {
-    const refs = this.all<RefRow>("SELECT * FROM pending_refs");
-    const counts = new Map<string, number>();
-    for (const ref of refs) {
-      if (ref.status === "failed") {
-        counts.set(ref.ref_name, (counts.get(ref.ref_name) ?? 0) + 1);
-      }
-    }
-    return refs.filter(
-      (ref) =>
-        ref.status === "pending" ||
-        (counts.get(ref.ref_name) ?? 0) <= PER_NAME_CEILING,
+    return this.all<RefRow>(
+      `SELECT id,owner_id,owner_is_file,ref_name,ref_kind,line,status,imported_name,local_name,source_language
+       FROM (
+         SELECT pending_refs.*,
+                row_number() OVER (PARTITION BY ref_name ORDER BY id) AS retry_rank
+         FROM pending_refs
+         WHERE status='failed'
+       )
+       WHERE retry_rank<=?
+       UNION ALL
+       SELECT id,owner_id,owner_is_file,ref_name,ref_kind,line,status,imported_name,local_name,source_language
+       FROM pending_refs
+       WHERE status='pending'
+       ORDER BY ref_name,id`,
+      PER_NAME_CEILING,
     );
   }
 

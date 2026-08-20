@@ -45,9 +45,12 @@ export class NameIndex {
     refName: string,
     srcFile: string,
     preferredFileIds: readonly string[] = [],
+    allowBareFallback = true,
   ): NameEntry | null {
     const candidates =
-      this.byName.get(refName) ?? this.byName.get(bareName(refName)) ?? [];
+      this.byName.get(refName) ??
+      (allowBareFallback ? this.byName.get(bareName(refName)) : undefined) ??
+      [];
     if (candidates.length === 0) {
       return null;
     }

@@ -8,7 +8,12 @@ export function resolveRef(
   preferredFileIds: readonly string[] = [],
   lookupName = ref.ref_name,
 ): RefResolveResult {
-  const hit = names.lookup(lookupName, ref.src_file, preferredFileIds);
+  const hit = names.lookup(
+    lookupName,
+    ref.src_file,
+    preferredFileIds,
+    !isQualifiedName(lookupName),
+  );
   if (!hit)
     return isExternalRefName(ref.ref_name, ref.source_language)
       ? { status: "external" }
@@ -24,4 +29,8 @@ export function resolveRef(
         : "REFS";
 
   return { status: "resolved", dst: hit.id, edgeKind };
+}
+
+function isQualifiedName(name: string): boolean {
+  return name.includes(".") || name.includes("/");
 }

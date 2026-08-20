@@ -9,6 +9,7 @@ import type {
   GraphEdge,
   GraphEdgeKind,
   GraphStats,
+  InducedEdgesResult,
   SeedNeighbor,
   SymContext,
   SymRef,
@@ -313,51 +314,75 @@ export class SqliteGraphReader {
   edges(
     nodeIds: readonly string[],
     edgeKinds: readonly GraphEdgeKind[],
-  ): GraphEdge[] {
-    if (nodeIds.length === 0) return [];
-    const ids = JSON.stringify([...new Set(nodeIds)]),
-      out: GraphEdge[] = [];
+    limit: number,
+  ): InducedEdgesResult {
+    const budget = Math.max(0, Math.floor(limit));
+    if (nodeIds.length === 0 || budget === 0)
+      return { edges: [], truncated: false };
+    const ids = JSON.stringify([...new Set(nodeIds)]);
+    const selects: string[] = [];
+    const params: (string | number)[] = [];
     const rel = edgeKinds.filter((k) => REL_KINDS.has(k));
     if (rel.length) {
       const p = rel.map(() => "?").join(",");
-      out.push(
-        ...this.all<EdgeRow>(
-          `SELECT * FROM symbol_edges WHERE src_id IN(SELECT value FROM json_each(?)) AND dst_id IN(SELECT value FROM json_each(?)) AND kind IN(${p})`,
-          ids,
-          ids,
-          ...rel,
-        ).map(toGraphEdge),
+      selects.push(
+        `SELECT src_id AS src,dst_id AS dst,kind,rel,count,first_line,ref_name
+         FROM symbol_edges
+         WHERE src_id IN(SELECT value FROM json_each(?))
+           AND dst_id IN(SELECT value FROM json_each(?)) AND kind IN(${p})`,
       );
+      params.push(ids, ids, ...rel);
     }
-    if (edgeKinds.includes("CONTAINS"))
-      out.push(
-        ...this.all<{ parent_id: string; child_id: string }>(
-          `SELECT * FROM contains WHERE parent_id IN(SELECT value FROM json_each(?)) AND child_id IN(SELECT value FROM json_each(?))`,
-          ids,
-          ids,
-        ).map((r) =>
-          structuralEdge(r.parent_id, r.child_id, "CONTAINS", "contains"),
-        ),
+    if (edgeKinds.includes("CONTAINS")) {
+      selects.push(
+        `SELECT parent_id AS src,child_id AS dst,'CONTAINS' AS kind,
+                'contains' AS rel,1 AS count,0 AS first_line,'' AS ref_name
+         FROM contains
+         WHERE parent_id IN(SELECT value FROM json_each(?))
+           AND child_id IN(SELECT value FROM json_each(?))`,
       );
-    if (edgeKinds.includes("DEFINES"))
-      out.push(
-        ...this.all<{ file_id: string; id: string }>(
-          `SELECT file_id,id FROM symbols WHERE file_id IN(SELECT value FROM json_each(?)) AND id IN(SELECT value FROM json_each(?))`,
-          ids,
-          ids,
-        ).map((r) => structuralEdge(r.file_id, r.id, "DEFINES", "defines")),
+      params.push(ids, ids);
+    }
+    if (edgeKinds.includes("DEFINES")) {
+      selects.push(
+        `SELECT file_id AS src,id AS dst,'DEFINES' AS kind,
+                'defines' AS rel,1 AS count,0 AS first_line,'' AS ref_name
+         FROM symbols
+         WHERE file_id IN(SELECT value FROM json_each(?))
+           AND id IN(SELECT value FROM json_each(?))`,
       );
-    if (edgeKinds.includes("IMPORTS"))
-      out.push(
-        ...this.all<{ src_file_id: string; dst_file_id: string; spec: string }>(
-          `SELECT * FROM file_imports WHERE src_file_id IN(SELECT value FROM json_each(?)) AND dst_file_id IN(SELECT value FROM json_each(?))`,
-          ids,
-          ids,
-        ).map((r) =>
-          structuralEdge(r.src_file_id, r.dst_file_id, "IMPORTS", r.spec),
-        ),
+      params.push(ids, ids);
+    }
+    if (edgeKinds.includes("IMPORTS")) {
+      selects.push(
+        `SELECT src_file_id AS src,dst_file_id AS dst,'IMPORTS' AS kind,
+                spec AS rel,1 AS count,0 AS first_line,'' AS ref_name
+         FROM file_imports
+         WHERE src_file_id IN(SELECT value FROM json_each(?))
+           AND dst_file_id IN(SELECT value FROM json_each(?))`,
       );
-    return out;
+      params.push(ids, ids);
+    }
+    if (selects.length === 0) return { edges: [], truncated: false };
+
+    const rows = this.all<{
+      src: string;
+      dst: string;
+      kind: GraphEdgeKind;
+      rel: string;
+      count: number;
+      first_line: number;
+      ref_name: string;
+    }>(
+      `SELECT * FROM (${selects.join(" UNION ALL ")})
+       ORDER BY kind,src,dst,rel LIMIT ?`,
+      ...params,
+      budget + 1,
+    );
+    return {
+      edges: rows.slice(0, budget),
+      truncated: rows.length > budget,
+    };
   }
 
   stats(): GraphStats {

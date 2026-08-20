@@ -108,6 +108,49 @@ test("external refs are dropped without creating edges", async () => {
   graph.close();
 });
 
+test("failed refs retry in deterministic per-name batches", async () => {
+  const graph = new SqliteGraphStorage("", { inMemory: true });
+  const nodes = Array.from({ length: 501 }, (_, index) => ({
+    id: `caller-${String(index).padStart(3, "0")}`,
+    kind: "function",
+    is_exported: false,
+    name: `caller${index}`,
+  }));
+  const refs = nodes.map((node, occurrence) =>
+    rawRef({
+      owner: node.id,
+      refName: "lateTarget",
+      line: 1,
+      occurrence,
+      sourceLanguage: "typescript",
+    }),
+  );
+  graph.upsertFileGraph("callers", nodes, [], refs);
+  await graph.resolvePending();
+  assert.equal(graph.stats().refCount, 501);
+
+  graph.upsertFileGraph(
+    "target",
+    [
+      {
+        id: "late-target",
+        kind: "function",
+        is_exported: true,
+        name: "lateTarget",
+      },
+    ],
+    [],
+    [],
+  );
+  await graph.resolvePending();
+  assert.equal(graph.stats().callsCount, 500);
+  assert.equal(graph.stats().refCount, 1);
+  await graph.resolvePending();
+  assert.equal(graph.stats().callsCount, 501);
+  assert.equal(graph.stats().refCount, 0);
+  graph.close();
+});
+
 test("raw incoming/outgoing edge queries are batch-capable and drive traversal", () => {
   class TrackingGraph extends SqliteGraphStorage {
     outgoingCalls = 0;
@@ -276,13 +319,16 @@ test("SQLite queries and incrementally rebuilds graph data without a full-memory
   );
   assert.deepEqual(
     graph
-      .edges(["caller", "target", "leaf"], ["CALLS"])
-      .map((edge) => [edge.src, edge.dst]),
+      .edges(["caller", "target", "leaf"], ["CALLS"], 10)
+      .edges.map((edge) => [edge.src, edge.dst]),
     [
       ["caller", "target"],
       ["target", "leaf"],
     ],
   );
+  const bounded = graph.edges(["caller", "target", "leaf"], ["CALLS"], 1);
+  assert.equal(bounded.edges.length, 1);
+  assert.equal(bounded.truncated, true);
   assert.deepEqual(
     graph.outgoingEdges(["caller"], ["CALLS"]).map((edge) => edge.dst),
     ["target"],

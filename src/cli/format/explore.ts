@@ -43,7 +43,7 @@ function exploreLines(result: ExploreOutput): string[] {
     `roots: ${result.roots.map((r) => symbolLabel(r.id, r.entity)).join(", ")}`,
   );
   lines.push(
-    `subgraph: ${result.nodes.length} nodes, ${result.edges.length} edges, ${result.files.length} files`,
+    `subgraph: ${result.nodes.length} nodes, ${result.edges.length} edges${result.edgesTruncated ? " (truncated)" : ""}, ${result.files.length} files`,
   );
 
   if (result.callPaths.length > 0) {

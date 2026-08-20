@@ -204,6 +204,7 @@ export type ZvecGrepExploreResult = {
   roots: ZvecGrepGraphNode[];
   nodes: ZvecGrepGraphNode[];
   edges: ZvecGrepGraphEdge[];
+  edgesTruncated: boolean;
   callPaths: { from: string; to: string; nodes: string[] }[];
   blastRadius: {
     rootId: string;
@@ -354,6 +355,7 @@ export type ZvecGrepIndexDiagnostics = {
   }[];
   graphExpand?: {
     available: boolean;
+    unavailableReason?: string;
     seeds: number;
     neighborsAdded: number;
   };

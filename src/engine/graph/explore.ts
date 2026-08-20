@@ -151,6 +151,7 @@ export type ExploreResult = {
   roots: ExploreNode[];
   nodes: ExploreNode[];
   edges: ExploreEdge[];
+  edgesTruncated: boolean;
   callPaths: ExploreCallPath[];
   blastRadius: ExploreBlastRadius[];
   changeSurface: ExploreChangeSurfaceRef[];
@@ -163,6 +164,7 @@ export type ExploreSubgraphResult = {
   rootIds: string[];
   nodes: ExploreNode[];
   edges: ExploreEdge[];
+  edgesTruncated: boolean;
   callPaths: ExploreCallPath[];
   nodeScores: ReadonlyMap<string, number>;
 };
@@ -225,7 +227,7 @@ export function exploreGraph(
     maxNodes,
     includeCallPaths: true,
   });
-  const { nodes, edges, callPaths } = subgraph;
+  const { nodes, edges, edgesTruncated, callPaths } = subgraph;
   const blastRadius = collectBlastRadius(
     graph,
     storage,
@@ -270,6 +272,7 @@ export function exploreGraph(
       roots: nodes.filter((n) => n.isRoot),
       nodes,
       edges,
+      edgesTruncated,
       callPaths,
       blastRadius,
       changeSurface,
@@ -284,6 +287,7 @@ export function exploreGraph(
     roots: nodes.filter((n) => n.isRoot),
     nodes,
     edges,
+    edgesTruncated,
     callPaths,
     blastRadius,
     changeSurface,
@@ -395,12 +399,15 @@ export function exploreSubgraph(
     });
   }
 
-  const edges = collectExploreEdges(graph, selected);
+  const edgeBudget = Math.min(20_000, Math.max(128, maxNodes * 8));
+  const induced = collectExploreEdges(graph, selected, edgeBudget);
+  const edges = induced.edges;
   return {
     available: true,
     rootIds,
     nodes,
     edges,
+    edgesTruncated: induced.truncated,
     callPaths: retainedCallPaths,
     nodeScores: rankNodesWithRwr(nodes, edges, rootIds, options.seedWeights),
   };
@@ -412,6 +419,7 @@ function emptySubgraph(available: boolean): ExploreSubgraphResult {
     rootIds: [],
     nodes: [],
     edges: [],
+    edgesTruncated: false,
     callPaths: [],
     nodeScores: new Map(),
   };
@@ -710,17 +718,22 @@ function isTestPath(path: string): boolean {
 function collectExploreEdges(
   graph: GraphReader,
   selected: Map<string, ScoredNode>,
-): ExploreEdge[] {
+  limit: number,
+): { edges: ExploreEdge[]; truncated: boolean } {
   const ids = [...selected.keys()];
-  return graph.edges(ids, TRAVERSE_EDGE_KINDS).map((edge) => ({
-    src: edge.src,
-    dst: edge.dst,
-    kind: edge.kind,
-    rel: edge.rel,
-    count: edge.count,
-    firstLine: edge.first_line,
-    refName: edge.ref_name,
-  }));
+  const result = graph.edges(ids, TRAVERSE_EDGE_KINDS, limit);
+  return {
+    edges: result.edges.map((edge) => ({
+      src: edge.src,
+      dst: edge.dst,
+      kind: edge.kind,
+      rel: edge.rel,
+      count: edge.count,
+      firstLine: edge.first_line,
+      refName: edge.ref_name,
+    })),
+    truncated: result.truncated,
+  };
 }
 
 function rankFilesWithRwr(
@@ -1136,6 +1149,7 @@ function emptyResult(
     roots: [],
     nodes: [],
     edges: [],
+    edgesTruncated: false,
     callPaths: [],
     blastRadius: [],
     changeSurface: [],

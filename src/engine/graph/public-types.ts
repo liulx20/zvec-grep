@@ -3,6 +3,7 @@ export type {
   FileNeighbor,
   GraphEdge,
   GraphEdgeKind,
+  InducedEdgesResult,
   GraphReader,
   GraphStats,
   GraphStorage,

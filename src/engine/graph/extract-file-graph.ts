@@ -161,7 +161,9 @@ function absorbRelationOwners(input: {
     for (const site of owner.sites) {
       const bare = bareName(site.name);
       const localHits =
-        input.nameToIds.get(site.name) ?? input.nameToIds.get(bare) ?? [];
+        input.nameToIds.get(site.name) ??
+        (isQualifiedName(site.name) ? undefined : input.nameToIds.get(bare)) ??
+        [];
       const targets = localHits.filter((id) => id !== ownerId);
 
       if (targets.length === 1) {
@@ -204,6 +206,10 @@ function absorbRelationOwners(input: {
       }
     }
   }
+}
+
+function isQualifiedName(name: string): boolean {
+  return name.includes(".") || name.includes("/");
 }
 
 function nextOccurrence(counts: Map<string, number>, key: string): number {
