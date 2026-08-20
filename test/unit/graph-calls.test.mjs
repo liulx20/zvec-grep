@@ -368,6 +368,106 @@ for (const fixture of [
   });
 }
 
+test("named import receiver calls resolve to the imported member", async () => {
+  const callerFile = {
+    ...codeFile("caller.ts"),
+    id: "named-import-caller",
+  };
+  const targetFile = {
+    ...codeFile("codec.ts"),
+    id: "named-import-target",
+  };
+  const callerSource = {
+    kind: "text",
+    file: callerFile,
+    text: `import { Demo } from "./codec";
+export function run() { return Demo.helper(); }`,
+  };
+  const targetSource = {
+    kind: "text",
+    file: targetFile,
+    text: `export class Demo { static helper() { return 1; } }`,
+  };
+  const extractor = new CodeExtractor();
+  const callerInput = await extractFileGraph(
+    callerSource,
+    await extractor.extract(callerSource),
+  );
+  const targetInput = await extractFileGraph(
+    targetSource,
+    await extractor.extract(targetSource),
+  );
+  const graph = new SqliteGraphStorage("", { inMemory: true });
+  graph.upsertFileGraph(
+    callerFile.id,
+    callerInput.nodes,
+    callerInput.edges,
+    callerInput.refs,
+  );
+  graph.upsertFileGraph(
+    targetFile.id,
+    targetInput.nodes,
+    targetInput.edges,
+    targetInput.refs,
+  );
+  await graph.resolvePending({ files: [callerFile, targetFile] });
+
+  const run = callerInput.nodes.find((node) => node.name === "run");
+  const demo = targetInput.nodes.find((node) => node.name === "Demo");
+  const helper = targetInput.nodes.find((node) => node.name === "helper");
+  assert.ok(run && demo && helper);
+  assert.deepEqual(
+    graph.callees(run.id, 1, 10).map((item) => item.id),
+    [helper.id],
+  );
+  assert.notEqual(helper.id, demo.id);
+  graph.close();
+});
+
+test("receiver calls use the owning or explicitly named container", async () => {
+  const file = codeFile("scoped-receivers.ts");
+  const source = {
+    kind: "text",
+    file,
+    text: `class First {
+  helper() { return 1; }
+  run() { return this.helper(); }
+}
+class Demo {
+  static helper() { return 2; }
+}
+class Second {
+  helper() { return 3; }
+  run() { return Demo.helper(); }
+}`,
+  };
+  const input = await extractFileGraph(
+    source,
+    await new CodeExtractor().extract(source),
+  );
+  const nodesByName = (name) =>
+    input.nodes.filter((node) => node.name === name);
+  const helpers = nodesByName("helper");
+  const runs = nodesByName("run");
+  assert.equal(helpers.length, 3);
+  assert.equal(runs.length, 2);
+
+  const contains = input.edges.filter((edge) => edge.kind === "CONTAINS");
+  const containerFor = (id) =>
+    input.nodes.find(
+      (node) => contains.find((edge) => edge.dst === id)?.src === node.id,
+    )?.name;
+  const callTargetFor = (id) =>
+    input.edges.find((edge) => edge.kind === "CALLS" && edge.src === id)?.dst;
+  const firstRun = runs.find((node) => containerFor(node.id) === "First");
+  const secondRun = runs.find((node) => containerFor(node.id) === "Second");
+  const firstHelper = helpers.find((node) => containerFor(node.id) === "First");
+  const demoHelper = helpers.find((node) => containerFor(node.id) === "Demo");
+  assert.ok(firstRun && secondRun && firstHelper && demoHelper);
+  assert.equal(callTargetFor(firstRun.id), firstHelper.id);
+  assert.equal(callTargetFor(secondRun.id), demoHelper.id);
+});
+
 test("CONTAINS uses :: scope breadcrumbs", async () => {
   const file = codeFile("cls.ts");
   const source = {

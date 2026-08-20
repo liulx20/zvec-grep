@@ -5,39 +5,38 @@ const LOCAL_RECEIVERS = new Set(["this", "self", "cls", "super"]);
 export type ImportBindingTarget = {
   importedName: string;
   fileId: string;
+  match: "exact" | "receiver";
 };
 
 export type ReferenceLookupPlan = {
   lookupName: string;
   preferredFileIds: string[];
   allowBareFallback: boolean;
+  containerNames: string[];
 };
 
 /** Central policy for receiver classification, fallback scope and externals. */
 export class ReferenceResolutionPolicy {
-  localCandidateNames(refName: string): string[] {
-    const classification = this.classify(refName);
-    return classification.allowLocalBareFallback &&
-      classification.bare !== refName
-      ? [refName, classification.bare]
-      : [refName];
-  }
-
   lookupPlan(input: {
     refName: string;
     srcFile: string;
     preferredFileIds?: readonly string[];
     binding?: ImportBindingTarget;
+    sourceContainerName?: string;
   }): ReferenceLookupPlan {
     const classification = this.classify(input.refName);
     if (input.binding) {
+      const receiverAccess = input.binding.match === "receiver";
       return {
-        lookupName:
-          input.binding.importedName === "*"
-            ? classification.bare
-            : input.binding.importedName,
+        lookupName: receiverAccess
+          ? classification.bare
+          : input.binding.importedName,
         preferredFileIds: [input.binding.fileId],
-        allowBareFallback: true,
+        allowBareFallback: false,
+        containerNames:
+          receiverAccess && input.binding.importedName !== "*"
+            ? [input.binding.importedName]
+            : [],
       };
     }
     if (classification.localReceiver) {
@@ -45,12 +44,24 @@ export class ReferenceResolutionPolicy {
         lookupName: classification.bare,
         preferredFileIds: [input.srcFile, ...(input.preferredFileIds ?? [])],
         allowBareFallback: true,
+        containerNames: input.sourceContainerName
+          ? [input.sourceContainerName]
+          : [],
+      };
+    }
+    if (classification.qualified && classification.receiver) {
+      return {
+        lookupName: classification.bare,
+        preferredFileIds: [input.srcFile],
+        allowBareFallback: false,
+        containerNames: [classification.receiver],
       };
     }
     return {
       lookupName: input.refName,
       preferredFileIds: [...(input.preferredFileIds ?? [])],
       allowBareFallback: !classification.qualified,
+      containerNames: [],
     };
   }
 
@@ -62,7 +73,7 @@ export class ReferenceResolutionPolicy {
     bare: string;
     qualified: boolean;
     localReceiver: boolean;
-    allowLocalBareFallback: boolean;
+    receiver?: string;
   } {
     const qualified = refName.includes(".") || refName.includes("/");
     const receiver = qualified ? refName.split(/[./]/, 1)[0] : undefined;
@@ -71,7 +82,7 @@ export class ReferenceResolutionPolicy {
       bare: bareName(refName),
       qualified,
       localReceiver,
-      allowLocalBareFallback: !qualified || localReceiver,
+      receiver,
     };
   }
 }

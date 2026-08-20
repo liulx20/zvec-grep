@@ -81,6 +81,7 @@ export async function extractFileGraph(
 
   const idByOffset = indexPublicFragmentsByOffset(fragments);
   const nameToIds = new Map<string, string[]>();
+  const nodeNameById = new Map<string, string>();
   for (const node of base.nodes) {
     if (!node.name) {
       continue;
@@ -88,6 +89,13 @@ export async function extractFileGraph(
     const list = nameToIds.get(node.name) ?? [];
     list.push(node.id);
     nameToIds.set(node.name, list);
+    nodeNameById.set(node.id, node.name);
+  }
+  const containerNameByChild = new Map<string, string>();
+  for (const edge of base.edges) {
+    if (edge.kind !== "CONTAINS") continue;
+    const containerName = nodeNameById.get(edge.src);
+    if (containerName) containerNameByChild.set(edge.dst, containerName);
   }
 
   const inheritance = analysis.inheritance;
@@ -101,6 +109,7 @@ export async function extractFileGraph(
     refs,
     seenRefIds,
     sourceLanguage: source.file.format,
+    containerNameByChild,
   });
 
   const symbolRefs = analysis.refs;
@@ -114,6 +123,7 @@ export async function extractFileGraph(
     refs,
     seenRefIds,
     sourceLanguage: source.file.format,
+    containerNameByChild,
   });
 
   const calls = analysis.calls;
@@ -127,6 +137,7 @@ export async function extractFileGraph(
     refs,
     seenRefIds,
     sourceLanguage: source.file.format,
+    containerNameByChild,
   });
 
   return {
@@ -146,6 +157,7 @@ function absorbRelationOwners(input: {
   refs: ReturnType<typeof rawRef>[];
   seenRefIds: Set<string>;
   sourceLanguage: string;
+  containerNameByChild: ReadonlyMap<string, string>;
 }): void {
   const occurrences = new Map<string, number>();
   for (const owner of input.owners) {
@@ -157,11 +169,19 @@ function absorbRelationOwners(input: {
     }
 
     for (const site of owner.sites) {
-      const localHits =
-        referenceResolutionPolicy
-          .localCandidateNames(site.name)
-          .map((name) => input.nameToIds.get(name))
-          .find((ids) => ids !== undefined) ?? [];
+      const plan = referenceResolutionPolicy.lookupPlan({
+        refName: site.name,
+        srcFile: "",
+        sourceContainerName: input.containerNameByChild.get(ownerId),
+      });
+      let localHits = input.nameToIds.get(plan.lookupName) ?? [];
+      if (plan.containerNames.length > 0) {
+        const containers = new Set(plan.containerNames);
+        localHits = localHits.filter((id) => {
+          const container = input.containerNameByChild.get(id);
+          return container !== undefined && containers.has(container);
+        });
+      }
       const targets = localHits.filter((id) => id !== ownerId);
 
       if (targets.length === 1) {

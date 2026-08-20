@@ -36,37 +36,48 @@ export class SqlitePendingRefResolver {
   }
   async resolvePending(options: ResolvePendingOptions = {}): Promise<void> {
     this.assertWritable();
-    const attempt = this.nextAttempt();
     const names = new NameIndex();
     names.load(
-      this.all<SymbolRow>(
-        "SELECT id,file_id,name,kind,is_exported FROM symbols WHERE name IS NOT NULL",
+      this.all<SymbolRow & { container_name: string | null }>(
+        `SELECT s.id,s.file_id,s.name,s.kind,s.is_exported,p.name AS container_name
+         FROM symbols s
+         LEFT JOIN contains c ON c.child_id=s.id
+         LEFT JOIN symbols p ON p.id=c.parent_id
+         WHERE s.name IS NOT NULL`,
       ).map((row) => ({
         id: row.id,
         fileId: row.file_id,
         name: row.name!,
         kind: row.kind,
+        containerName: row.container_name ?? undefined,
       })),
     );
     const paths = new FilePathIndex(options.files ?? []);
-    this.transaction(() => {
-      const refs = this.retryableRefs();
-      for (const ref of refs.filter(
-        (item) => item.owner_is_file || item.ref_kind === "import",
-      )) {
-        this.resolveImport(ref, paths, attempt);
-      }
-      for (const ref of refs.filter(
-        (item) => !item.owner_is_file && item.ref_kind !== "import",
-      )) {
-        this.resolveSymbol(ref, names, attempt);
-      }
-    });
+    const rounds = this.retryRounds();
+    for (let round = 0; round < rounds; round++) {
+      this.transaction(() => {
+        const attempt = this.nextAttempt();
+        const refs = this.retryableRefs();
+        for (const ref of refs.filter(
+          (item) => item.owner_is_file || item.ref_kind === "import",
+        )) {
+          this.resolveImport(ref, paths, attempt);
+        }
+        for (const ref of refs.filter(
+          (item) => !item.owner_is_file && item.ref_kind !== "import",
+        )) {
+          this.resolveSymbol(ref, names, attempt);
+        }
+      });
+    }
   }
 
   private resolveSymbol(ref: RefRow, names: NameIndex, attempt: number): void {
-    const owner = this.one<{ file_id: string }>(
-      "SELECT file_id FROM symbols WHERE id=?",
+    const owner = this.one<{ file_id: string; container_name: string | null }>(
+      `SELECT s.file_id,p.name AS container_name FROM symbols s
+       LEFT JOIN contains c ON c.child_id=s.id
+       LEFT JOIN symbols p ON p.id=c.parent_id
+       WHERE s.id=?`,
       ref.owner_id,
     );
     if (!owner) return this.failRef(ref.id, attempt);
@@ -87,8 +98,9 @@ export class SqlitePendingRefResolver {
     const binding = this.one<{
       imported_name: string;
       dst_file_id: string;
+      local_name: string;
     }>(
-      `SELECT imported_name,dst_file_id FROM file_import_bindings
+      `SELECT imported_name,dst_file_id,local_name FROM file_import_bindings
        WHERE src_file_id=? AND local_name IN (?,?)
        ORDER BY CASE WHEN local_name=? THEN 0 ELSE 1 END,dst_file_id,imported_name LIMIT 1`,
       owner.file_id,
@@ -104,8 +116,10 @@ export class SqlitePendingRefResolver {
         ? {
             importedName: binding.imported_name,
             fileId: binding.dst_file_id,
+            match: binding.local_name === ref.ref_name ? "exact" : "receiver",
           }
         : undefined,
+      owner.container_name ?? undefined,
     );
     if (result.status === "external") return this.deleteRef(ref.id);
     if (result.status !== "resolved") return this.failRef(ref.id, attempt);
@@ -177,6 +191,16 @@ export class SqlitePendingRefResolver {
        ORDER BY ref_name,id`,
       PER_NAME_CEILING,
     );
+  }
+
+  private retryRounds(): number {
+    const row = this.one<{ max_count: number }>(
+      `SELECT COALESCE(MAX(ref_count),0) AS max_count FROM (
+         SELECT COUNT(*) AS ref_count FROM pending_refs
+         WHERE status='failed' GROUP BY ref_name
+       )`,
+    );
+    return Math.max(1, Math.ceil((row?.max_count ?? 0) / PER_NAME_CEILING));
   }
 
   private failRef(id: string, attempt: number): void {

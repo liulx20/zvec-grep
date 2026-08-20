@@ -163,6 +163,12 @@ function allocateCharBudgets(
   }
   const centralIds = fileIds.filter((id) => central.has(id));
   const otherIds = fileIds.filter((id) => !central.has(id));
+  if (centralIds.length === 0 || otherIds.length === 0) {
+    for (const id of fileIds) {
+      budgets.set(id, Math.floor(maxChars / fileIds.length));
+    }
+    return budgets;
+  }
   const centralShare = centralIds.length > 0 ? 0.55 : 0;
   const centralBudget = Math.floor(maxChars * centralShare);
   const otherBudget = maxChars - centralBudget;
@@ -172,11 +178,6 @@ function allocateCharBudgets(
   }
   for (const id of otherIds) {
     budgets.set(id, Math.floor(otherBudget / Math.max(1, otherIds.length)));
-  }
-  if (centralIds.length === 0) {
-    for (const id of fileIds) {
-      budgets.set(id, Math.floor(maxChars / fileIds.length));
-    }
   }
   return budgets;
 }

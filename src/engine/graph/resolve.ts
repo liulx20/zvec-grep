@@ -10,18 +10,21 @@ export function resolveRef(
   names: NameIndex,
   preferredFileIds: readonly string[] = [],
   binding?: ImportBindingTarget,
+  sourceContainerName?: string,
 ): RefResolveResult {
   const plan = referenceResolutionPolicy.lookupPlan({
     refName: ref.ref_name,
     srcFile: ref.src_file,
     preferredFileIds,
     binding,
+    sourceContainerName,
   });
   const hit = names.lookup(
     plan.lookupName,
     ref.src_file,
     plan.preferredFileIds,
     plan.allowBareFallback,
+    plan.containerNames,
   );
   if (!hit)
     return referenceResolutionPolicy.isExternal(

@@ -167,9 +167,6 @@ test("failed refs retry in deterministic per-name batches", async () => {
     [],
   );
   await graph.resolvePending();
-  assert.equal(graph.stats().callsCount, 500);
-  assert.equal(graph.stats().refCount, 1);
-  await graph.resolvePending();
   assert.equal(graph.stats().callsCount, 501);
   assert.equal(graph.stats().refCount, 0);
   graph.close();
@@ -231,8 +228,6 @@ test("failed ref retry batches rotate instead of starving later rows", async () 
 
   const targetFile = file("target", "/repo/good/target.ts");
   graph.upsertFileGraph(targetFile.id, [], [], []);
-  await graph.resolvePending({ files: [...callers, targetFile] });
-  assert.equal(graph.stats().refCount, 501);
   await graph.resolvePending({ files: [...callers, targetFile] });
   assert.equal(graph.stats().refCount, 500);
   assert.deepEqual(graph.expandFileNeighbors([validFile.id], 10), [

@@ -179,6 +179,7 @@ test("explore maxChars is a hard source-text budget", () => {
   assert.ok(
     result.files.reduce((sum, file) => sum + file.text.length, 0) <= 1_000,
   );
+  assert.equal(result.files[0].text.length, 1_000);
   assert.match(result.files[0].text, /truncated/);
   graph.close();
 });
