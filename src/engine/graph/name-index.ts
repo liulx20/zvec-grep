@@ -6,6 +6,7 @@ export type NameEntry = {
   name: string;
   kind: string;
   containerName?: string;
+  containerId?: string;
 };
 
 /** Exact / bare-name lookup used by resolvePending. */
@@ -48,6 +49,7 @@ export class NameIndex {
     preferredFileIds: readonly string[] = [],
     allowBareFallback = true,
     containerNames: readonly string[] = [],
+    containerIds: readonly string[] = [],
   ): NameEntry | null {
     let candidates =
       this.byName.get(refName) ??
@@ -60,6 +62,16 @@ export class NameIndex {
           candidate.containerName !== undefined &&
           containers.has(candidate.containerName),
       );
+    }
+    if (containerIds.length > 0) {
+      for (const containerId of containerIds) {
+        const scoped = candidates.filter(
+          (candidate) => candidate.containerId === containerId,
+        );
+        if (scoped.length === 1) return scoped[0] ?? null;
+        if (scoped.length > 1) return null;
+      }
+      return null;
     }
     if (candidates.length === 0) {
       return null;

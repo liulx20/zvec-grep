@@ -1,6 +1,6 @@
 import { bareName, isExternalRefName } from "./builtins.js";
 
-const OWNER_RECEIVERS = new Set(["this", "self", "cls", "super"]);
+const OWNER_RECEIVERS = new Set(["this", "self", "cls"]);
 
 export type ReferenceBindingMatch = {
   importedName: string;
@@ -10,7 +10,7 @@ export type ReferenceBindingMatch = {
 
 export type ReferenceReceiver =
   | { kind: "none" }
-  | { kind: "owner"; name: string }
+  | { kind: "owner"; name: string; includeOwner: boolean }
   | { kind: "qualified"; name: string };
 
 export type AnalyzedReference = {
@@ -22,7 +22,7 @@ export type AnalyzedReference = {
 
 export type ReferenceResolutionContext = {
   reference: AnalyzedReference;
-  owner: { fileId: string; containerName?: string };
+  owner: { fileId: string; containerId?: string; containerName?: string };
   receiver: ReferenceReceiver;
   binding?: ReferenceBindingMatch;
   preferredFileIds: readonly string[];
@@ -32,12 +32,15 @@ export type ReferenceLookupPlan = {
   lookupName: string;
   preferredFileIds: string[];
   allowBareFallback: boolean;
-  containerNames: string[];
+  containerScope:
+    | { kind: "none" }
+    | { kind: "owner-hierarchy"; includeOwner: boolean }
+    | { kind: "named"; name: string };
 };
 
 export type LocalReferenceLookupPlan = Pick<
   ReferenceLookupPlan,
-  "lookupName" | "containerNames"
+  "lookupName" | "containerScope"
 >;
 
 /** Owns reference receiver, binding and scope semantics for every resolver. */
@@ -46,8 +49,12 @@ export class ReferenceResolutionPolicy {
     const receiverName = qualifiedReceiver(refName);
     const receiver: ReferenceReceiver = !receiverName
       ? { kind: "none" }
-      : OWNER_RECEIVERS.has(receiverName)
-        ? { kind: "owner", name: receiverName }
+      : OWNER_RECEIVERS.has(receiverName) || receiverName === "super"
+        ? {
+            kind: "owner",
+            name: receiverName,
+            includeOwner: receiverName !== "super",
+          }
         : { kind: "qualified", name: receiverName };
     return { name: refName, bareName: bareName(refName), language, receiver };
   }
@@ -59,22 +66,28 @@ export class ReferenceResolutionPolicy {
     if (reference.receiver.kind === "owner") {
       return {
         lookupName: reference.bareName,
-        containerNames: ownerContainerName ? [ownerContainerName] : [],
+        containerScope: ownerContainerName
+          ? {
+              kind: "owner-hierarchy",
+              includeOwner: reference.receiver.includeOwner,
+            }
+          : { kind: "none" },
       };
     }
     if (reference.receiver.kind === "qualified") {
       return {
         lookupName: reference.bareName,
-        containerNames: [reference.receiver.name],
+        containerScope: { kind: "named", name: reference.receiver.name },
       };
     }
-    return { lookupName: reference.name, containerNames: [] };
+    return { lookupName: reference.name, containerScope: { kind: "none" } };
   }
 
   createContext(
     reference: AnalyzedReference,
     input: {
       sourceFileId: string;
+      ownerContainerId?: string;
       ownerContainerName?: string;
       preferredFileIds?: readonly string[];
       binding?: ReferenceBindingMatch;
@@ -84,6 +97,7 @@ export class ReferenceResolutionPolicy {
       reference,
       owner: {
         fileId: input.sourceFileId,
+        containerId: input.ownerContainerId,
         containerName: input.ownerContainerName,
       },
       receiver: reference.receiver,
@@ -100,10 +114,10 @@ export class ReferenceResolutionPolicy {
         lookupName: receiverAccess ? reference.bareName : binding.importedName,
         preferredFileIds: [binding.fileId],
         allowBareFallback: false,
-        containerNames:
+        containerScope:
           receiverAccess && binding.importedName !== "*"
-            ? [binding.importedName]
-            : [],
+            ? { kind: "named", name: binding.importedName }
+            : { kind: "none" },
       };
     }
     if (receiver.kind === "owner") {
@@ -111,7 +125,12 @@ export class ReferenceResolutionPolicy {
         lookupName: reference.bareName,
         preferredFileIds: [owner.fileId, ...preferredFileIds],
         allowBareFallback: false,
-        containerNames: owner.containerName ? [owner.containerName] : [],
+        containerScope: owner.containerName
+          ? {
+              kind: "owner-hierarchy",
+              includeOwner: receiver.includeOwner,
+            }
+          : { kind: "none" },
       };
     }
     if (receiver.kind === "qualified") {
@@ -119,14 +138,14 @@ export class ReferenceResolutionPolicy {
         lookupName: reference.bareName,
         preferredFileIds: [owner.fileId],
         allowBareFallback: false,
-        containerNames: [receiver.name],
+        containerScope: { kind: "named", name: receiver.name },
       };
     }
     return {
       lookupName: reference.name,
       preferredFileIds: [...preferredFileIds],
       allowBareFallback: true,
-      containerNames: [],
+      containerScope: { kind: "none" },
     };
   }
 

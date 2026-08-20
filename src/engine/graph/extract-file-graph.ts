@@ -92,10 +92,12 @@ export async function extractFileGraph(
     nodeNameById.set(node.id, node.name);
   }
   const containerNameByChild = new Map<string, string>();
+  const containerIdByChild = new Map<string, string>();
   for (const edge of base.edges) {
     if (edge.kind !== "CONTAINS") continue;
     const containerName = nodeNameById.get(edge.src);
     if (containerName) containerNameByChild.set(edge.dst, containerName);
+    containerIdByChild.set(edge.dst, edge.src);
   }
 
   const inheritance = analysis.inheritance;
@@ -110,6 +112,7 @@ export async function extractFileGraph(
     seenRefIds,
     sourceLanguage: source.file.format,
     containerNameByChild,
+    containerIdByChild,
   });
 
   const symbolRefs = analysis.refs;
@@ -124,6 +127,7 @@ export async function extractFileGraph(
     seenRefIds,
     sourceLanguage: source.file.format,
     containerNameByChild,
+    containerIdByChild,
   });
 
   const calls = analysis.calls;
@@ -138,6 +142,7 @@ export async function extractFileGraph(
     seenRefIds,
     sourceLanguage: source.file.format,
     containerNameByChild,
+    containerIdByChild,
   });
 
   return {
@@ -158,6 +163,7 @@ function absorbRelationOwners(input: {
   seenRefIds: Set<string>;
   sourceLanguage: string;
   containerNameByChild: ReadonlyMap<string, string>;
+  containerIdByChild: ReadonlyMap<string, string>;
 }): void {
   const occurrences = new Map<string, number>();
   for (const owner of input.owners) {
@@ -178,12 +184,17 @@ function absorbRelationOwners(input: {
         input.containerNameByChild.get(ownerId),
       );
       let localHits = input.nameToIds.get(plan.lookupName) ?? [];
-      if (plan.containerNames.length > 0) {
-        const containers = new Set(plan.containerNames);
-        localHits = localHits.filter((id) => {
-          const container = input.containerNameByChild.get(id);
-          return container !== undefined && containers.has(container);
-        });
+      if (plan.containerScope.kind !== "none") {
+        const containers = localContainerScope(
+          plan.containerScope,
+          ownerId,
+          input,
+        );
+        localHits = firstScopedHits(
+          localHits,
+          containers,
+          input.containerIdByChild,
+        );
       }
       const targets = localHits.filter((id) => id !== ownerId);
 
@@ -227,6 +238,63 @@ function absorbRelationOwners(input: {
       }
     }
   }
+}
+
+function localContainerScope(
+  scope: ReturnType<
+    typeof referenceResolutionPolicy.localLookupPlan
+  >["containerScope"],
+  ownerId: string,
+  input: {
+    nameToIds: Map<string, string[]>;
+    containerIdByChild: ReadonlyMap<string, string>;
+    localEdges: Map<string, LocalEdge>;
+  },
+): string[] {
+  if (scope.kind === "named") {
+    return input.nameToIds.get(scope.name) ?? [];
+  }
+  if (scope.kind !== "owner-hierarchy") return [];
+  const ownerContainer = input.containerIdByChild.get(ownerId);
+  if (!ownerContainer) return [];
+  const seen = new Set<string>();
+  const containers: string[] = [];
+  const queue = scope.includeOwner
+    ? [ownerContainer]
+    : localBases(ownerContainer);
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+    if (seen.has(current)) continue;
+    seen.add(current);
+    containers.push(current);
+    queue.push(...localBases(current));
+  }
+  return containers;
+
+  function localBases(containerId: string): string[] {
+    return [...input.localEdges.values()]
+      .filter(
+        (edge) =>
+          edge.kind === "INHERITS" &&
+          edge.rel === "extends" &&
+          edge.src === containerId,
+      )
+      .map((edge) => edge.dst);
+  }
+}
+
+function firstScopedHits(
+  candidates: readonly string[],
+  containerIds: readonly string[],
+  containerIdByChild: ReadonlyMap<string, string>,
+): string[] {
+  for (const containerId of containerIds) {
+    const hits = candidates.filter(
+      (candidate) => containerIdByChild.get(candidate) === containerId,
+    );
+    if (hits.length > 0) return hits;
+  }
+  return [];
 }
 
 function nextOccurrence(counts: Map<string, number>, key: string): number {

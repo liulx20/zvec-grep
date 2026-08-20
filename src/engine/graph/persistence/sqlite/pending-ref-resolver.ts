@@ -38,8 +38,14 @@ export class SqlitePendingRefResolver {
     this.assertWritable();
     const names = new NameIndex();
     names.load(
-      this.all<SymbolRow & { container_name: string | null }>(
-        `SELECT s.id,s.file_id,s.name,s.kind,s.is_exported,p.name AS container_name
+      this.all<
+        SymbolRow & {
+          container_id: string | null;
+          container_name: string | null;
+        }
+      >(
+        `SELECT s.id,s.file_id,s.name,s.kind,s.is_exported,
+                p.id AS container_id,p.name AS container_name
          FROM symbols s
          LEFT JOIN contains c ON c.child_id=s.id
          LEFT JOIN symbols p ON p.id=c.parent_id
@@ -50,6 +56,7 @@ export class SqlitePendingRefResolver {
         name: row.name!,
         kind: row.kind,
         containerName: row.container_name ?? undefined,
+        containerId: row.container_id ?? undefined,
       })),
     );
     const paths = new FilePathIndex(options.files ?? []);
@@ -63,9 +70,13 @@ export class SqlitePendingRefResolver {
         )) {
           this.resolveImport(ref, paths, attempt);
         }
-        for (const ref of refs.filter(
+        const symbolRefs = refs.filter(
           (item) => !item.owner_is_file && item.ref_kind !== "import",
-        )) {
+        );
+        for (const ref of symbolRefs.filter(isInheritanceRef)) {
+          this.resolveSymbol(ref, names, attempt);
+        }
+        for (const ref of symbolRefs.filter((ref) => !isInheritanceRef(ref))) {
           this.resolveSymbol(ref, names, attempt);
         }
       });
@@ -73,8 +84,12 @@ export class SqlitePendingRefResolver {
   }
 
   private resolveSymbol(ref: RefRow, names: NameIndex, attempt: number): void {
-    const owner = this.one<{ file_id: string; container_name: string | null }>(
-      `SELECT s.file_id,p.name AS container_name FROM symbols s
+    const owner = this.one<{
+      file_id: string;
+      container_id: string | null;
+      container_name: string | null;
+    }>(
+      `SELECT s.file_id,p.id AS container_id,p.name AS container_name FROM symbols s
        LEFT JOIN contains c ON c.child_id=s.id
        LEFT JOIN symbols p ON p.id=c.parent_id
        WHERE s.id=?`,
@@ -120,6 +135,13 @@ export class SqlitePendingRefResolver {
           }
         : undefined,
       owner.container_name ?? undefined,
+      owner.container_id ?? undefined,
+      owner.container_id
+        ? this.inheritanceContainers(
+            owner.container_id,
+            refReceiver(ref.ref_name) !== "super",
+          )
+        : [],
     );
     if (result.status === "external") return this.deleteRef(ref.id);
     if (result.status !== "resolved") return this.failRef(ref.id, attempt);
@@ -195,6 +217,24 @@ export class SqlitePendingRefResolver {
     );
   }
 
+  private inheritanceContainers(
+    containerId: string,
+    includeOwner: boolean,
+  ): string[] {
+    return this.all<{ id: string; depth: number }>(
+      `WITH RECURSIVE hierarchy(id,depth) AS (
+         SELECT ?,0
+         UNION
+         SELECT e.dst_id,h.depth+1
+         FROM symbol_edges e JOIN hierarchy h ON e.src_id=h.id
+         WHERE e.kind='INHERITS' AND e.rel='extends' AND h.depth<32
+       )
+       SELECT id,depth FROM hierarchy WHERE depth>=? ORDER BY depth,id`,
+      containerId,
+      includeOwner ? 0 : 1,
+    ).map((row) => row.id);
+  }
+
   private retryRounds(attemptWatermark: number): number {
     const row = this.one<{ max_count: number }>(
       `SELECT COALESCE(MAX(ref_count),0) AS max_count FROM (
@@ -232,4 +272,12 @@ export class SqlitePendingRefResolver {
 
 function refReceiver(name: string): string {
   return name.split(/[./]/, 1)[0] ?? name;
+}
+
+function isInheritanceRef(ref: RefRow): boolean {
+  return (
+    ref.ref_kind === "extends" ||
+    ref.ref_kind === "implements" ||
+    ref.ref_kind === "overrides"
+  );
 }

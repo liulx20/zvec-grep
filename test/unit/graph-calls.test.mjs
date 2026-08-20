@@ -468,6 +468,65 @@ class Second {
   assert.equal(callTargetFor(secondRun.id), demoHelper.id);
 });
 
+test("owner receivers resolve through the inheritance chain", async () => {
+  const file = codeFile("inherited-receivers.ts");
+  const source = {
+    kind: "text",
+    file,
+    text: `class Base {
+  helper() { return 1; }
+}
+class ChildWithoutOverride extends Base {
+  run() { return this.helper(); }
+}
+class ChildWithOverride extends Base {
+  helper() { return super.helper(); }
+  other() { return super.helper(); }
+  own() { return this.helper(); }
+}`,
+  };
+  const input = await extractFileGraph(
+    source,
+    await new CodeExtractor().extract(source),
+  );
+  const contains = input.edges.filter((edge) => edge.kind === "CONTAINS");
+  const containerFor = (id) =>
+    input.nodes.find(
+      (node) => contains.find((edge) => edge.dst === id)?.src === node.id,
+    )?.name;
+  const findMember = (container, name) =>
+    input.nodes.find(
+      (node) => node.name === name && containerFor(node.id) === container,
+    );
+  const baseHelper = findMember("Base", "helper");
+  const inheritedRun = findMember("ChildWithoutOverride", "run");
+  const overridingHelper = findMember("ChildWithOverride", "helper");
+  const other = findMember("ChildWithOverride", "other");
+  const own = findMember("ChildWithOverride", "own");
+  assert.ok(baseHelper && inheritedRun && overridingHelper && other && own);
+
+  const graph = new SqliteGraphStorage("", { inMemory: true });
+  graph.upsertFileGraph(file.id, input.nodes, input.edges, input.refs);
+  await graph.resolvePending();
+  for (const caller of [inheritedRun, overridingHelper, other]) {
+    assert.deepEqual(
+      graph.callees(caller.id, 1, 10).map((item) => item.id),
+      [baseHelper.id],
+    );
+  }
+  assert.deepEqual(
+    graph.callees(own.id, 1, 10).map((item) => item.id),
+    [overridingHelper.id],
+  );
+  assert.equal(
+    graph
+      .callees(overridingHelper.id, 1, 10)
+      .some((item) => item.id === overridingHelper.id),
+    false,
+  );
+  graph.close();
+});
+
 test("CONTAINS uses :: scope breadcrumbs", async () => {
   const file = codeFile("cls.ts");
   const source = {

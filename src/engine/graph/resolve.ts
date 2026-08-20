@@ -11,6 +11,8 @@ export function resolveRef(
   preferredFileIds: readonly string[] = [],
   binding?: ReferenceBindingMatch,
   sourceContainerName?: string,
+  sourceContainerId?: string,
+  hierarchyContainerIds: readonly string[] = [],
 ): RefResolveResult {
   const reference = referenceResolutionPolicy.analyzeReference(
     ref.ref_name,
@@ -18,17 +20,27 @@ export function resolveRef(
   );
   const context = referenceResolutionPolicy.createContext(reference, {
     sourceFileId: ref.src_file,
+    ownerContainerId: sourceContainerId,
     preferredFileIds,
     binding,
     ownerContainerName: sourceContainerName,
   });
   const plan = referenceResolutionPolicy.lookupPlan(context);
+  const containerNames =
+    plan.containerScope.kind === "named" ? [plan.containerScope.name] : [];
+  const containerIds =
+    plan.containerScope.kind === "owner-hierarchy"
+      ? hierarchyContainerIds.length > 0
+        ? hierarchyContainerIds
+        : ["__unresolved_container__"]
+      : [];
   const hit = names.lookup(
     plan.lookupName,
     ref.src_file,
     plan.preferredFileIds,
     plan.allowBareFallback,
-    plan.containerNames,
+    containerNames,
+    containerIds,
   );
   if (!hit)
     return referenceResolutionPolicy.isExternal(reference)
