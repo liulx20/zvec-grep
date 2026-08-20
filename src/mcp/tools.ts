@@ -25,7 +25,7 @@ import { formatAgentContextResult } from "../cli/format/context.js";
 import {
   formatExploreResult,
   formatNeighborhoodResult,
-} from "../cli/format/explore.js";
+} from "../presentation/graph.js";
 import {
   formatRemoteEmbeddingAuthorizationPrompt,
   remoteEmbeddingDisclosureData,

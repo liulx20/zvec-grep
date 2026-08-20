@@ -1,8 +1,5 @@
-import { mkdirSync } from "node:fs";
-import { join } from "node:path";
 import type { DatabaseSync as NodeDatabaseSync } from "node:sqlite";
-import { loadNodeSqlite } from "./runtime.js";
-import { SQLITE_GRAPH_SCHEMA, SQLITE_GRAPH_SCHEMA_VERSION } from "./schema.js";
+import { openSqliteGraphDatabase } from "./database.js";
 import type {
   ContainerNeighbor,
   FileNeighbor,
@@ -66,31 +63,9 @@ export class SqliteGraphReader {
     directory: string,
     options: { readOnly?: boolean; inMemory?: boolean } = {},
   ) {
-    if (!options.inMemory) mkdirSync(directory, { recursive: true });
-    this.readOnly = options.readOnly ?? false;
-    const { DatabaseSync } = loadNodeSqlite();
-    this.db = new DatabaseSync(
-      options.inMemory ? ":memory:" : join(directory, "graph.sqlite"),
-      {
-        readOnly: this.readOnly,
-        allowExtension: false,
-        enableForeignKeyConstraints: true,
-      },
-    );
-    if (!this.readOnly) {
-      this.db.exec("PRAGMA journal_mode=WAL");
-      this.db.exec("PRAGMA synchronous=NORMAL");
-      this.initializeSchema();
-    } else if (this.hasSchema()) this.ensureVersion();
-  }
-
-  private initializeSchema(): void {
-    this.assertOpen();
-    if (!this.readOnly) {
-      this.db.exec(SQLITE_GRAPH_SCHEMA);
-      this.ensureOptionalColumns();
-      this.ensureVersion();
-    }
+    const opened = openSqliteGraphDatabase(directory, options);
+    this.db = opened.db;
+    this.readOnly = opened.readOnly;
   }
   close(): void {
     if (!this.closed) {
@@ -594,57 +569,6 @@ export class SqliteGraphReader {
   protected assertWritable(): void {
     this.assertOpen();
     if (this.readOnly) throw new Error("SqliteGraphStorage is read-only");
-  }
-  private hasSchema(): boolean {
-    return (
-      this.db
-        .prepare(
-          "SELECT 1 FROM sqlite_master WHERE type='table' AND name='graph_meta'",
-        )
-        .get() !== undefined
-    );
-  }
-  private ensureVersion(): void {
-    const row = this.db
-      .prepare("SELECT value FROM graph_meta WHERE key='schema_version'")
-      .get() as { value: string } | undefined;
-    if (!row) {
-      if (this.readOnly)
-        throw new Error("SQLite graph schema version is missing");
-      this.db
-        .prepare("INSERT INTO graph_meta(key,value) VALUES('schema_version',?)")
-        .run(String(SQLITE_GRAPH_SCHEMA_VERSION));
-    } else if (Number(row.value) !== SQLITE_GRAPH_SCHEMA_VERSION)
-      throw new Error(
-        `Unsupported SQLite graph schema version: ${row.value}; expected ${SQLITE_GRAPH_SCHEMA_VERSION}`,
-      );
-  }
-
-  private ensureOptionalColumns(): void {
-    const columns = new Set(
-      this.all<{ name: string }>("PRAGMA table_info(pending_refs)").map(
-        (row) => row.name,
-      ),
-    );
-    if (!columns.has("imported_name")) {
-      this.db.exec("ALTER TABLE pending_refs ADD COLUMN imported_name TEXT");
-    }
-    if (!columns.has("local_name")) {
-      this.db.exec("ALTER TABLE pending_refs ADD COLUMN local_name TEXT");
-    }
-    if (!columns.has("source_language")) {
-      this.db.exec("ALTER TABLE pending_refs ADD COLUMN source_language TEXT");
-    }
-    const bindingColumns = new Set(
-      this.all<{ name: string }>("PRAGMA table_info(file_import_bindings)").map(
-        (row) => row.name,
-      ),
-    );
-    if (!bindingColumns.has("spec")) {
-      this.db.exec(
-        "ALTER TABLE file_import_bindings ADD COLUMN spec TEXT NOT NULL DEFAULT ''",
-      );
-    }
   }
 }
 
