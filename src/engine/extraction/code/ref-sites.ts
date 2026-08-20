@@ -339,7 +339,17 @@ function isCallCallee(node: TSNode): boolean {
     parent.childForFieldName("function") ??
     parent.childForFieldName("name") ??
     parent.namedChildren[0];
-  return fn === node;
+  return sameNodeRange(fn, node);
+}
+
+/** Tree-sitter may return a fresh JS wrapper for the same syntax node. */
+function sameNodeRange(left: TSNode | undefined, right: TSNode): boolean {
+  return (
+    left !== undefined &&
+    left.type === right.type &&
+    left.startIndex === right.startIndex &&
+    left.endIndex === right.endIndex
+  );
 }
 
 function inHeritageContext(node: TSNode): boolean {

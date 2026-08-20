@@ -98,6 +98,55 @@ export function run(obj: { field: number }) {
   );
 });
 
+test("qualified call callees do not emit detached bare member refs", async () => {
+  const file = codeFile("qualified-call.ts");
+  const source = {
+    kind: "text",
+    file,
+    text: `class Base {
+  helper() { return 1; }
+}
+class Child extends Base {
+  run() { return this.helper(); }
+}
+class Override {
+  helper() { return 2; }
+}`,
+  };
+  const graphInput = await extractFileGraph(
+    source,
+    await new CodeExtractor().extract(source),
+  );
+  const run = graphInput.nodes.find((node) => node.name === "run");
+  assert.ok(run);
+  assert.ok(
+    graphInput.edges.some(
+      (edge) =>
+        edge.src === run.id &&
+        edge.kind === "CALLS" &&
+        edge.ref_name === "this.helper",
+    ),
+  );
+  assert.equal(
+    graphInput.edges.some(
+      (edge) =>
+        edge.src === run.id &&
+        edge.kind === "REFS" &&
+        edge.ref_name === "helper",
+    ),
+    false,
+  );
+  assert.equal(
+    graphInput.refs.some(
+      (ref) =>
+        ref.owner === run.id &&
+        ref.ref_kind === "member" &&
+        ref.ref_name === "helper",
+    ),
+    false,
+  );
+});
+
 test("extractFileGraph resolves cross-file type REFS", async () => {
   const graph = new SqliteGraphStorage("", { inMemory: true });
   const a = {
