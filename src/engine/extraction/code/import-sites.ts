@@ -92,7 +92,7 @@ function extractSpecsFromNode(node: TSNode, language: string): ImportSpec[] {
           {
             spec: match[1],
             line,
-            bindings: pythonFromBindings(node.text),
+            bindings: pythonFromBindings(node, null),
           },
         ];
       }
@@ -102,7 +102,7 @@ function extractSpecsFromNode(node: TSNode, language: string): ImportSpec[] {
       {
         spec: module.text.trim(),
         line,
-        bindings: pythonFromBindings(node.text),
+        bindings: pythonFromBindings(node, module),
       },
     ];
   }
@@ -137,34 +137,75 @@ function extractSpecsFromNode(node: TSNode, language: string): ImportSpec[] {
     }
     const spec = stripQuotes(sourceNode.text);
     return spec
-      ? [{ spec, line, bindings: javascriptNamedBindings(node.text) }]
+      ? [{ spec, line, bindings: javascriptNamedBindings(node) }]
       : [];
   }
 
   return [];
 }
 
-function javascriptNamedBindings(text: string): ImportBinding[] {
-  const named = text.match(/\{([\s\S]*?)\}/)?.[1];
-  if (!named) return [];
-  return parseBindings(named, /\s+as\s+/i);
-}
-
-function pythonFromBindings(text: string): ImportBinding[] {
-  const imported = text.match(/^\s*from\s+\S+\s+import\s+([\s\S]+)$/)?.[1];
-  if (!imported) return [];
-  return parseBindings(imported.replace(/^\(|\)$/g, ""), /\s+as\s+/i);
-}
-
-function parseBindings(value: string, aliasSeparator: RegExp): ImportBinding[] {
-  return value.split(",").flatMap((piece) => {
-    const normalized = piece.replace(/\/\*[\s\S]*?\*\//g, "").trim();
-    if (!normalized || normalized.startsWith("...")) return [];
-    const [importedRaw, localRaw] = normalized.split(aliasSeparator, 2);
-    const imported = importedRaw?.replace(/^type\s+/, "").trim();
-    const local = (localRaw ?? imported)?.trim();
+function javascriptNamedBindings(node: TSNode): ImportBinding[] {
+  return descendantsOfType(node, "import_specifier").flatMap((specifier) => {
+    const importedNode =
+      specifier.childForFieldName("name") ?? specifier.namedChildren[0];
+    const localNode =
+      specifier.childForFieldName("alias") ?? specifier.namedChildren[1];
+    const imported = importedNode?.text.replace(/^type\s+/, "").trim();
+    const local = (localNode?.text ?? imported)?.trim();
     return imported && local ? [{ imported, local }] : [];
   });
+}
+
+function pythonFromBindings(
+  node: TSNode,
+  moduleNode: TSNode | null,
+): ImportBinding[] {
+  const bindings: ImportBinding[] = [];
+  const visit = (current: TSNode): void => {
+    if (moduleNode && sameNode(current, moduleNode)) return;
+    if (current.type === "aliased_import") {
+      const importedNode =
+        current.childForFieldName("name") ?? current.namedChildren[0];
+      const localNode =
+        current.childForFieldName("alias") ?? current.namedChildren[1];
+      const imported = importedNode?.text.trim();
+      const local = localNode?.text.trim();
+      if (imported && local) bindings.push({ imported, local });
+      return;
+    }
+    if (
+      current !== node &&
+      (current.type === "identifier" || current.type === "dotted_name")
+    ) {
+      const name = current.text.trim();
+      if (name) bindings.push({ imported: name, local: name });
+      return;
+    }
+    for (const child of current.namedChildren ?? []) visit(child);
+  };
+  visit(node);
+  return bindings;
+}
+
+function sameNode(left: TSNode, right: TSNode): boolean {
+  return (
+    left.type === right.type &&
+    left.startIndex === right.startIndex &&
+    left.endIndex === right.endIndex
+  );
+}
+
+function descendantsOfType(node: TSNode, type: string): TSNode[] {
+  const out: TSNode[] = [];
+  const visit = (current: TSNode): void => {
+    if (current.type === type) {
+      out.push(current);
+      return;
+    }
+    for (const child of current.namedChildren ?? []) visit(child);
+  };
+  visit(node);
+  return out;
 }
 
 function stripQuotes(value: string): string {

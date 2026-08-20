@@ -137,6 +137,48 @@ export { helper } from "./helper";
   assert.deepEqual(specs.map((s) => s.spec).sort(), ["./helper", "./utils"]);
 });
 
+test("collectImportSpecs reads commented Python bindings from the AST", async () => {
+  const file = codeFile("python-comments", "pkg/app.py", "python");
+  const text = `from .codec import (
+  foo,
+  # a comma here, must not become a binding
+  bar as baz,
+)
+`;
+  const specs = await collectImportSpecs({ kind: "text", text, file });
+  assert.deepEqual(specs, [
+    {
+      spec: ".codec",
+      line: 1,
+      bindings: [
+        { imported: "foo", local: "foo" },
+        { imported: "bar", local: "baz" },
+      ],
+    },
+  ]);
+});
+
+test("collectImportSpecs ignores commas inside JS comments", async () => {
+  const file = codeFile("js-comments", "src/app.ts");
+  const text = `import {
+  foo,
+  /* misleading, comma */
+  bar as baz,
+} from "./codec";
+`;
+  const specs = await collectImportSpecs({ kind: "text", text, file });
+  assert.deepEqual(specs, [
+    {
+      spec: "./codec",
+      line: 1,
+      bindings: [
+        { imported: "foo", local: "foo" },
+        { imported: "bar", local: "baz" },
+      ],
+    },
+  ]);
+});
+
 test("extractFileGraph + resolvePending builds IMPORTS edges", async () => {
   const a = codeFile("file-a", "src/a.ts");
   const b = codeFile("file-b", "src/utils.ts");
