@@ -545,21 +545,15 @@ export function registerZvecGrepTools(
       },
     },
     async (input) => {
-      try {
-        const result = await backend.explore({
-          query: input.query,
-          seedId: input.seedId,
-          searchLimit: input.limit,
-          traversalDepth: input.depth,
-          maxFiles: input.maxFiles,
-          root: input.root,
-        });
-        return textToolResult(formatExploreResult(result));
-      } catch (error) {
-        return textToolResult(
-          error instanceof Error ? error.message : String(error),
-        );
-      }
+      const result = await backend.explore({
+        query: input.query,
+        seedId: input.seedId,
+        searchLimit: input.limit,
+        traversalDepth: input.depth,
+        maxFiles: input.maxFiles,
+        root: input.root,
+      });
+      return textToolResult(formatExploreResult(result));
     },
   );
 
@@ -578,21 +572,15 @@ export function registerZvecGrepTools(
         },
       },
       async (input) => {
-        try {
-          const result = await backend.graphNeighborhood({
-            direction,
-            query: input.query,
-            seedId: input.seedId,
-            depth: input.depth,
-            limit: input.limit,
-            root: input.root,
-          });
-          return textToolResult(formatNeighborhoodResult(result));
-        } catch (error) {
-          return textToolResult(
-            error instanceof Error ? error.message : String(error),
-          );
-        }
+        const result = await backend.graphNeighborhood({
+          direction,
+          query: input.query,
+          seedId: input.seedId,
+          depth: input.depth,
+          limit: input.limit,
+          root: input.root,
+        });
+        return textToolResult(formatNeighborhoodResult(result));
       },
     );
   }

@@ -1,5 +1,11 @@
-import type { WorkspaceReadSession } from "../engine/service/zvec-grep.js";
-import { openWorkspaceReadSession } from "../engine/service/zvec-grep.js";
+import type {
+  WorkspaceGraphReadSession,
+  WorkspaceReadSession,
+} from "../engine/service/zvec-grep.js";
+import {
+  openWorkspaceGraphReadSession,
+  openWorkspaceReadSession,
+} from "../engine/service/zvec-grep.js";
 import type {
   ZvecGrepContextOptions,
   ZvecGrepContextResult,
@@ -25,6 +31,8 @@ export type RootRuntimeOptions = {
   openSession?: (
     lease: ModelLease,
   ) => WorkspaceReadSession | Promise<WorkspaceReadSession>;
+  openGraphSession?: () =>
+    WorkspaceGraphReadSession | Promise<WorkspaceGraphReadSession>;
   onActivity?: () => void;
 };
 
@@ -40,6 +48,7 @@ type ReadGeneration = {
 export class RootRuntime {
   readonly canonicalRoot: string;
   private generation?: ReadGeneration;
+  private graphCache?: WorkspaceReadSessionCache<WorkspaceGraphReadSession>;
   private generationTail: Promise<void> = Promise.resolve();
   private modelLoadRequest?: EmbeddingModelLoadRequest;
   private dirtyRevision = 0;
@@ -137,7 +146,7 @@ export class RootRuntime {
     options: ZvecGrepExploreOptions,
   ): Promise<ZvecGrepExploreResult> {
     await this.waitForWriter();
-    return this.withReadSession(undefined, (session) =>
+    return this.withGraphReadSession((session) =>
       session.explore({ ...options, root: this.canonicalRoot }),
     );
   }
@@ -146,7 +155,7 @@ export class RootRuntime {
     options: ZvecGrepGraphNeighborhoodOptions,
   ): Promise<ZvecGrepGraphNeighborhoodResult> {
     await this.waitForWriter();
-    return this.withReadSession(undefined, (session) =>
+    return this.withGraphReadSession((session) =>
       session.graphNeighborhood({ ...options, root: this.canonicalRoot }),
     );
   }
@@ -284,8 +293,10 @@ export class RootRuntime {
     try {
       return await this.runGenerationSerial(async () => {
         const generation = this.generation;
+        const graphCache = this.graphCache;
         this.generation = undefined;
-        await generation?.cache.close();
+        this.graphCache = undefined;
+        await Promise.all([generation?.cache.close(), graphCache?.close()]);
         return operation();
       });
     } finally {
@@ -328,9 +339,11 @@ export class RootRuntime {
     this.setWriterPending(false);
     await this.runGenerationSerial(async () => {
       const generation = this.generation;
+      const graphCache = this.graphCache;
       this.generation = undefined;
+      this.graphCache = undefined;
       try {
-        await generation?.cache.close();
+        await Promise.all([generation?.cache.close(), graphCache?.close()]);
       } finally {
         await this.options.rootLease?.release();
       }
@@ -355,9 +368,6 @@ export class RootRuntime {
       root: session.root,
       modelKey: lease.key,
       context: (contextOptions) => session.context(contextOptions),
-      explore: (exploreOptions) => session.explore(exploreOptions),
-      graphNeighborhood: (graphOptions) =>
-        session.graphNeighborhood(graphOptions),
       async close() {
         if (closed) {
           return;
@@ -376,6 +386,22 @@ export class RootRuntime {
     while (this.writerPending && this.writerReady) {
       await this.writerReady;
     }
+  }
+
+  private async withGraphReadSession<T>(
+    fn: (session: WorkspaceGraphReadSession) => Promise<T>,
+  ): Promise<T> {
+    return this.runGenerationSerial(async () => {
+      if (this.closed) throw new Error("Root runtime is closed.");
+      this.graphCache ??= new WorkspaceReadSessionCache({
+        open: () =>
+          this.options.openGraphSession?.() ??
+          openWorkspaceGraphReadSession(this.canonicalRoot),
+        idleTtlMs: this.options.readSessionIdleTtlMs,
+        serializeOperations: true,
+      });
+      return this.graphCache.withRead(fn);
+    });
   }
 
   private async withReadSession<T>(

@@ -88,6 +88,8 @@
   `zvec_grep_explore`。
 - CLI 和 MCP 只解析参数和格式化结果。实际调用统一进入 `ZvecGrep` service；Server 模式再经过
   `ZvecGrepDaemonBackend` 和 workspace read session，因此会复用 daemon 路由、workspace 锁及 session cache。
+- daemon 为图操作维护独立的 model-free read session cache；Explore 和 neighborhood 只打开持久化实体索引
+  与 SQLite，不获取、下载或验证 embedding model。
 - 普通 `zg query` / `zvec_grep_search`：不会调用 `explore`，但会使用图做轻量候选扩展。
 
 ## 3. 数据模型

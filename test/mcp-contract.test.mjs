@@ -142,8 +142,62 @@ function createBackend() {
         ],
       },
     }),
+    explore: async (input) => ({
+      root: input.root,
+      available: true,
+      query: input.query,
+      roots: [],
+      nodes: [],
+      edges: [],
+      callPaths: [],
+      blastRadius: [],
+      changeSurface: [],
+      files: [],
+      emptyReason: "no_seeds",
+    }),
+    graphNeighborhood: async (input) => ({
+      root: input.root,
+      available: true,
+      direction: input.direction,
+      query: input.query,
+      depth: input.depth ?? 1,
+      limit: input.limit ?? 20,
+      seeds: [],
+      neighbors: [],
+    }),
   };
 }
+
+test("graph tool failures are returned as MCP errors", async (t) => {
+  const backend = createBackend();
+  backend.explore = async () => {
+    throw new Error("graph index missing");
+  };
+  backend.graphNeighborhood = async () => {
+    throw new Error("graph model load failed");
+  };
+  const { client, server } = await connect(backend);
+  t.after(async () => {
+    await client.close();
+    await server.close();
+  });
+
+  const explore = await client.callTool({
+    name: "zvec_grep_explore",
+    arguments: { root, query: "login" },
+  });
+  assert.equal(explore.isError, true);
+  assert.match(explore.content[0].text, /graph index missing/);
+
+  for (const direction of ["callers", "callees", "impact"]) {
+    const result = await client.callTool({
+      name: `zvec_grep_${direction}`,
+      arguments: { root, query: "login" },
+    });
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /graph model load failed/);
+  }
+});
 
 async function connect(backend = createBackend(), options = {}) {
   const server = createZvecGrepMcpServer(backend, "1.0.0", options);

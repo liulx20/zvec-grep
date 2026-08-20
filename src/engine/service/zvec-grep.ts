@@ -102,6 +102,11 @@ export async function createZvecGrep(
 export type WorkspaceReadSession = {
   readonly root: string;
   context(options: ZvecGrepContextOptions): Promise<ZvecGrepContextResult>;
+  close(): Promise<void>;
+};
+
+export type WorkspaceGraphReadSession = {
+  readonly root: string;
   explore(options: ZvecGrepExploreOptions): Promise<ZvecGrepExploreResult>;
   graphNeighborhood(
     options: ZvecGrepGraphNeighborhoodOptions,
@@ -160,6 +165,40 @@ export function openWorkspaceReadSession(
       );
       return withContextTimings(result, timings);
     },
+    async close() {
+      if (closed) {
+        return;
+      }
+      workspaceIndex.close();
+      closed = true;
+    },
+  };
+}
+
+export function openWorkspaceGraphReadSession(
+  startRoot: string,
+): WorkspaceGraphReadSession {
+  const start = resolveZvecGrepRoot(startRoot);
+  assertNearestWorkspaceHomeUnlocked(start, "daemon.graph.open");
+  const nearest = findNearestWorkspaceIndex(start);
+  if (!nearest) throw workspaceIndexMissingError(start, "undecided");
+  const { location, info } = nearest;
+  if (info.indexPolicy === "disabled") {
+    throw workspaceIndexDisabledError(location.root);
+  }
+  if (!isWorkspaceIndexed(info) || !hasWorkspaceIndex(location)) {
+    throw workspaceIndexMissingError(
+      location.root,
+      info.indexPolicy ?? "enabled",
+    );
+  }
+
+  // Graph reads need the persisted entity store and SQLite only. Do not pass
+  // an embedding model or involve the daemon model pool.
+  const workspaceIndex = new WorkspaceIndex(info, { mode: "read" });
+  let closed = false;
+  return {
+    root: location.root,
     async explore(options) {
       assertReadSessionOpen(closed);
       return await withHomeReadLock(location.home, "daemon.explore", () =>
@@ -180,9 +219,7 @@ export function openWorkspaceReadSession(
       );
     },
     async close() {
-      if (closed) {
-        return;
-      }
+      if (closed) return;
       workspaceIndex.close();
       closed = true;
     },
