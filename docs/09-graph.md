@@ -153,6 +153,9 @@ erDiagram
 - `count` 聚合同一关系出现次数，`first_line` 保存首次出现行号，`ref_name` 保存提取时名称。
 - schema 使用 `STRICT`、外键、组合主键和按 src/dst/name 建立的查询索引。
 - 当前 schema 版本为 1，不匹配时拒绝打开，没有自动 schema upgrade。
+- 引入图索引后，workspace `CURRENT_INDEX_VERSION` 已提升为 2。旧 v1 workspace 不会把 unchanged
+  文件直接沿用为“已有图数据”，而是要求执行 rebuild；rebuild 会同时重建 Zvec 主索引和完整图索引。
+- drop/rebuild 会删除 `<workspace>/.zvec-grep/code-graph`，不会把旧 `graph.sqlite`、节点或边带入新索引。
 
 ### 3.3 Ref ID
 

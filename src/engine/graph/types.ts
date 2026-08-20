@@ -31,6 +31,7 @@ export type ContainerNeighbor = {
 export type FileNeighbor = {
   fid: string;
   id: string;
+  direction: "out" | "in";
 };
 
 export type SymContext = {

@@ -210,6 +210,9 @@ test("default agent contract exposes indexed search and code graph tools", async
     "zvec_grep_impact",
     "zvec_grep_search",
   ]);
+  for (const tool of listed.tools) {
+    assert.ok(tool.inputSchema.required.includes("root"));
+  }
 
   const instructions = client.getInstructions();
   assert.equal(instructions, ZVEC_GREP_AGENT_MCP_INSTRUCTIONS);

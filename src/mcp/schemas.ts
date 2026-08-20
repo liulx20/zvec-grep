@@ -612,7 +612,7 @@ export const zvecGrepServerStatusOutputSchema = z.object({
 });
 
 export const zvecGrepExploreInputSchema = {
-  root: absoluteRootSchema.optional(),
+  root: absoluteRootSchema,
   query: boundedString(
     "Symbol name or short query used to seed the code-graph explore pack.",
   ),
@@ -646,7 +646,7 @@ export const zvecGrepExploreInputSchema = {
 };
 
 export const zvecGrepGraphNeighborhoodInputSchema = {
-  root: absoluteRootSchema.optional(),
+  root: absoluteRootSchema,
   query: boundedString("Exact symbol name or entity id."),
   seedId: z
     .string()

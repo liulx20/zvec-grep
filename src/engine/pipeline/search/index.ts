@@ -1490,13 +1490,16 @@ function injectImportFileNeighbors(input: {
       }),
       GRAPH_EXPAND_ENTITIES_PER_FILE,
     );
-    const source = input.seeds.find((seed) => seed.file.id === neighbor.fid);
-    const destination = entities[0]?.file;
-    if (source && destination) {
+    const seed = input.seeds.find((item) => item.file.id === neighbor.fid);
+    const neighborFile = entities[0]?.file;
+    if (seed && neighborFile) {
+      const source = neighbor.direction === "out" ? seed.file : neighborFile;
+      const destination =
+        neighbor.direction === "out" ? neighborFile : seed.file;
       input.relations.push({
-        srcId: source.file.id,
+        srcId: source.id,
         dstId: destination.id,
-        srcLabel: source.file.relativePath,
+        srcLabel: source.relativePath,
         dstLabel: destination.relativePath,
         kind: "IMPORTS",
         scope: "file",

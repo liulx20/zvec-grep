@@ -299,6 +299,84 @@ test("searchWorkspaceIndex silently expands IMPORTS file neighbors into hits", a
   assert.ok(
     result.relationships.some((relation) => relation.kind === "IMPORTS"),
   );
+  const importRelation = result.relationships.find(
+    (relation) => relation.kind === "IMPORTS",
+  );
+  assert.equal(importRelation.srcId, fileA.id);
+  assert.equal(importRelation.dstId, fileB.id);
+  graph.close();
+});
+
+test("searchWorkspaceIndex preserves incoming IMPORTS direction", async () => {
+  const graph = new SqliteGraphStorage("", { inMemory: true });
+  const fileA = indexedFile("file-a.ts", "a.ts");
+  const fileB = indexedFile("file-b.ts", "b.ts");
+  graph.upsertFileGraph(
+    fileA.id,
+    [{ id: "seed", kind: "function", is_exported: true, name: "seed" }],
+    [],
+    [],
+  );
+  graph.upsertFileGraph(
+    fileB.id,
+    [{ id: "caller", kind: "function", is_exported: true, name: "caller" }],
+    [],
+    [
+      {
+        owner: fileB.id,
+        id: "ref-import-a",
+        ref_name: "./a",
+        ref_kind: "import",
+        line: 1,
+        owner_is_file: true,
+      },
+    ],
+  );
+  await graph.resolvePending({ files: [fileA, fileB] });
+
+  const seed = entity("seed", "seed", "a.ts");
+  const caller = entity("caller", "caller", "b.ts");
+  const byId = new Map([
+    ["seed", seed],
+    ["caller", caller],
+  ]);
+  const storage = {
+    getEntity(id) {
+      return byId.get(id) ?? null;
+    },
+    listEntitiesByFile(fileId) {
+      return fileId === fileB.id ? [caller] : [seed];
+    },
+    searchFts() {
+      return [
+        {
+          path: "fts",
+          score: 1,
+          file: seed.file,
+          fragment: {
+            id: seed.entity.id,
+            fileId: seed.entity.fileId,
+            range: seed.entity.range,
+            content: seed.entity.content,
+            metadata: seed.entity.metadata,
+          },
+        },
+      ];
+    },
+    searchVector() {
+      return [];
+    },
+    listFiles() {
+      return [fileA, fileB];
+    },
+  };
+  const result = await searchWorkspaceIndex(
+    { routes: [{ mode: "fts", query: "seed" }], limit: 10 },
+    { workspaceIndex: { id: "c", name: "c", path: "/tmp/c" }, storage, graph },
+  );
+  const relation = result.relationships.find((item) => item.kind === "IMPORTS");
+  assert.equal(relation.srcId, fileB.id);
+  assert.equal(relation.dstId, fileA.id);
   graph.close();
 });
 

@@ -105,6 +105,9 @@ const ALL_EDGE_KINDS: readonly GraphEdgeKind[] = [
 ];
 const PER_NAME_CEILING = 500;
 const require = createRequire(import.meta.url);
+type NodeSqliteModule = { DatabaseSync: typeof NodeDatabaseSync };
+const SQLITE_EXPERIMENTAL_WARNING =
+  "SQLite is an experimental feature and might change at any time";
 
 /** Direct SQLite graph: persistence and indexed queries without loading the full graph. */
 export class SqliteGraphStorage implements GraphStorage {
@@ -119,8 +122,7 @@ export class SqliteGraphStorage implements GraphStorage {
   ) {
     if (!options.inMemory) mkdirSync(directory, { recursive: true });
     this.readOnly = options.readOnly ?? false;
-    const { DatabaseSync } =
-      require("node:sqlite") as typeof import("node:sqlite");
+    const { DatabaseSync } = loadNodeSqlite();
     this.db = new DatabaseSync(
       options.inMemory ? ":memory:" : join(directory, "graph.sqlite"),
       {
@@ -324,7 +326,11 @@ export class SqliteGraphStorage implements GraphStorage {
     for (const edge of this.adjacentEdges(fileIds, ["IMPORTS"], "both"))
       for (const fid of [edge.src, edge.dst]) {
         if (!wanted.has(fid) || (per.get(fid) ?? 0) >= limit) continue;
-        out.push({ fid, id: edge.src === fid ? edge.dst : edge.src });
+        out.push({
+          fid,
+          id: edge.src === fid ? edge.dst : edge.src,
+          direction: edge.src === fid ? "out" : "in",
+        });
         per.set(fid, (per.get(fid) ?? 0) + 1);
       }
     return out;
@@ -855,6 +861,22 @@ export class SqliteGraphStorage implements GraphStorage {
       throw new Error(
         `Unsupported SQLite graph schema version: ${row.value}; expected ${SQLITE_GRAPH_SCHEMA_VERSION}`,
       );
+  }
+}
+
+function loadNodeSqlite(): NodeSqliteModule {
+  // Node 22 labels node:sqlite experimental and writes to stderr on first load.
+  // Suppress only that known runtime warning; Node 24+ does not emit it.
+  const emitWarning = process.emitWarning;
+  process.emitWarning = ((warning: string | Error, ...args: unknown[]) => {
+    const message = warning instanceof Error ? warning.message : warning;
+    if (message === SQLITE_EXPERIMENTAL_WARNING) return;
+    Reflect.apply(emitWarning, process, [warning, ...args]);
+  }) as typeof process.emitWarning;
+  try {
+    return require("node:sqlite") as NodeSqliteModule;
+  } finally {
+    process.emitWarning = emitWarning;
   }
 }
 
