@@ -157,6 +157,7 @@ export interface GraphReader {
     fromSymId: string,
     toSymId: string,
     maxDepth: number,
+    edgeLimit?: number,
   ): SymRef[] | null;
   hierarchy(
     symId: string,

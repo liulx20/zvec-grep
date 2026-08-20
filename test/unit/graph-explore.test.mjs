@@ -66,6 +66,32 @@ test("exploreSubgraph expands and RWR-scores multiple seeds without context asse
   graph.close();
 });
 
+test("exploreSubgraph bounds failed call-path attempts and edge reads", () => {
+  class TrackingGraph extends SqliteGraphStorage {
+    pathAttempts = 0;
+    edgeBudget = 0;
+    pathBetween(_from, _to, _depth, edgeLimit) {
+      this.pathAttempts += 1;
+      this.edgeBudget += edgeLimit;
+      return null;
+    }
+  }
+  const graph = new TrackingGraph("", { inMemory: true });
+  const rootIds = Array.from({ length: 32 }, (_, index) => `isolated-${index}`);
+  const storage = storageFrom(rootIds.map((id) => entity(id, id, `${id}.ts`)));
+
+  exploreSubgraph(graph, storage, {
+    seedIds: rootIds,
+    traversalDepth: 3,
+    maxNodes: 16,
+    includeCallPaths: true,
+  });
+
+  assert.equal(graph.pathAttempts, 32);
+  assert.ok(graph.edgeBudget <= 20_000);
+  graph.close();
+});
+
 test("exploreSubgraph drops call paths that exceed the retained node budget", () => {
   const graph = new SqliteGraphStorage("", { inMemory: true });
   const rootIds = Array.from({ length: 16 }, (_, index) => `root-${index}`);

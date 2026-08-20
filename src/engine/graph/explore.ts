@@ -12,6 +12,9 @@ const DEFAULT_MAX_CHARS = 24_000;
 const DEFAULT_GLUE_LIMIT = 60;
 const DEFAULT_CONTAINER_GLUE_LIMIT = 40;
 const DEFAULT_PATH_LIMIT = 8;
+const MAX_PATH_SEEDS = 8;
+const MAX_PATH_ATTEMPTS = 32;
+const MAX_PATH_EDGE_READS = 20_000;
 const DEFAULT_BLAST_LIMIT = 20;
 const HIERARCHY_BUDGET_RATIO = 0.25;
 const RWR_EDGE_WEIGHTS: Readonly<Record<GraphEdgeKind, number>> = {
@@ -554,12 +557,27 @@ function collectCallPaths(
 ): ExploreCallPath[] {
   const paths: ExploreCallPath[] = [];
   const seen = new Set<string>();
-  for (let i = 0; i < rootIds.length && paths.length < limit; i++) {
-    for (let j = i + 1; j < rootIds.length && paths.length < limit; j++) {
-      const left = rootIds[i]!;
-      const right = rootIds[j]!;
-      const forward = graph.pathBetween(left, right, maxDepth);
-      const reverse = forward ? null : graph.pathBetween(right, left, maxDepth);
+  const pathSeeds = rootIds.slice(0, MAX_PATH_SEEDS);
+  let attempts = 0;
+  let edgeReadsRemaining = MAX_PATH_EDGE_READS;
+  const tryPath = (from: string, to: string): SymRef[] | null => {
+    if (attempts >= MAX_PATH_ATTEMPTS || edgeReadsRemaining <= 0) return null;
+    const attemptsRemaining = MAX_PATH_ATTEMPTS - attempts;
+    const edgeAllowance = Math.max(
+      1,
+      Math.floor(edgeReadsRemaining / attemptsRemaining),
+    );
+    attempts += 1;
+    edgeReadsRemaining -= edgeAllowance;
+    return graph.pathBetween(from, to, maxDepth, edgeAllowance);
+  };
+  for (let i = 0; i < pathSeeds.length && paths.length < limit; i++) {
+    for (let j = i + 1; j < pathSeeds.length && paths.length < limit; j++) {
+      if (attempts >= MAX_PATH_ATTEMPTS || edgeReadsRemaining <= 0) break;
+      const left = pathSeeds[i]!;
+      const right = pathSeeds[j]!;
+      const forward = tryPath(left, right);
+      const reverse = forward ? null : tryPath(right, left);
       const path = forward ?? reverse;
       if (!path || path.length < 2) {
         continue;

@@ -180,8 +180,15 @@ export class SqliteGraphReader {
     }));
   }
 
-  pathBetween(from: string, to: string, maxDepth: number): SymRef[] | null {
+  pathBetween(
+    from: string,
+    to: string,
+    maxDepth: number,
+    edgeLimit = 10_000,
+  ): SymRef[] | null {
     if (from === to) return [{ id: from, kind: this.symbolKind(from) }];
+    let remainingEdges = Math.max(0, Math.floor(edgeLimit));
+    if (remainingEdges === 0) return null;
     const parent = new Map<string, string | null>([[from, null]]);
     let frontier = [from];
     for (
@@ -190,17 +197,20 @@ export class SqliteGraphReader {
       depth++
     ) {
       const next: string[] = [];
-      for (const edge of this.adjacentEdges(
+      const edges = this.adjacentEdges(
         frontier,
         ["CALLS"],
         "outgoing",
-        10_000,
-      )) {
+        remainingEdges,
+      );
+      remainingEdges -= edges.length;
+      for (const edge of edges) {
         if (parent.has(edge.dst)) continue;
         parent.set(edge.dst, edge.src);
         if (edge.dst === to) return this.reconstructPath(parent, to);
         next.push(edge.dst);
       }
+      if (remainingEdges <= 0) return null;
       frontier = next;
     }
     return null;
