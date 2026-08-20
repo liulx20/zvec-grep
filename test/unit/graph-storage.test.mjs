@@ -34,6 +34,30 @@ test("graph open reports corruption and writable mode fails loudly", async (t) =
   );
 });
 
+test("read-only graph open rejects an empty SQLite file", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "zvec-grep-empty-graph-"));
+  t.after(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+  await writeFile(join(dir, "graph.sqlite"), "");
+
+  const graph = openGraphStorage(dir, { readOnly: true });
+  assert.equal(graph.available, false);
+  assert.match(graph.unavailableReason, /graph schema is missing/);
+});
+
+test("read-only graph open does not create a missing directory", async (t) => {
+  const parent = await mkdtemp(join(tmpdir(), "zvec-grep-readonly-graph-"));
+  const dir = join(parent, "missing", "code-graph");
+  t.after(async () => {
+    await rm(parent, { recursive: true, force: true });
+  });
+
+  const graph = openGraphStorage(dir, { readOnly: true });
+  assert.equal(graph.available, false);
+  await assert.rejects(access(dir));
+});
+
 test("SQLite graph upsert resolves callers and reattaches incoming edges", async (t) => {
   const dir = await mkdtemp(join(tmpdir(), "zvec-grep-graph-"));
   t.after(async () => {
@@ -148,6 +172,74 @@ test("failed refs retry in deterministic per-name batches", async () => {
   await graph.resolvePending();
   assert.equal(graph.stats().callsCount, 501);
   assert.equal(graph.stats().refCount, 0);
+  graph.close();
+});
+
+test("failed ref retry batches rotate instead of starving later rows", async () => {
+  const graph = new SqliteGraphStorage("", { inMemory: true });
+  const file = (id, absolutePath) => ({
+    id,
+    absolutePath,
+    relativePath: absolutePath.slice("/repo/".length),
+    rootPath: "/repo",
+    sizeBytes: 1,
+    lastModifiedTime: 1,
+    kind: "code",
+    format: "typescript",
+  });
+  const blockedFiles = Array.from({ length: 500 }, (_, index) =>
+    file(`blocked-${index}`, `/repo/bad-${index}/caller.ts`),
+  );
+  const validFile = file("valid", "/repo/good/caller.ts");
+  for (const [index, caller] of blockedFiles.entries()) {
+    graph.upsertFileGraph(
+      caller.id,
+      [],
+      [],
+      [
+        {
+          ...rawRef({
+            owner: caller.id,
+            ownerIsFile: true,
+            refName: "./target",
+            refKind: "import",
+            line: 1,
+          }),
+          id: `aaa-${String(index).padStart(3, "0")}`,
+        },
+      ],
+    );
+  }
+  graph.upsertFileGraph(
+    validFile.id,
+    [],
+    [],
+    [
+      {
+        ...rawRef({
+          owner: validFile.id,
+          ownerIsFile: true,
+          refName: "./target",
+          refKind: "import",
+          line: 1,
+        }),
+        id: "zzz-valid",
+      },
+    ],
+  );
+  const callers = [...blockedFiles, validFile];
+  await graph.resolvePending({ files: callers });
+  assert.equal(graph.stats().refCount, 501);
+
+  const targetFile = file("target", "/repo/good/target.ts");
+  graph.upsertFileGraph(targetFile.id, [], [], []);
+  await graph.resolvePending({ files: [...callers, targetFile] });
+  assert.equal(graph.stats().refCount, 501);
+  await graph.resolvePending({ files: [...callers, targetFile] });
+  assert.equal(graph.stats().refCount, 500);
+  assert.deepEqual(graph.expandFileNeighbors([validFile.id], 10), [
+    { fid: validFile.id, id: targetFile.id, direction: "out" },
+  ]);
   graph.close();
 });
 

@@ -90,7 +90,7 @@ export class SqliteGraphWriter extends SqliteGraphReader {
   protected insertRef(ref: RawRef, fallbackOwner: string): void {
     this.db
       .prepare(
-        "INSERT OR REPLACE INTO pending_refs(id,owner_id,owner_is_file,ref_name,ref_kind,line,imported_name,local_name,source_language,status) VALUES(?,?,?,?,?,?,?,?,?,'pending')",
+        "INSERT OR REPLACE INTO pending_refs(id,owner_id,owner_is_file,ref_name,ref_kind,line,imported_name,local_name,source_language,status,last_attempt) VALUES(?,?,?,?,?,?,?,?,?,'pending',0)",
       )
       .run(
         ref.id,

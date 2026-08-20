@@ -4,7 +4,7 @@ import {
   type TextSource,
 } from "../extraction/index.js";
 import type { EntityFragment } from "../types.js";
-import { isExternalRefName } from "./builtins.js";
+import { referenceResolutionPolicy } from "./reference-resolution-policy.js";
 import {
   fileGraphFromFragments,
   type FileGraphInput,
@@ -159,12 +159,11 @@ function absorbRelationOwners(input: {
     }
 
     for (const site of owner.sites) {
-      const bare = bareName(site.name);
-      const allowBareFallback = allowsLocalBareFallback(site.name);
       const localHits =
-        input.nameToIds.get(site.name) ??
-        (allowBareFallback ? input.nameToIds.get(bare) : undefined) ??
-        [];
+        referenceResolutionPolicy
+          .localCandidateNames(site.name)
+          .map((name) => input.nameToIds.get(name))
+          .find((ids) => ids !== undefined) ?? [];
       const targets = localHits.filter((id) => id !== ownerId);
 
       if (targets.length === 1) {
@@ -188,7 +187,8 @@ function absorbRelationOwners(input: {
         continue;
       }
 
-      if (isExternalRefName(site.name, input.sourceLanguage)) continue;
+      if (referenceResolutionPolicy.isExternal(site.name, input.sourceLanguage))
+        continue;
 
       const ref = rawRef({
         owner: ownerId,
@@ -207,17 +207,6 @@ function absorbRelationOwners(input: {
       }
     }
   }
-}
-
-function allowsLocalBareFallback(name: string): boolean {
-  if (!name.includes(".") && !name.includes("/")) return true;
-  const receiver = name.split(/[./]/, 1)[0];
-  return (
-    receiver === "this" ||
-    receiver === "self" ||
-    receiver === "cls" ||
-    receiver === "super"
-  );
 }
 
 function nextOccurrence(counts: Map<string, number>, key: string): number {
@@ -268,9 +257,4 @@ function matchOwnerByNameLine(
     }
   }
   return null;
-}
-
-function bareName(refName: string): string {
-  const parts = refName.split(".");
-  return parts[parts.length - 1] ?? refName;
 }

@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS pending_refs (
  ref_name TEXT NOT NULL, ref_kind TEXT NOT NULL, line INTEGER NOT NULL,
  imported_name TEXT, local_name TEXT,
  source_language TEXT,
+ last_attempt INTEGER NOT NULL DEFAULT 0,
  status TEXT NOT NULL CHECK (status IN ('pending','failed'))
 ) STRICT;
 CREATE TABLE IF NOT EXISTS contains (
@@ -49,4 +50,5 @@ CREATE INDEX IF NOT EXISTS file_imports_dst_idx ON file_imports(dst_file_id);
 CREATE INDEX IF NOT EXISTS file_import_bindings_local_idx ON file_import_bindings(src_file_id,local_name);
 CREATE INDEX IF NOT EXISTS pending_refs_name_idx ON pending_refs(ref_name,status);
 CREATE INDEX IF NOT EXISTS pending_refs_owner_idx ON pending_refs(owner_id);
+CREATE INDEX IF NOT EXISTS pending_refs_retry_idx ON pending_refs(ref_name,status,last_attempt,id);
 `;

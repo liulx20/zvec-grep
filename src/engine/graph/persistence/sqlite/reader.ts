@@ -34,6 +34,7 @@ export type RefRow = {
   imported_name: string | null;
   local_name: string | null;
   source_language: string | null;
+  last_attempt: number;
 };
 export type SymbolRow = {
   id: string;

@@ -1,26 +1,33 @@
-import { bareName, isExternalRefName } from "./builtins.js";
 import type { NameIndex } from "./name-index.js";
+import {
+  referenceResolutionPolicy,
+  type ImportBindingTarget,
+} from "./reference-resolution-policy.js";
 import type { PendingRef, RefResolveResult } from "./types.js";
 
 export function resolveRef(
   ref: PendingRef,
   names: NameIndex,
   preferredFileIds: readonly string[] = [],
-  lookupName = ref.ref_name,
+  binding?: ImportBindingTarget,
 ): RefResolveResult {
-  const localReceiver = hasLocalReceiver(lookupName);
-  const effectiveLookupName = localReceiver ? bareName(lookupName) : lookupName;
-  const effectivePreferred = localReceiver
-    ? [ref.src_file, ...preferredFileIds]
-    : preferredFileIds;
+  const plan = referenceResolutionPolicy.lookupPlan({
+    refName: ref.ref_name,
+    srcFile: ref.src_file,
+    preferredFileIds,
+    binding,
+  });
   const hit = names.lookup(
-    effectiveLookupName,
+    plan.lookupName,
     ref.src_file,
-    effectivePreferred,
-    !isQualifiedName(effectiveLookupName),
+    plan.preferredFileIds,
+    plan.allowBareFallback,
   );
   if (!hit)
-    return isExternalRefName(ref.ref_name, ref.source_language)
+    return referenceResolutionPolicy.isExternal(
+      ref.ref_name,
+      ref.source_language,
+    )
       ? { status: "external" }
       : { status: "failed" };
 
@@ -34,18 +41,4 @@ export function resolveRef(
         : "REFS";
 
   return { status: "resolved", dst: hit.id, edgeKind };
-}
-
-function hasLocalReceiver(name: string): boolean {
-  const receiver = name.split(/[./]/, 1)[0];
-  return (
-    receiver === "this" ||
-    receiver === "self" ||
-    receiver === "cls" ||
-    receiver === "super"
-  );
-}
-
-function isQualifiedName(name: string): boolean {
-  return name.includes(".") || name.includes("/");
 }

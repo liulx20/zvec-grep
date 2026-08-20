@@ -8,8 +8,8 @@ export function openSqliteGraphDatabase(
   directory: string,
   options: { readOnly?: boolean; inMemory?: boolean } = {},
 ): { db: NodeDatabaseSync; readOnly: boolean } {
-  if (!options.inMemory) mkdirSync(directory, { recursive: true });
   const readOnly = options.readOnly ?? false;
+  if (!options.inMemory && !readOnly) mkdirSync(directory, { recursive: true });
   const { DatabaseSync } = loadNodeSqlite();
   const db = new DatabaseSync(
     options.inMemory ? ":memory:" : join(directory, "graph.sqlite"),
@@ -19,16 +19,28 @@ export function openSqliteGraphDatabase(
       enableForeignKeyConstraints: true,
     },
   );
-  if (readOnly) {
-    if (hasSchema(db)) ensureVersion(db, true);
-  } else {
-    db.exec("PRAGMA journal_mode=WAL");
-    db.exec("PRAGMA synchronous=NORMAL");
-    db.exec(SQLITE_GRAPH_SCHEMA);
-    ensureOptionalColumns(db);
-    ensureVersion(db, false);
+  try {
+    if (readOnly) {
+      if (!hasSchema(db)) {
+        throw new Error("SQLite graph schema is missing");
+      }
+      ensureVersion(db, true);
+    } else {
+      db.exec("PRAGMA journal_mode=WAL");
+      db.exec("PRAGMA synchronous=NORMAL");
+      db.exec(SQLITE_GRAPH_SCHEMA);
+      ensureOptionalColumns(db);
+      ensureVersion(db, false);
+    }
+    return { db, readOnly };
+  } catch (error) {
+    try {
+      db.close();
+    } catch {
+      // Preserve the initialization error; the handle is already unusable.
+    }
+    throw error;
   }
-  return { db, readOnly };
 }
 
 function hasSchema(db: NodeDatabaseSync): boolean {
@@ -65,6 +77,13 @@ function ensureOptionalColumns(db: NodeDatabaseSync): void {
     db.exec("ALTER TABLE pending_refs ADD COLUMN local_name TEXT");
   if (!columns.has("source_language"))
     db.exec("ALTER TABLE pending_refs ADD COLUMN source_language TEXT");
+  if (!columns.has("last_attempt"))
+    db.exec(
+      "ALTER TABLE pending_refs ADD COLUMN last_attempt INTEGER NOT NULL DEFAULT 0",
+    );
+  db.exec(
+    "CREATE INDEX IF NOT EXISTS pending_refs_retry_idx ON pending_refs(ref_name,status,last_attempt,id)",
+  );
 
   const bindingColumns = tableColumns(db, "file_import_bindings");
   if (!bindingColumns.has("spec")) {
