@@ -72,6 +72,7 @@ export async function extractFileGraph(
         ownerIsFile: true,
         importedName: binding.imported,
         localName: binding.local,
+        sourceLanguage: source.file.format,
       });
       if (!seenRefIds.has(bindingRef.id)) {
         seenRefIds.add(bindingRef.id);
@@ -101,6 +102,7 @@ export async function extractFileGraph(
     localEdges,
     refs,
     seenRefIds,
+    sourceLanguage: source.file.format,
   });
 
   const symbolRefs = analysis.refs;
@@ -113,6 +115,7 @@ export async function extractFileGraph(
     localEdges,
     refs,
     seenRefIds,
+    sourceLanguage: source.file.format,
   });
 
   const calls = analysis.calls;
@@ -125,6 +128,7 @@ export async function extractFileGraph(
     localEdges,
     refs,
     seenRefIds,
+    sourceLanguage: source.file.format,
   });
 
   return {
@@ -143,6 +147,7 @@ function absorbRelationOwners(input: {
   localEdges: Map<string, LocalEdge>;
   refs: ReturnType<typeof rawRef>[];
   seenRefIds: Set<string>;
+  sourceLanguage: string;
 }): void {
   const occurrences = new Map<string, number>();
   for (const owner of input.owners) {
@@ -154,10 +159,6 @@ function absorbRelationOwners(input: {
     }
 
     for (const site of owner.sites) {
-      if (isExternalRefName(site.name)) {
-        continue;
-      }
-
       const bare = bareName(site.name);
       const localHits =
         input.nameToIds.get(site.name) ?? input.nameToIds.get(bare) ?? [];
@@ -184,6 +185,8 @@ function absorbRelationOwners(input: {
         continue;
       }
 
+      if (isExternalRefName(site.name, input.sourceLanguage)) continue;
+
       const ref = rawRef({
         owner: ownerId,
         refName: site.name,
@@ -193,6 +196,7 @@ function absorbRelationOwners(input: {
           occurrences,
           `${ownerId}\0${site.name}\0${site.kind}\0${site.line}`,
         ),
+        sourceLanguage: input.sourceLanguage,
       });
       if (!input.seenRefIds.has(ref.id)) {
         input.seenRefIds.add(ref.id);

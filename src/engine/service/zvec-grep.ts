@@ -34,10 +34,12 @@ import type {
   SearchHit,
   SearchPlan,
   SearchPlanResult,
+  Range,
 } from "../types.js";
 import { CURRENT_INDEX_VERSION } from "../types.js";
 import { indexStatusNeedsRefresh } from "../index-status.js";
 import { exploreGraph, queryGraphNeighborhood } from "../graph/index.js";
+import type { StoredEntity } from "../storage/index.js";
 import {
   workspaceIndexInfoFromManifest,
   CURRENT_MANIFEST_VERSION,
@@ -74,6 +76,7 @@ import type {
   ZvecGrepExploreResult,
   ZvecGrepGraphNeighborhoodOptions,
   ZvecGrepGraphNeighborhoodResult,
+  ZvecGrepGraphEntity,
   ZvecGrepInfoOptions,
   ZvecGrepInfoResult,
   ZvecGrepIndexOptions,
@@ -1059,9 +1062,48 @@ async function exploreOpenWorkspaceIndex(
   workspaceIndex: WorkspaceIndex,
   options: ZvecGrepExploreOptions,
 ): Promise<ZvecGrepExploreResult> {
+  const result = exploreGraph(workspaceIndex.graph, workspaceIndex, options);
   return {
-    ...exploreGraph(workspaceIndex.graph, workspaceIndex, options),
     root,
+    available: result.available,
+    unavailableReason: result.available
+      ? undefined
+      : workspaceIndex.graph.unavailableReason,
+    query: result.query,
+    roots: result.roots.map(mapExploreNode),
+    nodes: result.nodes.map(mapExploreNode),
+    edges: result.edges.map((edge) => ({ ...edge })),
+    callPaths: result.callPaths.map((path) => ({
+      ...path,
+      nodes: [...path.nodes],
+    })),
+    blastRadius: result.blastRadius.map((item) => ({
+      rootId: item.rootId,
+      dependents: item.dependents.map((ref) => ({
+        id: ref.id,
+        entity: mapGraphEntity(ref.entity),
+      })),
+      tests: item.tests.map((ref) => ({
+        id: ref.id,
+        entity: mapGraphEntity(ref.entity),
+      })),
+    })),
+    changeSurface: result.changeSurface.map((item) => ({
+      ...item,
+      entity: mapGraphEntity(item.entity)!,
+    })),
+    files: result.files.map((bundle) => ({
+      file: mapGraphFile(bundle.file),
+      score: bundle.score,
+      isCentral: bundle.isCentral,
+      isChangeSurface: bundle.isChangeSurface,
+      symbols: bundle.symbols.map((symbol) => ({
+        ...symbol,
+        range: copyRange(symbol.range),
+      })),
+      text: bundle.text,
+    })),
+    emptyReason: result.emptyReason,
   };
 }
 
@@ -1070,10 +1112,80 @@ async function graphNeighborhoodOpenWorkspaceIndex(
   workspaceIndex: WorkspaceIndex,
   options: ZvecGrepGraphNeighborhoodOptions,
 ): Promise<ZvecGrepGraphNeighborhoodResult> {
+  const result = queryGraphNeighborhood(
+    workspaceIndex.graph,
+    workspaceIndex,
+    options,
+  );
   return {
-    ...queryGraphNeighborhood(workspaceIndex.graph, workspaceIndex, options),
     root,
+    available: result.available,
+    unavailableReason: result.available
+      ? undefined
+      : workspaceIndex.graph.unavailableReason,
+    direction: result.direction,
+    query: result.query,
+    depth: result.depth,
+    limit: result.limit,
+    seeds: result.seeds.map((seed) => ({
+      id: seed.id,
+      entity: mapGraphEntity(seed.entity)!,
+    })),
+    ambiguous: result.ambiguous,
+    seed: result.seed
+      ? { id: result.seed.id, entity: mapGraphEntity(result.seed.entity)! }
+      : undefined,
+    neighbors: result.neighbors.map((neighbor) => ({
+      id: neighbor.id,
+      kind: neighbor.kind,
+      count: neighbor.count,
+      entity: mapGraphEntity(neighbor.entity),
+    })),
   };
+}
+
+function mapExploreNode(node: {
+  id: string;
+  kind?: string;
+  isRoot: boolean;
+  entity: Parameters<typeof mapGraphEntity>[0];
+}): ZvecGrepExploreResult["nodes"][number] {
+  return {
+    id: node.id,
+    kind: node.kind,
+    isRoot: node.isRoot,
+    entity: mapGraphEntity(node.entity),
+  };
+}
+
+function mapGraphEntity(
+  stored: StoredEntity | null,
+): ZvecGrepGraphEntity | null {
+  if (!stored) return null;
+  const metadata = stored.entity.metadata;
+  return {
+    entityId: stored.entity.id,
+    name:
+      metadata?.kind === "code"
+        ? (metadata.symbolName ?? undefined)
+        : (metadata?.heading ?? undefined),
+    kind: metadata?.kind === "code" ? metadata.symbolType : metadata?.kind,
+    file: mapGraphFile(stored.file),
+    range: copyRange(stored.entity.range),
+  };
+}
+
+function mapGraphFile(file: FileInfo): ZvecGrepGraphEntity["file"] {
+  return {
+    id: file.id,
+    absolutePath: file.absolutePath,
+    relativePath: file.relativePath,
+    rootPath: file.rootPath,
+  };
+}
+
+function copyRange(range: Range): Range {
+  return structuredClone(range);
 }
 
 async function contextFromOpenWorkspaceIndex(input: {

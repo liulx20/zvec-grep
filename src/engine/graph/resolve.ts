@@ -8,14 +8,11 @@ export function resolveRef(
   preferredFileIds: readonly string[] = [],
   lookupName = ref.ref_name,
 ): RefResolveResult {
-  if (isExternalRefName(ref.ref_name)) {
-    return { status: "external" };
-  }
-
   const hit = names.lookup(lookupName, ref.src_file, preferredFileIds);
-  if (!hit) {
-    return { status: "failed" };
-  }
+  if (!hit)
+    return isExternalRefName(ref.ref_name, ref.source_language)
+      ? { status: "external" }
+      : { status: "failed" };
 
   const edgeKind =
     ref.ref_kind === "extends" ||

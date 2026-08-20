@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { access, mkdtemp, rm } from "node:fs/promises";
+import { access, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -7,8 +7,32 @@ import {
   SqliteGraphStorage,
   fileGraphFromFragments,
   makeRefId,
+  openGraphStorage,
   rawRef,
 } from "../../dist/engine/graph/index.js";
+
+test("graph open reports corruption and writable mode fails loudly", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "zvec-grep-broken-graph-"));
+  t.after(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+  await writeFile(join(dir, "graph.sqlite"), "not a sqlite database");
+
+  const readGraph = openGraphStorage(dir, { readOnly: true });
+  assert.equal(readGraph.available, false);
+  assert.match(readGraph.unavailableReason, /failed to open graph/);
+  assert.match(readGraph.unavailableReason, /graph\.sqlite|database/);
+
+  assert.throws(
+    () => openGraphStorage(dir, { readOnly: false }),
+    (error) => {
+      assert.equal(error.code, "ZVEC_GREP.ENGINE.GRAPH.OPEN_FAILED");
+      assert.match(error.message, /Failed to open writable graph storage/);
+      assert.ok(error.cause);
+      return true;
+    },
+  );
+});
 
 test("SQLite graph upsert resolves callers and reattaches incoming edges", async (t) => {
   const dir = await mkdtemp(join(tmpdir(), "zvec-grep-graph-"));

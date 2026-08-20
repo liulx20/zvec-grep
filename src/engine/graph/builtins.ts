@@ -103,18 +103,20 @@ const COMMON_PACKAGES = new Set([
   "node:crypto",
 ]);
 
-export function isExternalRefName(refName: string): boolean {
+export function isExternalRefName(refName: string, language?: string): boolean {
   const bare = bareName(refName);
   if (!bare) {
     return false;
   }
   const root = refName.split(/[./]/)[0] ?? bare;
-  if (
-    JS_BUILTINS.has(bare) ||
-    JS_BUILTINS.has(root) ||
-    PYTHON_BUILTINS.has(bare) ||
-    PYTHON_BUILTINS.has(root)
-  ) {
+  const builtins =
+    language === "python"
+      ? PYTHON_BUILTINS
+      : language &&
+          !["javascript", "jsx", "typescript", "tsx"].includes(language)
+        ? new Set<string>()
+        : JS_BUILTINS;
+  if (builtins.has(bare) || builtins.has(root)) {
     return true;
   }
   return COMMON_PACKAGES.has(root) || COMMON_PACKAGES.has(bare);

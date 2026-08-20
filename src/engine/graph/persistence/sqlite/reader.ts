@@ -35,6 +35,7 @@ export type RefRow = {
   status: "pending" | "failed";
   imported_name: string | null;
   local_name: string | null;
+  source_language: string | null;
 };
 export type SymbolRow = {
   id: string;
@@ -605,6 +606,9 @@ export class SqliteGraphReader {
     }
     if (!columns.has("local_name")) {
       this.db.exec("ALTER TABLE pending_refs ADD COLUMN local_name TEXT");
+    }
+    if (!columns.has("source_language")) {
+      this.db.exec("ALTER TABLE pending_refs ADD COLUMN source_language TEXT");
     }
     const bindingColumns = new Set(
       this.all<{ name: string }>("PRAGMA table_info(file_import_bindings)").map(

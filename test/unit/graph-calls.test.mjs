@@ -78,6 +78,75 @@ export function run() {
   graph.close();
 });
 
+test("language builtins do not hide a locally defined symbol", async () => {
+  const file = codeFile("local-builtin-name.ts");
+  const source = {
+    kind: "text",
+    file,
+    text: `
+export function map() { return 1; }
+export function run() { return map(); }
+`,
+  };
+  const fragments = await new CodeExtractor().extract(source);
+  const graphInput = await extractFileGraph(source, fragments);
+  const map = graphInput.nodes.find((node) => node.name === "map");
+  const run = graphInput.nodes.find((node) => node.name === "run");
+  assert.ok(map && run);
+  assert.ok(
+    graphInput.edges.some(
+      (edge) =>
+        edge.kind === "CALLS" && edge.src === run.id && edge.dst === map.id,
+    ),
+  );
+});
+
+test("language-aware pending refs resolve cross-file builtin names", async () => {
+  const graph = new SqliteGraphStorage("", { inMemory: true });
+  const callerFile = { ...codeFile("caller.ts"), id: "caller-file" };
+  const targetFile = { ...codeFile("target.ts"), id: "target-file" };
+  const callerSource = {
+    kind: "text",
+    file: callerFile,
+    text: `export function run() { return map(); }`,
+  };
+  const targetSource = {
+    kind: "text",
+    file: targetFile,
+    text: `export function map() { return 1; }`,
+  };
+  const callerInput = await extractFileGraph(
+    callerSource,
+    await new CodeExtractor().extract(callerSource),
+  );
+  const targetInput = await extractFileGraph(
+    targetSource,
+    await new CodeExtractor().extract(targetSource),
+  );
+  graph.upsertFileGraph(
+    callerFile.id,
+    callerInput.nodes,
+    callerInput.edges,
+    callerInput.refs,
+  );
+  graph.upsertFileGraph(
+    targetFile.id,
+    targetInput.nodes,
+    targetInput.edges,
+    targetInput.refs,
+  );
+  await graph.resolvePending();
+
+  const run = callerInput.nodes.find((node) => node.name === "run");
+  const map = targetInput.nodes.find((node) => node.name === "map");
+  assert.ok(run && map);
+  assert.deepEqual(
+    graph.callees(run.id, 1, 10).map((item) => item.id),
+    [map.id],
+  );
+  graph.close();
+});
+
 test("extractFileGraph resolves cross-file calls after second file indexed", async () => {
   const graph = new SqliteGraphStorage("", { inMemory: true });
 

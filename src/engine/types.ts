@@ -394,6 +394,7 @@ export type ResolvedSearchPlan = Omit<SearchPlan, "routes"> & {
 
 export type SearchGraphExpandDiagnostics = {
   available: boolean;
+  unavailableReason?: string;
   seeds: number;
   neighborsAdded: number;
 };

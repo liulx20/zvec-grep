@@ -213,6 +213,7 @@ export async function searchWorkspaceIndex(
       trackedHit,
       graphExpand: {
         available: graphExpansion.available,
+        unavailableReason: graphExpansion.unavailableReason,
         seeds: graphExpansion.seeds,
         neighborsAdded: graphExpansion.neighborsAdded,
       },
@@ -1356,6 +1357,7 @@ function expandGraphNeighbors(input: {
   filter?: StorageSearchFilter;
 }): {
   available: boolean;
+  unavailableReason?: string;
   seeds: number;
   neighborsAdded: number;
   rerankNeeded: boolean;
@@ -1365,6 +1367,7 @@ function expandGraphNeighbors(input: {
   if (!input.graph?.available) {
     return {
       available: false,
+      unavailableReason: input.graph?.unavailableReason,
       seeds: 0,
       neighborsAdded: 0,
       rerankNeeded: false,

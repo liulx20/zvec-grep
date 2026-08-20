@@ -18,6 +18,8 @@ import type {
 export class UnavailableGraphStorage implements GraphStorage {
   readonly available = false;
 
+  constructor(readonly unavailableReason = "graph backend is disabled") {}
+
   async checkpoint(): Promise<void> {}
   close(): void {}
 

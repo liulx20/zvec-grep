@@ -99,6 +99,7 @@ export function rawRef(input: {
   ownerIsFile?: boolean;
   importedName?: string;
   localName?: string;
+  sourceLanguage?: string;
 }): RawRef {
   const refKind = input.refKind ?? "call";
   return {
@@ -116,6 +117,7 @@ export function rawRef(input: {
     owner_is_file: input.ownerIsFile,
     imported_name: input.importedName,
     local_name: input.localName,
+    source_language: input.sourceLanguage,
   };
 }
 

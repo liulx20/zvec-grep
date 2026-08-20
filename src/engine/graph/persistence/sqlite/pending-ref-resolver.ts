@@ -53,6 +53,7 @@ export class SqlitePendingRefResolver extends SqliteGraphWriter {
       ref_kind: ref.ref_kind,
       line: ref.line,
       status: ref.status,
+      source_language: ref.source_language ?? undefined,
     };
     const preferred = this.all<{ dst_file_id: string }>(
       "SELECT dst_file_id FROM file_imports WHERE src_file_id=?",

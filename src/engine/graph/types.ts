@@ -102,6 +102,7 @@ export type RawRef = {
   owner_is_file?: boolean;
   imported_name?: string;
   local_name?: string;
+  source_language?: string;
 };
 
 export type PendingRef = {
@@ -112,6 +113,7 @@ export type PendingRef = {
   ref_kind: string;
   line: number;
   status: "pending" | "failed";
+  source_language?: string;
 };
 
 export type RefResolveResult =
@@ -127,6 +129,7 @@ export type ResolvePendingOptions = {
 
 export interface GraphReader {
   readonly available: boolean;
+  readonly unavailableReason?: string;
 
   symbolScope(rootSymId: string, depth: number, limit: number): string[];
   fileScope(fileId: string, depth: number, limit: number): string[];

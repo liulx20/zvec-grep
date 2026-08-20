@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS pending_refs (
  owner_is_file INTEGER NOT NULL CHECK (owner_is_file IN (0,1)),
  ref_name TEXT NOT NULL, ref_kind TEXT NOT NULL, line INTEGER NOT NULL,
  imported_name TEXT, local_name TEXT,
+ source_language TEXT,
  status TEXT NOT NULL CHECK (status IN ('pending','failed'))
 ) STRICT;
 CREATE TABLE IF NOT EXISTS contains (

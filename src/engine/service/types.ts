@@ -1,10 +1,5 @@
 import type { EmbeddingModel } from "../models/index.js";
 import type {
-  ExploreResult,
-  GraphNeighborhoodResult,
-  GraphQueryDirection,
-} from "../graph/index.js";
-import type {
   CodeSymbolType,
   WorkspaceIndexPolicy,
   WorkspaceIndexStatus,
@@ -130,16 +125,114 @@ export type ZvecGrepExploreOptions = {
 
 export type ZvecGrepGraphNeighborhoodOptions = {
   root?: string;
-  direction: GraphQueryDirection;
+  direction: ZvecGrepGraphDirection;
   query: string;
   seedId?: string;
   depth?: number;
   limit?: number;
 };
 
-export type ZvecGrepExploreResult = ExploreResult & { root: string };
-export type ZvecGrepGraphNeighborhoodResult = GraphNeighborhoodResult & {
+export type ZvecGrepGraphDirection = "callers" | "callees" | "impact";
+
+export type ZvecGrepGraphFile = {
+  id: string;
+  absolutePath: string;
+  relativePath: string;
+  rootPath?: string;
+};
+
+export type ZvecGrepGraphEntity = {
+  entityId: string;
+  name?: string;
+  kind?: string;
+  file: ZvecGrepGraphFile;
+  range: Range;
+};
+
+export type ZvecGrepGraphNode = {
+  id: string;
+  kind?: string;
+  isRoot: boolean;
+  entity: ZvecGrepGraphEntity | null;
+};
+
+export type ZvecGrepGraphEdgeKind =
+  "CONTAINS" | "CALLS" | "REFS" | "INHERITS" | "DEFINES" | "IMPORTS";
+
+export type ZvecGrepGraphEdge = {
+  src: string;
+  dst: string;
+  kind: ZvecGrepGraphEdgeKind;
+  rel: string;
+  count: number;
+  firstLine: number;
+  refName: string;
+};
+
+export type ZvecGrepGraphSeed = {
+  id: string;
+  entity: ZvecGrepGraphEntity;
+};
+
+export type ZvecGrepGraphNeighbor = {
+  id: string;
+  kind?: string;
+  count?: number;
+  entity: ZvecGrepGraphEntity | null;
+};
+
+export type ZvecGrepExploreFileBundle = {
+  file: ZvecGrepGraphFile;
+  score: number;
+  isCentral: boolean;
+  isChangeSurface: boolean;
+  symbols: {
+    id: string;
+    name: string;
+    kind?: string;
+    range: Range;
+    content: string;
+  }[];
+  text: string;
+};
+
+export type ZvecGrepExploreResult = {
   root: string;
+  available: boolean;
+  unavailableReason?: string;
+  query: string;
+  roots: ZvecGrepGraphNode[];
+  nodes: ZvecGrepGraphNode[];
+  edges: ZvecGrepGraphEdge[];
+  callPaths: { from: string; to: string; nodes: string[] }[];
+  blastRadius: {
+    rootId: string;
+    dependents: { id: string; entity: ZvecGrepGraphEntity | null }[];
+    tests: { id: string; entity: ZvecGrepGraphEntity | null }[];
+  }[];
+  changeSurface: {
+    rootId: string;
+    id: string;
+    rel: "type" | "return";
+    entity: ZvecGrepGraphEntity;
+    rescued: boolean;
+  }[];
+  files: ZvecGrepExploreFileBundle[];
+  emptyReason?: "graph_unavailable" | "no_seeds" | "no_context";
+};
+
+export type ZvecGrepGraphNeighborhoodResult = {
+  root: string;
+  available: boolean;
+  unavailableReason?: string;
+  direction: ZvecGrepGraphDirection;
+  query: string;
+  depth: number;
+  limit: number;
+  seeds: ZvecGrepGraphSeed[];
+  ambiguous?: boolean;
+  seed?: ZvecGrepGraphSeed;
+  neighbors: ZvecGrepGraphNeighbor[];
 };
 
 export type ZvecGrepSearchOptions = {

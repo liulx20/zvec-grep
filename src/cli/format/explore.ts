@@ -1,26 +1,31 @@
 import type {
-  ExploreResult,
-  GraphNeighborhoodResult,
-} from "../../engine/graph/index.js";
-import type { StoredEntity } from "../../engine/storage/index.js";
+  ZvecGrepExploreResult,
+  ZvecGrepGraphEntity,
+  ZvecGrepGraphNeighborhoodResult,
+} from "../../engine/service/index.js";
 
-export function printExploreResult(
-  result: ExploreResult & { root?: string },
-): void {
+type ExploreOutput = Omit<ZvecGrepExploreResult, "root"> & { root?: string };
+type NeighborhoodOutput = Omit<ZvecGrepGraphNeighborhoodResult, "root"> & {
+  root?: string;
+};
+
+export function printExploreResult(result: ExploreOutput): void {
   for (const line of exploreLines(result)) {
     console.log(line);
   }
 }
 
-export function formatExploreResult(
-  result: ExploreResult & { root?: string },
-): string {
+export function formatExploreResult(result: ExploreOutput): string {
   return exploreLines(result).join("\n");
 }
 
-function exploreLines(result: ExploreResult & { root?: string }): string[] {
+function exploreLines(result: ExploreOutput): string[] {
   if (!result.available) {
-    return ["graph unavailable"];
+    return [
+      result.unavailableReason
+        ? `graph unavailable: ${result.unavailableReason}`
+        : "graph unavailable",
+    ];
   }
   if (result.emptyReason === "no_seeds") {
     return [`no seeds for query: ${result.query}`];
@@ -86,7 +91,7 @@ function exploreLines(result: ExploreResult & { root?: string }): string[] {
   return lines;
 }
 
-function blastRadiusLines(result: ExploreResult): string[] {
+function blastRadiusLines(result: ExploreOutput): string[] {
   const lines: string[] = [];
   for (const blast of result.blastRadius) {
     if (blast.dependents.length === 0 && blast.tests.length === 0) continue;
@@ -111,25 +116,23 @@ function blastRadiusLines(result: ExploreResult): string[] {
   return lines;
 }
 
-export function printNeighborhoodResult(
-  result: GraphNeighborhoodResult & { root?: string },
-): void {
+export function printNeighborhoodResult(result: NeighborhoodOutput): void {
   for (const line of neighborhoodLines(result)) {
     console.log(line);
   }
 }
 
-export function formatNeighborhoodResult(
-  result: GraphNeighborhoodResult & { root?: string },
-): string {
+export function formatNeighborhoodResult(result: NeighborhoodOutput): string {
   return neighborhoodLines(result).join("\n");
 }
 
-function neighborhoodLines(
-  result: GraphNeighborhoodResult & { root?: string },
-): string[] {
+function neighborhoodLines(result: NeighborhoodOutput): string[] {
   if (!result.available) {
-    return ["graph unavailable"];
+    return [
+      result.unavailableReason
+        ? `graph unavailable: ${result.unavailableReason}`
+        : "graph unavailable",
+    ];
   }
   if (result.ambiguous) {
     const lines = [`ambiguous seeds for ${result.query}:`];
@@ -163,7 +166,7 @@ function neighborhoodLines(
   return lines;
 }
 
-function relationNotes(result: ExploreResult, fileId: string): string[] {
+function relationNotes(result: ExploreOutput, fileId: string): string[] {
   const idsInFile = new Set(
     result.nodes.filter((n) => n.entity?.file.id === fileId).map((n) => n.id),
   );
@@ -194,21 +197,17 @@ function relationNotes(result: ExploreResult, fileId: string): string[] {
   return notes;
 }
 
-function shortName(result: ExploreResult, id: string): string {
+function shortName(result: ExploreOutput, id: string): string {
   const node = result.nodes.find((n) => n.id === id);
   return symbolLabel(id, node?.entity ?? null, true);
 }
 
 function symbolLabel(
   id: string,
-  entity: StoredEntity | null | undefined,
+  entity: ZvecGrepGraphEntity | null | undefined,
   short = false,
 ): string {
-  const meta = entity?.entity.metadata;
-  const name =
-    meta?.kind === "code" && meta.symbolName
-      ? meta.symbolName
-      : id.slice(0, 10);
+  const name = entity?.name ?? id.slice(0, 10);
   if (short) {
     return name;
   }
