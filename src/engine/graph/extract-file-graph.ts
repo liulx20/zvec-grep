@@ -169,13 +169,14 @@ function absorbRelationOwners(input: {
     }
 
     for (const site of owner.sites) {
-      const context = referenceResolutionPolicy.createContext({
-        refName: site.name,
-        sourceFileId: "",
-        sourceLanguage: input.sourceLanguage,
-        ownerContainerName: input.containerNameByChild.get(ownerId),
-      });
-      const plan = referenceResolutionPolicy.lookupPlan(context);
+      const reference = referenceResolutionPolicy.analyzeReference(
+        site.name,
+        input.sourceLanguage,
+      );
+      const plan = referenceResolutionPolicy.localLookupPlan(
+        reference,
+        input.containerNameByChild.get(ownerId),
+      );
       let localHits = input.nameToIds.get(plan.lookupName) ?? [];
       if (plan.containerNames.length > 0) {
         const containers = new Set(plan.containerNames);
@@ -207,7 +208,7 @@ function absorbRelationOwners(input: {
         continue;
       }
 
-      if (referenceResolutionPolicy.isExternal(context)) continue;
+      if (referenceResolutionPolicy.isExternal(reference)) continue;
 
       const ref = rawRef({
         owner: ownerId,

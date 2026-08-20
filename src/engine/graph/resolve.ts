@@ -12,10 +12,12 @@ export function resolveRef(
   binding?: ReferenceBindingMatch,
   sourceContainerName?: string,
 ): RefResolveResult {
-  const context = referenceResolutionPolicy.createContext({
-    refName: ref.ref_name,
+  const reference = referenceResolutionPolicy.analyzeReference(
+    ref.ref_name,
+    ref.source_language,
+  );
+  const context = referenceResolutionPolicy.createContext(reference, {
     sourceFileId: ref.src_file,
-    sourceLanguage: ref.source_language,
     preferredFileIds,
     binding,
     ownerContainerName: sourceContainerName,
@@ -29,7 +31,7 @@ export function resolveRef(
     plan.containerNames,
   );
   if (!hit)
-    return referenceResolutionPolicy.isExternal(context)
+    return referenceResolutionPolicy.isExternal(reference)
       ? { status: "external" }
       : { status: "failed" };
 

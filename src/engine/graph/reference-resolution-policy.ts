@@ -13,8 +13,15 @@ export type ReferenceReceiver =
   | { kind: "owner"; name: string }
   | { kind: "qualified"; name: string };
 
+export type AnalyzedReference = {
+  name: string;
+  bareName: string;
+  language?: string;
+  receiver: ReferenceReceiver;
+};
+
 export type ReferenceResolutionContext = {
-  reference: { name: string; bareName: string; language?: string };
+  reference: AnalyzedReference;
   owner: { fileId: string; containerName?: string };
   receiver: ReferenceReceiver;
   binding?: ReferenceBindingMatch;
@@ -28,33 +35,58 @@ export type ReferenceLookupPlan = {
   containerNames: string[];
 };
 
+export type LocalReferenceLookupPlan = Pick<
+  ReferenceLookupPlan,
+  "lookupName" | "containerNames"
+>;
+
 /** Owns reference receiver, binding and scope semantics for every resolver. */
 export class ReferenceResolutionPolicy {
-  createContext(input: {
-    refName: string;
-    sourceFileId: string;
-    sourceLanguage?: string;
-    ownerContainerName?: string;
-    preferredFileIds?: readonly string[];
-    binding?: ReferenceBindingMatch;
-  }): ReferenceResolutionContext {
-    const receiverName = qualifiedReceiver(input.refName);
+  analyzeReference(refName: string, language?: string): AnalyzedReference {
+    const receiverName = qualifiedReceiver(refName);
     const receiver: ReferenceReceiver = !receiverName
       ? { kind: "none" }
       : OWNER_RECEIVERS.has(receiverName)
         ? { kind: "owner", name: receiverName }
         : { kind: "qualified", name: receiverName };
+    return { name: refName, bareName: bareName(refName), language, receiver };
+  }
+
+  localLookupPlan(
+    reference: AnalyzedReference,
+    ownerContainerName?: string,
+  ): LocalReferenceLookupPlan {
+    if (reference.receiver.kind === "owner") {
+      return {
+        lookupName: reference.bareName,
+        containerNames: ownerContainerName ? [ownerContainerName] : [],
+      };
+    }
+    if (reference.receiver.kind === "qualified") {
+      return {
+        lookupName: reference.bareName,
+        containerNames: [reference.receiver.name],
+      };
+    }
+    return { lookupName: reference.name, containerNames: [] };
+  }
+
+  createContext(
+    reference: AnalyzedReference,
+    input: {
+      sourceFileId: string;
+      ownerContainerName?: string;
+      preferredFileIds?: readonly string[];
+      binding?: ReferenceBindingMatch;
+    },
+  ): ReferenceResolutionContext {
     return {
-      reference: {
-        name: input.refName,
-        bareName: bareName(input.refName),
-        language: input.sourceLanguage,
-      },
+      reference,
       owner: {
         fileId: input.sourceFileId,
         containerName: input.ownerContainerName,
       },
-      receiver,
+      receiver: reference.receiver,
       binding: input.binding,
       preferredFileIds: input.preferredFileIds ?? [],
     };
@@ -98,11 +130,8 @@ export class ReferenceResolutionPolicy {
     };
   }
 
-  isExternal(context: ReferenceResolutionContext): boolean {
-    return isExternalRefName(
-      context.reference.name,
-      context.reference.language,
-    );
+  isExternal(reference: AnalyzedReference): boolean {
+    return isExternalRefName(reference.name, reference.language);
   }
 }
 

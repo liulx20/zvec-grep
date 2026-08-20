@@ -1,4 +1,4 @@
-import type { GraphQueryStorage } from "../query.js";
+import type { GraphQueryStorage } from "../ports.js";
 import type { GraphReader } from "../types.js";
 import type {
   ExploreBlastRadius,

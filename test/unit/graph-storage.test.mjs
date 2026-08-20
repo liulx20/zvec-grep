@@ -236,6 +236,63 @@ test("failed ref retry batches rotate instead of starving later rows", async () 
   graph.close();
 });
 
+test("retry batches process unrelated names only once per invocation", async () => {
+  class InspectableGraph extends SqliteGraphStorage {
+    pendingAttempts() {
+      return this.database.db
+        .prepare(
+          "SELECT ref_name,last_attempt,COUNT(*) AS count FROM pending_refs GROUP BY ref_name,last_attempt ORDER BY ref_name,last_attempt",
+        )
+        .all()
+        .map((row) => ({ ...row }));
+    }
+  }
+  const graph = new InspectableGraph("", { inMemory: true });
+  const hotNodes = Array.from({ length: 1_001 }, (_, index) => ({
+    id: `hot-${index}`,
+    kind: "function",
+    is_exported: false,
+    name: `hot${index}`,
+  }));
+  const coldNode = {
+    id: "cold",
+    kind: "function",
+    is_exported: false,
+    name: "cold",
+  };
+  graph.upsertFileGraph(
+    "retry-work",
+    [...hotNodes, coldNode],
+    [],
+    [
+      ...hotNodes.map((node, occurrence) =>
+        rawRef({
+          owner: node.id,
+          refName: "missingHot",
+          line: 1,
+          occurrence,
+          sourceLanguage: "typescript",
+        }),
+      ),
+      rawRef({
+        owner: coldNode.id,
+        refName: "missingCold",
+        line: 1,
+        sourceLanguage: "typescript",
+      }),
+    ],
+  );
+
+  await graph.resolvePending();
+  await graph.resolvePending();
+
+  assert.deepEqual(graph.pendingAttempts(), [
+    { ref_name: "missingCold", last_attempt: 2, count: 1 },
+    { ref_name: "missingHot", last_attempt: 2, count: 1_001 },
+  ]);
+  graph.close();
+});
+
 test("raw incoming/outgoing edge queries are batch-capable and drive traversal", () => {
   class TrackingGraph extends SqliteGraphStorage {
     outgoingCalls = 0;

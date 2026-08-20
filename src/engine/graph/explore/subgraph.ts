@@ -1,4 +1,4 @@
-import type { GraphQueryStorage } from "../query.js";
+import type { GraphQueryStorage } from "../ports.js";
 import type { GraphEdgeKind, GraphReader, SymRef } from "../types.js";
 import { personalizedPageRank } from "../application/ranking.js";
 import { collectCallPaths } from "./paths.js";

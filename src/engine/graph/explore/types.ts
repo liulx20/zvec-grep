@@ -1,6 +1,6 @@
 import type { StoredEntity } from "../../storage/index.js";
 import type { FileInfo, Range } from "../../types.js";
-import type { GraphQueryStorage } from "../query.js";
+import type { GraphQueryStorage } from "../ports.js";
 import type { GraphEdgeKind } from "../types.js";
 
 export type ExploreOptions = {

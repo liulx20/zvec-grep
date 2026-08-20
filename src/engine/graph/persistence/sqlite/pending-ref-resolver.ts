@@ -53,11 +53,11 @@ export class SqlitePendingRefResolver {
       })),
     );
     const paths = new FilePathIndex(options.files ?? []);
-    const rounds = this.retryRounds();
+    const attempt = this.nextAttempt();
+    const rounds = this.retryRounds(attempt);
     for (let round = 0; round < rounds; round++) {
       this.transaction(() => {
-        const attempt = this.nextAttempt();
-        const refs = this.retryableRefs();
+        const refs = this.retryableRefs(attempt);
         for (const ref of refs.filter(
           (item) => item.owner_is_file || item.ref_kind === "import",
         )) {
@@ -174,31 +174,34 @@ export class SqlitePendingRefResolver {
     this.deleteRef(ref.id);
   }
 
-  private retryableRefs(): RefRow[] {
+  private retryableRefs(attemptWatermark: number): RefRow[] {
     return this.all<RefRow>(
       `SELECT id,owner_id,owner_is_file,ref_name,ref_kind,line,status,imported_name,local_name,source_language,last_attempt
        FROM (
          SELECT pending_refs.*,
                 row_number() OVER (PARTITION BY ref_name ORDER BY last_attempt,id) AS retry_rank
          FROM pending_refs
-         WHERE status='failed'
+         WHERE status='failed' AND last_attempt<?
        )
        WHERE retry_rank<=?
        UNION ALL
        SELECT id,owner_id,owner_is_file,ref_name,ref_kind,line,status,imported_name,local_name,source_language,last_attempt
        FROM pending_refs
-       WHERE status='pending'
+       WHERE status='pending' AND last_attempt<?
        ORDER BY ref_name,id`,
+      attemptWatermark,
       PER_NAME_CEILING,
+      attemptWatermark,
     );
   }
 
-  private retryRounds(): number {
+  private retryRounds(attemptWatermark: number): number {
     const row = this.one<{ max_count: number }>(
       `SELECT COALESCE(MAX(ref_count),0) AS max_count FROM (
          SELECT COUNT(*) AS ref_count FROM pending_refs
-         WHERE status='failed' GROUP BY ref_name
+         WHERE status='failed' AND last_attempt<? GROUP BY ref_name
        )`,
+      attemptWatermark,
     );
     return Math.max(1, Math.ceil((row?.max_count ?? 0) / PER_NAME_CEILING));
   }

@@ -1,5 +1,8 @@
 import type { StoredEntity } from "../storage/index.js";
+import type { GraphQueryStorage } from "./ports.js";
 import type { GraphReader, SymRef } from "./types.js";
+
+export type { GraphQueryStorage } from "./ports.js";
 
 export type GraphQueryDirection = "callers" | "callees" | "impact";
 
@@ -23,12 +26,6 @@ export type GraphNeighborhoodResult = {
   ambiguous?: boolean;
   seed?: GraphSeedMatch;
   neighbors: EnrichedSymRef[];
-};
-
-export type GraphQueryStorage = {
-  findSymbolsByName(name: string, limit: number): StoredEntity[];
-  findSymbolsByQuery?(query: string, limit: number): StoredEntity[];
-  getEntity(entityId: string): StoredEntity | null;
 };
 
 export type GraphNeighborhoodOptions = {

@@ -1,5 +1,5 @@
 import type { Range } from "../../types.js";
-import type { GraphQueryStorage } from "../query.js";
+import type { GraphQueryStorage } from "../ports.js";
 import type {
   ExploreFileBundle,
   ExploreNode,
