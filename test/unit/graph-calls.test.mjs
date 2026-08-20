@@ -129,6 +129,47 @@ export function run() { console.log("external"); }
   );
 });
 
+for (const fixture of [
+  {
+    name: "TypeScript this receiver",
+    path: "this-call.ts",
+    format: "typescript",
+    text: `class Demo {
+  helper() { return 1; }
+  run() { return this.helper(); }
+}`,
+  },
+  {
+    name: "Python self receiver",
+    path: "self_call.py",
+    format: "python",
+    text: `class Demo:
+    def helper(self):
+        return 1
+    def run(self):
+        return self.helper()
+`,
+  },
+]) {
+  test(`${fixture.name} resolves to the local method`, async () => {
+    const file = { ...codeFile(fixture.path), format: fixture.format };
+    const source = { kind: "text", file, text: fixture.text };
+    const fragments = await new CodeExtractor().extract(source);
+    const graphInput = await extractFileGraph(source, fragments);
+    const helper = graphInput.nodes.find((node) => node.name === "helper");
+    const run = graphInput.nodes.find((node) => node.name === "run");
+    assert.ok(helper && run);
+    assert.ok(
+      graphInput.edges.some(
+        (edge) =>
+          edge.kind === "CALLS" &&
+          edge.src === run.id &&
+          edge.dst === helper.id,
+      ),
+    );
+  });
+}
+
 test("language-aware pending refs resolve cross-file builtin names", async () => {
   const graph = new SqliteGraphStorage("", { inMemory: true });
   const callerFile = { ...codeFile("caller.ts"), id: "caller-file" };
@@ -241,6 +282,15 @@ for (const fixture of [
     targetPath: "codec.py",
     callerText: "from .codec import decode as parse\ndef run():\n    parse()\n",
     targetText: "def decode():\n    return 1\n",
+  },
+  {
+    name: "TypeScript namespace import",
+    format: "typescript",
+    callerPath: "namespace-caller.ts",
+    targetPath: "codec.ts",
+    callerText:
+      'import * as utils from "./codec";\nexport function run() { utils.decode(); }\n',
+    targetText: "export function decode() { return 1; }\n",
   },
 ]) {
   test(`${fixture.name} resolves calls to the exported symbol`, async () => {

@@ -145,15 +145,27 @@ function extractSpecsFromNode(node: TSNode, language: string): ImportSpec[] {
 }
 
 function javascriptNamedBindings(node: TSNode): ImportBinding[] {
-  return descendantsOfType(node, "import_specifier").flatMap((specifier) => {
-    const importedNode =
-      specifier.childForFieldName("name") ?? specifier.namedChildren[0];
-    const localNode =
-      specifier.childForFieldName("alias") ?? specifier.namedChildren[1];
-    const imported = importedNode?.text.replace(/^type\s+/, "").trim();
-    const local = (localNode?.text ?? imported)?.trim();
-    return imported && local ? [{ imported, local }] : [];
-  });
+  const named = descendantsOfType(node, "import_specifier").flatMap(
+    (specifier) => {
+      const importedNode =
+        specifier.childForFieldName("name") ?? specifier.namedChildren[0];
+      const localNode =
+        specifier.childForFieldName("alias") ?? specifier.namedChildren[1];
+      const imported = importedNode?.text.replace(/^type\s+/, "").trim();
+      const local = (localNode?.text ?? imported)?.trim();
+      return imported && local ? [{ imported, local }] : [];
+    },
+  );
+  const namespaces = descendantsOfType(node, "namespace_import").flatMap(
+    (namespace) => {
+      const localNode =
+        namespace.childForFieldName("alias") ??
+        namespace.namedChildren.find((child) => child.type === "identifier");
+      const local = localNode?.text.trim();
+      return local ? [{ imported: "*", local }] : [];
+    },
+  );
+  return [...named, ...namespaces];
 }
 
 function pythonFromBindings(

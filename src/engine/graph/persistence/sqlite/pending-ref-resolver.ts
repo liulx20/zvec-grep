@@ -1,5 +1,6 @@
 import { FilePathIndex } from "../../imports/path-index.js";
 import { resolveImportPath } from "../../imports/resolve-path.js";
+import { bareName } from "../../builtins.js";
 import { NameIndex } from "../../name-index.js";
 import { resolveRef } from "../../resolve.js";
 import type { PendingRef, ResolvePendingOptions } from "../../types.js";
@@ -63,15 +64,23 @@ export class SqlitePendingRefResolver extends SqliteGraphWriter {
       imported_name: string;
       dst_file_id: string;
     }>(
-      "SELECT imported_name,dst_file_id FROM file_import_bindings WHERE src_file_id=? AND local_name=? ORDER BY dst_file_id,imported_name LIMIT 1",
+      `SELECT imported_name,dst_file_id FROM file_import_bindings
+       WHERE src_file_id=? AND local_name IN (?,?)
+       ORDER BY CASE WHEN local_name=? THEN 0 ELSE 1 END,dst_file_id,imported_name LIMIT 1`,
       owner.file_id,
       ref.ref_name,
+      refReceiver(ref.ref_name),
+      ref.ref_name,
     );
+    const lookupName =
+      binding?.imported_name === "*"
+        ? bareName(ref.ref_name)
+        : binding?.imported_name;
     const result = resolveRef(
       pending,
       names,
       binding ? [binding.dst_file_id] : preferred,
-      binding?.imported_name,
+      lookupName,
     );
     if (result.status === "external") return this.deleteRef(ref.id);
     if (result.status !== "resolved") return this.failRef(ref.id);
@@ -150,4 +159,8 @@ export class SqlitePendingRefResolver extends SqliteGraphWriter {
   private deleteRef(id: string): void {
     this.db.prepare("DELETE FROM pending_refs WHERE id=?").run(id);
   }
+}
+
+function refReceiver(name: string): string {
+  return name.split(/[./]/, 1)[0] ?? name;
 }

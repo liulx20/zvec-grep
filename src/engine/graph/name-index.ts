@@ -54,9 +54,6 @@ export class NameIndex {
     if (candidates.length === 0) {
       return null;
     }
-    if (candidates.length === 1) {
-      return candidates[0] ?? null;
-    }
     const sameFile = candidates.filter((c) => c.fileId === srcFile);
     if (sameFile.length === 1) {
       return sameFile[0] ?? null;
@@ -67,6 +64,9 @@ export class NameIndex {
       if (imported.length === 1) {
         return imported[0] ?? null;
       }
+    }
+    if (candidates.length === 1) {
+      return candidates[0] ?? null;
     }
     // Ambiguous across files: leave unresolved (failed).
     return null;

@@ -1,4 +1,4 @@
-import { isExternalRefName } from "./builtins.js";
+import { bareName, isExternalRefName } from "./builtins.js";
 import type { NameIndex } from "./name-index.js";
 import type { PendingRef, RefResolveResult } from "./types.js";
 
@@ -8,11 +8,16 @@ export function resolveRef(
   preferredFileIds: readonly string[] = [],
   lookupName = ref.ref_name,
 ): RefResolveResult {
+  const localReceiver = hasLocalReceiver(lookupName);
+  const effectiveLookupName = localReceiver ? bareName(lookupName) : lookupName;
+  const effectivePreferred = localReceiver
+    ? [ref.src_file, ...preferredFileIds]
+    : preferredFileIds;
   const hit = names.lookup(
-    lookupName,
+    effectiveLookupName,
     ref.src_file,
-    preferredFileIds,
-    !isQualifiedName(lookupName),
+    effectivePreferred,
+    !isQualifiedName(effectiveLookupName),
   );
   if (!hit)
     return isExternalRefName(ref.ref_name, ref.source_language)
@@ -29,6 +34,16 @@ export function resolveRef(
         : "REFS";
 
   return { status: "resolved", dst: hit.id, edgeKind };
+}
+
+function hasLocalReceiver(name: string): boolean {
+  const receiver = name.split(/[./]/, 1)[0];
+  return (
+    receiver === "this" ||
+    receiver === "self" ||
+    receiver === "cls" ||
+    receiver === "super"
+  );
 }
 
 function isQualifiedName(name: string): boolean {

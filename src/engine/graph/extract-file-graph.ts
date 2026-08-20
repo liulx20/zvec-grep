@@ -160,9 +160,10 @@ function absorbRelationOwners(input: {
 
     for (const site of owner.sites) {
       const bare = bareName(site.name);
+      const allowBareFallback = allowsLocalBareFallback(site.name);
       const localHits =
         input.nameToIds.get(site.name) ??
-        (isQualifiedName(site.name) ? undefined : input.nameToIds.get(bare)) ??
+        (allowBareFallback ? input.nameToIds.get(bare) : undefined) ??
         [];
       const targets = localHits.filter((id) => id !== ownerId);
 
@@ -208,8 +209,15 @@ function absorbRelationOwners(input: {
   }
 }
 
-function isQualifiedName(name: string): boolean {
-  return name.includes(".") || name.includes("/");
+function allowsLocalBareFallback(name: string): boolean {
+  if (!name.includes(".") && !name.includes("/")) return true;
+  const receiver = name.split(/[./]/, 1)[0];
+  return (
+    receiver === "this" ||
+    receiver === "self" ||
+    receiver === "cls" ||
+    receiver === "super"
+  );
 }
 
 function nextOccurrence(counts: Map<string, number>, key: string): number {
