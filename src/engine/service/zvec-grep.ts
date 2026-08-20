@@ -279,6 +279,9 @@ class ZvecGrepService implements ZvecGrep {
           options.rebuild ? "index.rebuild" : "index",
           async () => {
             const existing = readWorkspaceManifest(location.home);
+            if (!options.rebuild) {
+              assertWorkspaceIndexVersionMatchesCurrent(existing);
+            }
             const existingRuntime = existing?.embeddingRuntime ?? {};
             const embeddingModel = this.embeddingModelForIndex(
               existing,
@@ -1538,6 +1541,25 @@ function prepareWorkspaceManifest(
     updatedTime: now,
     embeddingRuntime,
   };
+}
+
+function assertWorkspaceIndexVersionMatchesCurrent(
+  existing: WorkspaceManifest | null,
+): void {
+  if (!isWorkspaceIndexed(existing)) return;
+  if (existing.indexVersion === CURRENT_INDEX_VERSION) return;
+  throw new EngineError("Workspace index version is not supported", {
+    code: "ZVEC_GREP.ENGINE.WORKSPACE_INDEX.VERSION_MISMATCH",
+    context: errorDetails([
+      workspaceIndexDetail(existing.name),
+      detail("expected", CURRENT_INDEX_VERSION),
+      detail("actual", existing.indexVersion),
+      detail(
+        "hint",
+        'Incremental indexing cannot upgrade persisted data; run "zg index --rebuild".',
+      ),
+    ]),
+  });
 }
 
 function currentEmbeddingSchema(
