@@ -56,7 +56,12 @@ export class ReferenceResolutionPolicy {
             includeOwner: receiverName !== "super",
           }
         : { kind: "qualified", name: receiverName };
-    return { name: refName, bareName: bareName(refName), language, receiver };
+    return {
+      name: refName,
+      bareName: bareName(refName.replace(/->/g, ".")),
+      language,
+      receiver,
+    };
   }
 
   localLookupPlan(
@@ -155,8 +160,14 @@ export class ReferenceResolutionPolicy {
 }
 
 function qualifiedReceiver(refName: string): string | undefined {
-  if (!refName.includes(".") && !refName.includes("/")) return undefined;
-  return refName.split(/[./]/, 1)[0] || undefined;
+  if (
+    !refName.includes(".") &&
+    !refName.includes("/") &&
+    !refName.includes("->")
+  )
+    return undefined;
+  const receiver = refName.split(/->|[./]/, 1)[0]?.replace(/\(\)$/, "");
+  return receiver || undefined;
 }
 
 export const referenceResolutionPolicy = new ReferenceResolutionPolicy();

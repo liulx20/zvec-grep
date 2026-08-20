@@ -527,6 +527,102 @@ class ChildWithOverride extends Base {
   graph.close();
 });
 
+for (const fixture of [
+  {
+    name: "Python super()",
+    format: "python",
+    path: "super_call.py",
+    base: "Base",
+    child: "Child",
+    caller: "helper",
+    text: `class Base:
+    def helper(self):
+        return 1
+
+class Child(Base):
+    def helper(self):
+        return super().helper()
+`,
+  },
+  {
+    name: "Java this with interface default method",
+    format: "java",
+    path: "InheritedCall.java",
+    base: "Base",
+    child: "Child",
+    caller: "run",
+    text: `interface Base {
+  default int helper() { return 1; }
+}
+class Child implements Base {
+  int run() { return this.helper(); }
+}`,
+  },
+  {
+    name: "JavaScript super",
+    format: "javascript",
+    path: "super-call.js",
+    base: "Base",
+    child: "Child",
+    caller: "run",
+    text: `class Base {
+  helper() { return 1; }
+}
+class Child extends Base {
+  run() { return super.helper(); }
+}`,
+  },
+  {
+    name: "C++ this pointer",
+    format: "cpp",
+    path: "inherited_call.cpp",
+    base: "Base",
+    child: "Child",
+    caller: "run",
+    text: `class Base {
+ public:
+  int helper() { return 1; }
+};
+class Child : public Base {
+ public:
+  int run() { return this->helper(); }
+};`,
+  },
+]) {
+  test(`${fixture.name} preserves receiver and resolves inherited method`, async () => {
+    const file = {
+      ...codeFile(fixture.path),
+      format: fixture.format,
+    };
+    const source = { kind: "text", file, text: fixture.text };
+    const input = await extractFileGraph(
+      source,
+      await new CodeExtractor().extract(source),
+    );
+    const contains = input.edges.filter((edge) => edge.kind === "CONTAINS");
+    const containerFor = (id) =>
+      input.nodes.find(
+        (node) => contains.find((edge) => edge.dst === id)?.src === node.id,
+      )?.name;
+    const member = (container, name) =>
+      input.nodes.find(
+        (node) => node.name === name && containerFor(node.id) === container,
+      );
+    const target = member(fixture.base, "helper");
+    const caller = member(fixture.child, fixture.caller);
+    assert.ok(target && caller);
+
+    const graph = new SqliteGraphStorage("", { inMemory: true });
+    graph.upsertFileGraph(file.id, input.nodes, input.edges, input.refs);
+    await graph.resolvePending();
+    assert.deepEqual(
+      graph.callees(caller.id, 1, 10).map((item) => item.id),
+      [target.id],
+    );
+    graph.close();
+  });
+}
+
 test("CONTAINS uses :: scope breadcrumbs", async () => {
   const file = codeFile("cls.ts");
   const source = {

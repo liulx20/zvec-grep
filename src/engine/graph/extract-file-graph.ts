@@ -276,7 +276,7 @@ function localContainerScope(
       .filter(
         (edge) =>
           edge.kind === "INHERITS" &&
-          edge.rel === "extends" &&
+          (edge.rel === "extends" || edge.rel === "implements") &&
           edge.src === containerId,
       )
       .map((edge) => edge.dst);

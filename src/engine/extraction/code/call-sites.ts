@@ -72,6 +72,16 @@ function isNewExpression(node: TSNode): boolean {
 }
 
 export function extractCallName(node: TSNode): string | undefined {
+  if (node.type === "method_invocation") {
+    const name = node.childForFieldName("name");
+    const receiver =
+      node.childForFieldName("object") ?? node.childForFieldName("receiver");
+    if (name) {
+      return normalizeCallName(
+        receiver ? `${receiver.text}.${name.text}` : name.text,
+      );
+    }
+  }
   const target =
     node.childForFieldName("function") ??
     node.childForFieldName("name") ??

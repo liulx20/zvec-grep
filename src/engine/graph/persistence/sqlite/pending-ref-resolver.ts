@@ -227,7 +227,9 @@ export class SqlitePendingRefResolver {
          UNION
          SELECT e.dst_id,h.depth+1
          FROM symbol_edges e JOIN hierarchy h ON e.src_id=h.id
-         WHERE e.kind='INHERITS' AND e.rel='extends' AND h.depth<32
+         WHERE e.kind='INHERITS'
+           AND e.rel IN ('extends','implements')
+           AND h.depth<32
        )
        SELECT id,depth FROM hierarchy WHERE depth>=? ORDER BY depth,id`,
       containerId,

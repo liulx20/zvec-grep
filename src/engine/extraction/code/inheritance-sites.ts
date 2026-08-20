@@ -60,6 +60,11 @@ function collectJsTs(node: TSNode): InheritanceSite[] {
         pushTypeChildren(sites, clause, "implements", true);
       }
     }
+    if (sites.length === 0) {
+      // tree-sitter-javascript represents `extends Base` as a direct
+      // identifier inside class_heritage rather than an extends_clause.
+      pushTypeChildren(sites, heritage, "extends", true);
+    }
     return sites;
   }
 
