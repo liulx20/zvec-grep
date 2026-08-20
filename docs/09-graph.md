@@ -215,9 +215,10 @@ pending ref，以便再次解析。
 5. `upsertFileGraph()` 按文件事务增量替换数据，`checkpoint()` 只推进 WAL；WAL 和
    `synchronous=NORMAL` 继续负责并发读取与同步策略。
 
-SQLite DDL 和 Node runtime loader 已放入 `graph/persistence/sqlite/`，RWR 排序算法位于
-`graph/application/ranking.ts`。`sqlite.ts` 目前仍作为 storage facade，reader/writer 的进一步物理拆分
-不会改变上层 `GraphReader` / `GraphStorage` 接口。
+SQLite persistence 已按职责拆分：`reader.ts` 负责索引查询和遍历，`writer.ts` 负责文件级事务写入，
+`pending-ref-resolver.ts` 负责跨文件引用及 import binding 解析；`schema.ts` 和 `runtime.ts` 分别管理
+DDL 与 Node SQLite 加载。`sqlite.ts` 只保留组合这些单元的 `GraphStorage` facade，RWR 排序算法位于
+`graph/application/ranking.ts`。
 
 因此当前只有一套真实图存储实现：“SQLite 索引查询 + 应用层局部遍历”。测试使用 SQLite 的
 `:memory:` 模式，不再维护另一套 Map/Set 图存储逻辑。Explore/RWR 仍会为单次查询构建有预算限制的
