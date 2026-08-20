@@ -289,6 +289,48 @@ test("SQLite queries and incrementally rebuilds graph data without a full-memory
   reopened.close();
 });
 
+test("SQLite traversal applies a stable SQL edge limit before materialization", () => {
+  const graph = new SqliteGraphStorage("", { inMemory: true });
+  const leaves = Array.from(
+    { length: 100 },
+    (_, index) => `leaf-${String(index).padStart(3, "0")}`,
+  );
+  graph.upsertFileGraph(
+    "fanout",
+    [
+      { id: "root", kind: "function", is_exported: true, name: "root" },
+      ...leaves.map((id) => ({
+        id,
+        kind: "function",
+        is_exported: false,
+        name: id,
+      })),
+    ],
+    leaves.map((id) => ({
+      src: "root",
+      dst: id,
+      kind: "CALLS",
+      rel: "call",
+      count: 1,
+      first_line: 1,
+      ref_name: id,
+    })),
+    [],
+  );
+  assert.deepEqual(
+    graph
+      .traverse("root", {
+        edgeKinds: ["CALLS"],
+        direction: "outgoing",
+        maxDepth: 1,
+        limit: 3,
+      })
+      .map((item) => item.id),
+    leaves.slice(0, 3),
+  );
+  graph.close();
+});
+
 test("fileGraphFromFragments builds symbols and contains edges", () => {
   const input = fileGraphFromFragments("f1", [
     {

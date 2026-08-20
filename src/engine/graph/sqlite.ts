@@ -47,6 +47,8 @@ type RefRow = {
   ref_kind: string;
   line: number;
   status: "pending" | "failed";
+  imported_name: string | null;
+  local_name: string | null;
 };
 type SymbolRow = {
   id: string;
@@ -99,6 +101,7 @@ export class SqliteGraphStorage implements GraphStorage {
     this.assertOpen();
     if (!this.readOnly) {
       this.db.exec(SQLITE_GRAPH_SCHEMA);
+      this.ensureOptionalColumns();
       this.ensureVersion();
     }
   }
@@ -128,6 +131,9 @@ export class SqliteGraphStorage implements GraphStorage {
       this.db.prepare("DELETE FROM symbols WHERE file_id=?").run(fileId);
       this.db
         .prepare("DELETE FROM file_imports WHERE src_file_id=?")
+        .run(fileId);
+      this.db
+        .prepare("DELETE FROM file_import_bindings WHERE src_file_id=?")
         .run(fileId);
       const insert = this.db.prepare(
         "INSERT INTO symbols(id,file_id,name,kind,is_exported) VALUES (?,?,?,?,?)",
@@ -208,12 +214,16 @@ export class SqliteGraphStorage implements GraphStorage {
     );
     const paths = new FilePathIndex(options.files ?? []);
     this.transaction(() => {
-      for (const ref of this.retryableRefs()) {
-        if (ref.owner_is_file || ref.ref_kind === "import") {
-          this.resolveImport(ref, paths);
-        } else {
-          this.resolveSymbol(ref, names);
-        }
+      const refs = this.retryableRefs();
+      for (const ref of refs.filter(
+        (item) => item.owner_is_file || item.ref_kind === "import",
+      )) {
+        this.resolveImport(ref, paths);
+      }
+      for (const ref of refs.filter(
+        (item) => !item.owner_is_file && item.ref_kind !== "import",
+      )) {
+        this.resolveSymbol(ref, names);
       }
     });
   }
@@ -234,7 +244,12 @@ export class SqliteGraphStorage implements GraphStorage {
     const wanted = new Set(symIds),
       per = new Map(symIds.map((id) => [id, 0])),
       out: SeedNeighbor[] = [];
-    for (const edge of this.adjacentEdges(symIds, ["CALLS"], "both"))
+    for (const edge of this.adjacentEdges(
+      symIds,
+      ["CALLS"],
+      "both",
+      symIds.length * Math.max(0, limit),
+    ))
       for (const sid of [edge.src, edge.dst]) {
         if (!wanted.has(sid) || (per.get(sid) ?? 0) >= limit) continue;
         out.push({
@@ -280,7 +295,12 @@ export class SqliteGraphStorage implements GraphStorage {
     const wanted = new Set(fileIds),
       per = new Map(fileIds.map((id) => [id, 0])),
       out: FileNeighbor[] = [];
-    for (const edge of this.adjacentEdges(fileIds, ["IMPORTS"], "both"))
+    for (const edge of this.adjacentEdges(
+      fileIds,
+      ["IMPORTS"],
+      "both",
+      fileIds.length * Math.max(0, limit),
+    ))
       for (const fid of [edge.src, edge.dst]) {
         if (!wanted.has(fid) || (per.get(fid) ?? 0) >= limit) continue;
         out.push({
@@ -335,7 +355,12 @@ export class SqliteGraphStorage implements GraphStorage {
       depth++
     ) {
       const next: string[] = [];
-      for (const edge of this.adjacentEdges(frontier, ["CALLS"], "outgoing")) {
+      for (const edge of this.adjacentEdges(
+        frontier,
+        ["CALLS"],
+        "outgoing",
+        10_000,
+      )) {
         if (parent.has(edge.dst)) continue;
         parent.set(edge.dst, edge.src);
         if (edge.dst === to) return this.reconstructPath(parent, to);
@@ -415,10 +440,7 @@ export class SqliteGraphStorage implements GraphStorage {
     edgeKinds: readonly GraphEdgeKind[] = ALL_EDGE_KINDS,
     limit = 1_000,
   ): GraphEdge[] {
-    return this.queryDirectionalEdges(nodeIds, edgeKinds, "outgoing").slice(
-      0,
-      Math.max(0, limit),
-    );
+    return this.queryDirectionalEdges(nodeIds, edgeKinds, "outgoing", limit);
   }
 
   incomingEdges(
@@ -426,10 +448,7 @@ export class SqliteGraphStorage implements GraphStorage {
     edgeKinds: readonly GraphEdgeKind[] = ALL_EDGE_KINDS,
     limit = 1_000,
   ): GraphEdge[] {
-    return this.queryDirectionalEdges(nodeIds, edgeKinds, "incoming").slice(
-      0,
-      Math.max(0, limit),
-    );
+    return this.queryDirectionalEdges(nodeIds, edgeKinds, "incoming", limit);
   }
 
   edges(
@@ -517,7 +536,13 @@ export class SqliteGraphStorage implements GraphStorage {
     ) {
       const next: string[] = [];
       const active = new Set(frontier);
-      for (const edge of this.adjacentEdges(frontier, kinds, direction))
+      const remaining = Math.max(0, limit - ordered.length);
+      for (const edge of this.adjacentEdges(
+        frontier,
+        kinds,
+        direction,
+        remaining,
+      ))
         for (const id of adjacentTargets(edge, active, direction)) {
           if (seen.has(id)) continue;
           seen.add(id);
@@ -535,79 +560,100 @@ export class SqliteGraphStorage implements GraphStorage {
     idsInput: readonly string[],
     kinds: readonly GraphEdgeKind[],
     direction: "outgoing" | "incoming" | "both",
+    limit: number,
   ): GraphEdge[] {
     if (direction === "outgoing") {
-      return this.outgoingEdges(idsInput, kinds, Number.MAX_SAFE_INTEGER);
+      return this.outgoingEdges(idsInput, kinds, limit);
     }
     if (direction === "incoming") {
-      return this.incomingEdges(idsInput, kinds, Number.MAX_SAFE_INTEGER);
+      return this.incomingEdges(idsInput, kinds, limit);
     }
-    return dedupeEdges([
-      ...this.outgoingEdges(idsInput, kinds, Number.MAX_SAFE_INTEGER),
-      ...this.incomingEdges(idsInput, kinds, Number.MAX_SAFE_INTEGER),
-    ]);
+    const outgoing = this.outgoingEdges(idsInput, kinds, Math.ceil(limit / 2));
+    const incoming = this.incomingEdges(
+      idsInput,
+      kinds,
+      Math.max(0, limit - outgoing.length),
+    );
+    return dedupeEdges([...outgoing, ...incoming]).slice(0, limit);
   }
 
   private queryDirectionalEdges(
     idsInput: readonly string[],
     kinds: readonly GraphEdgeKind[],
     direction: "outgoing" | "incoming",
+    limit: number,
   ): GraphEdge[] {
-    if (!idsInput.length) return [];
+    if (!idsInput.length || limit <= 0) return [];
     const ids = JSON.stringify([...new Set(idsInput)]),
       out: GraphEdge[] = [];
     const rel = kinds.filter((k) => REL_KINDS.has(k));
     if (rel.length) {
       const p = rel.map(() => "?").join(",");
       const sides = [direction === "outgoing" ? "src_id" : "dst_id"];
-      for (const side of sides)
+      for (const side of sides) {
+        const remaining = limit - out.length;
+        if (remaining <= 0) break;
         out.push(
           ...this.all<EdgeRow>(
-            `SELECT * FROM symbol_edges WHERE ${side} IN(SELECT value FROM json_each(?)) AND kind IN(${p})`,
+            `SELECT * FROM symbol_edges WHERE ${side} IN(SELECT value FROM json_each(?)) AND kind IN(${p}) ORDER BY ${side},kind,src_id,dst_id,rel LIMIT ?`,
             ids,
             ...rel,
+            remaining,
           ).map(toGraphEdge),
         );
+      }
     }
     if (kinds.includes("CONTAINS")) {
       const sides = [direction === "outgoing" ? "parent_id" : "child_id"];
-      for (const side of sides)
+      for (const side of sides) {
+        const remaining = limit - out.length;
+        if (remaining <= 0) break;
         out.push(
           ...this.all<{ parent_id: string; child_id: string }>(
-            `SELECT * FROM contains WHERE ${side} IN(SELECT value FROM json_each(?))`,
+            `SELECT * FROM contains WHERE ${side} IN(SELECT value FROM json_each(?)) ORDER BY ${side},parent_id,child_id LIMIT ?`,
             ids,
+            remaining,
           ).map((r) =>
             structuralEdge(r.parent_id, r.child_id, "CONTAINS", "contains"),
           ),
         );
+      }
     }
     if (kinds.includes("DEFINES")) {
       const sides = [direction === "outgoing" ? "file_id" : "id"];
-      for (const side of sides)
+      for (const side of sides) {
+        const remaining = limit - out.length;
+        if (remaining <= 0) break;
         out.push(
           ...this.all<{ file_id: string; id: string }>(
-            `SELECT file_id,id FROM symbols WHERE ${side} IN(SELECT value FROM json_each(?))`,
+            `SELECT file_id,id FROM symbols WHERE ${side} IN(SELECT value FROM json_each(?)) ORDER BY ${side},file_id,id LIMIT ?`,
             ids,
+            remaining,
           ).map((r) => structuralEdge(r.file_id, r.id, "DEFINES", "defines")),
         );
+      }
     }
     if (kinds.includes("IMPORTS")) {
       const sides = [direction === "outgoing" ? "src_file_id" : "dst_file_id"];
-      for (const side of sides)
+      for (const side of sides) {
+        const remaining = limit - out.length;
+        if (remaining <= 0) break;
         out.push(
           ...this.all<{
             src_file_id: string;
             dst_file_id: string;
             spec: string;
           }>(
-            `SELECT * FROM file_imports WHERE ${side} IN(SELECT value FROM json_each(?))`,
+            `SELECT * FROM file_imports WHERE ${side} IN(SELECT value FROM json_each(?)) ORDER BY ${side},src_file_id,dst_file_id,spec LIMIT ?`,
             ids,
+            remaining,
           ).map((r) =>
             structuralEdge(r.src_file_id, r.dst_file_id, "IMPORTS", r.spec),
           ),
         );
+      }
     }
-    return dedupeEdges(out);
+    return dedupeEdges(out).slice(0, limit);
   }
 
   private refsForIds(ids: readonly string[]): SymRef[] {
@@ -640,7 +686,20 @@ export class SqliteGraphStorage implements GraphStorage {
       "SELECT dst_file_id FROM file_imports WHERE src_file_id=?",
       owner.file_id,
     ).map((r) => r.dst_file_id);
-    const result = resolveRef(pending, names, preferred);
+    const binding = this.one<{
+      imported_name: string;
+      dst_file_id: string;
+    }>(
+      "SELECT imported_name,dst_file_id FROM file_import_bindings WHERE src_file_id=? AND local_name=? ORDER BY dst_file_id,imported_name LIMIT 1",
+      owner.file_id,
+      ref.ref_name,
+    );
+    const result = resolveRef(
+      pending,
+      names,
+      binding ? [binding.dst_file_id] : preferred,
+      binding?.imported_name,
+    );
     if (result.status === "external") return this.deleteRef(ref.id);
     if (result.status !== "resolved") return this.failRef(ref.id);
     this.db
@@ -674,6 +733,13 @@ export class SqliteGraphStorage implements GraphStorage {
         "INSERT OR IGNORE INTO file_imports(src_file_id,dst_file_id,spec) VALUES(?,?,?)",
       )
       .run(ref.owner_id, result.fileId, ref.ref_name);
+    if (ref.imported_name && ref.local_name) {
+      this.db
+        .prepare(
+          "INSERT OR IGNORE INTO file_import_bindings(src_file_id,dst_file_id,local_name,imported_name) VALUES(?,?,?,?)",
+        )
+        .run(ref.owner_id, result.fileId, ref.local_name, ref.imported_name);
+    }
     this.deleteRef(ref.id);
   }
 
@@ -708,7 +774,7 @@ export class SqliteGraphStorage implements GraphStorage {
   private insertRef(r: RawRef, fallback: string): void {
     this.db
       .prepare(
-        "INSERT OR REPLACE INTO pending_refs(id,owner_id,owner_is_file,ref_name,ref_kind,line,status) VALUES(?,?,?,?,?,?,'pending')",
+        "INSERT OR REPLACE INTO pending_refs(id,owner_id,owner_is_file,ref_name,ref_kind,line,imported_name,local_name,status) VALUES(?,?,?,?,?,?,?,?,'pending')",
       )
       .run(
         r.id,
@@ -717,6 +783,8 @@ export class SqliteGraphStorage implements GraphStorage {
         r.ref_name,
         r.ref_kind,
         r.line,
+        r.imported_name ?? null,
+        r.local_name ?? null,
       );
   }
   private incomingSnapshots(fileId: string): EdgeRow[] {
@@ -818,6 +886,20 @@ export class SqliteGraphStorage implements GraphStorage {
       throw new Error(
         `Unsupported SQLite graph schema version: ${row.value}; expected ${SQLITE_GRAPH_SCHEMA_VERSION}`,
       );
+  }
+
+  private ensureOptionalColumns(): void {
+    const columns = new Set(
+      this.all<{ name: string }>("PRAGMA table_info(pending_refs)").map(
+        (row) => row.name,
+      ),
+    );
+    if (!columns.has("imported_name")) {
+      this.db.exec("ALTER TABLE pending_refs ADD COLUMN imported_name TEXT");
+    }
+    if (!columns.has("local_name")) {
+      this.db.exec("ALTER TABLE pending_refs ADD COLUMN local_name TEXT");
+    }
   }
 }
 

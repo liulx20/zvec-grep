@@ -97,6 +97,8 @@ export function rawRef(input: {
   line: number;
   occurrence?: number;
   ownerIsFile?: boolean;
+  importedName?: string;
+  localName?: string;
 }): RawRef {
   const refKind = input.refKind ?? "call";
   return {
@@ -112,6 +114,8 @@ export function rawRef(input: {
     ref_kind: refKind,
     line: input.line,
     owner_is_file: input.ownerIsFile,
+    imported_name: input.importedName,
+    local_name: input.localName,
   };
 }
 

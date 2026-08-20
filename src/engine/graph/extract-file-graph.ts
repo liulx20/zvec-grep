@@ -62,6 +62,22 @@ export async function extractFileGraph(
       seenRefIds.add(ref.id);
       refs.push(ref);
     }
+    for (const [bindingIndex, binding] of (spec.bindings ?? []).entries()) {
+      const bindingRef = rawRef({
+        owner: source.file.id,
+        refName: spec.spec,
+        refKind: "import",
+        line: spec.line,
+        occurrence: occurrence * 1_000 + bindingIndex + 1,
+        ownerIsFile: true,
+        importedName: binding.imported,
+        localName: binding.local,
+      });
+      if (!seenRefIds.has(bindingRef.id)) {
+        seenRefIds.add(bindingRef.id);
+        refs.push(bindingRef);
+      }
+    }
   }
 
   const idByOffset = indexPublicFragmentsByOffset(fragments);

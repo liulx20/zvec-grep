@@ -127,6 +127,83 @@ test("extractFileGraph resolves cross-file calls after second file indexed", asy
   graph.close();
 });
 
+for (const fixture of [
+  {
+    name: "TypeScript import alias",
+    format: "typescript",
+    callerPath: "caller.ts",
+    targetPath: "codec.ts",
+    callerText:
+      'import { decode as parse } from "./codec";\nexport function run() { parse(); }\n',
+    targetText: "export function decode() { return 1; }\n",
+  },
+  {
+    name: "Python import alias",
+    format: "python",
+    callerPath: "caller.py",
+    targetPath: "codec.py",
+    callerText: "from .codec import decode as parse\ndef run():\n    parse()\n",
+    targetText: "def decode():\n    return 1\n",
+  },
+]) {
+  test(`${fixture.name} resolves calls to the exported symbol`, async () => {
+    const callerFile = {
+      ...codeFile(fixture.callerPath),
+      id: `caller-${fixture.format}`,
+      format: fixture.format,
+      absolutePath: `/repo/${fixture.callerPath}`,
+    };
+    const targetFile = {
+      ...codeFile(fixture.targetPath),
+      id: `target-${fixture.format}`,
+      format: fixture.format,
+      absolutePath: `/repo/${fixture.targetPath}`,
+    };
+    const callerSource = {
+      kind: "text",
+      file: callerFile,
+      text: fixture.callerText,
+    };
+    const targetSource = {
+      kind: "text",
+      file: targetFile,
+      text: fixture.targetText,
+    };
+    const extractor = new CodeExtractor();
+    const callerGraph = await extractFileGraph(
+      callerSource,
+      await extractor.extract(callerSource),
+    );
+    const targetGraph = await extractFileGraph(
+      targetSource,
+      await extractor.extract(targetSource),
+    );
+    const graph = new SqliteGraphStorage("", { inMemory: true });
+    graph.upsertFileGraph(
+      callerFile.id,
+      callerGraph.nodes,
+      callerGraph.edges,
+      callerGraph.refs,
+    );
+    graph.upsertFileGraph(
+      targetFile.id,
+      targetGraph.nodes,
+      targetGraph.edges,
+      targetGraph.refs,
+    );
+    await graph.resolvePending({ files: [callerFile, targetFile] });
+
+    const caller = callerGraph.nodes.find((node) => node.name === "run");
+    const target = targetGraph.nodes.find((node) => node.name === "decode");
+    assert.ok(caller && target);
+    assert.deepEqual(
+      graph.callees(caller.id, 1, 10).map((item) => item.id),
+      [target.id],
+    );
+    graph.close();
+  });
+}
+
 test("CONTAINS uses :: scope breadcrumbs", async () => {
   const file = codeFile("cls.ts");
   const source = {

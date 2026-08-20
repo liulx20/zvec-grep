@@ -6,12 +6,13 @@ export function resolveRef(
   ref: PendingRef,
   names: NameIndex,
   preferredFileIds: readonly string[] = [],
+  lookupName = ref.ref_name,
 ): RefResolveResult {
   if (isExternalRefName(ref.ref_name)) {
     return { status: "external" };
   }
 
-  const hit = names.lookup(ref.ref_name, ref.src_file, preferredFileIds);
+  const hit = names.lookup(lookupName, ref.src_file, preferredFileIds);
   if (!hit) {
     return { status: "failed" };
   }

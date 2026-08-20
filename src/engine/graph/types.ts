@@ -100,6 +100,8 @@ export type RawRef = {
   line: number;
   /** true → HAS_REF 挂在 File 上（import/include）。 */
   owner_is_file?: boolean;
+  imported_name?: string;
+  local_name?: string;
 };
 
 export type PendingRef = {

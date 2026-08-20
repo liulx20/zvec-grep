@@ -7,9 +7,12 @@ import { withParser } from "./tree-sitter/parser.js";
 export type ImportSpec = {
   spec: string;
   line: number;
+  bindings?: readonly ImportBinding[];
   /** true when #include <...> — always treated as external in v1 */
   systemInclude?: boolean;
 };
+
+export type ImportBinding = { imported: string; local: string };
 
 const IMPORT_NODE_TYPES = new Set([
   "import_statement",
@@ -85,11 +88,23 @@ function extractSpecsFromNode(node: TSNode, language: string): ImportSpec[] {
       // `from . import x` — module_name may be missing; use leading dots from text
       const match = node.text.match(/^from\s+(\.+[\w.]*)/);
       if (match?.[1]) {
-        return [{ spec: match[1], line }];
+        return [
+          {
+            spec: match[1],
+            line,
+            bindings: pythonFromBindings(node.text),
+          },
+        ];
       }
       return [];
     }
-    return [{ spec: module.text.trim(), line }];
+    return [
+      {
+        spec: module.text.trim(),
+        line,
+        bindings: pythonFromBindings(node.text),
+      },
+    ];
   }
 
   if (language === "python" && node.type === "import_statement") {
@@ -121,10 +136,35 @@ function extractSpecsFromNode(node: TSNode, language: string): ImportSpec[] {
       return [];
     }
     const spec = stripQuotes(sourceNode.text);
-    return spec ? [{ spec, line }] : [];
+    return spec
+      ? [{ spec, line, bindings: javascriptNamedBindings(node.text) }]
+      : [];
   }
 
   return [];
+}
+
+function javascriptNamedBindings(text: string): ImportBinding[] {
+  const named = text.match(/\{([\s\S]*?)\}/)?.[1];
+  if (!named) return [];
+  return parseBindings(named, /\s+as\s+/i);
+}
+
+function pythonFromBindings(text: string): ImportBinding[] {
+  const imported = text.match(/^\s*from\s+\S+\s+import\s+([\s\S]+)$/)?.[1];
+  if (!imported) return [];
+  return parseBindings(imported.replace(/^\(|\)$/g, ""), /\s+as\s+/i);
+}
+
+function parseBindings(value: string, aliasSeparator: RegExp): ImportBinding[] {
+  return value.split(",").flatMap((piece) => {
+    const normalized = piece.replace(/\/\*[\s\S]*?\*\//g, "").trim();
+    if (!normalized || normalized.startsWith("...")) return [];
+    const [importedRaw, localRaw] = normalized.split(aliasSeparator, 2);
+    const imported = importedRaw?.replace(/^type\s+/, "").trim();
+    const local = (localRaw ?? imported)?.trim();
+    return imported && local ? [{ imported, local }] : [];
+  });
 }
 
 function stripQuotes(value: string): string {

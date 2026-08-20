@@ -66,6 +66,97 @@ test("exploreSubgraph expands and RWR-scores multiple seeds without context asse
   graph.close();
 });
 
+test("exploreSubgraph drops call paths that exceed the retained node budget", () => {
+  const graph = new SqliteGraphStorage("", { inMemory: true });
+  const rootIds = Array.from({ length: 16 }, (_, index) => `root-${index}`);
+  graph.upsertFileGraph(
+    "paths",
+    [
+      ...rootIds.map((id) => ({
+        id,
+        kind: "function",
+        is_exported: true,
+        name: id,
+      })),
+      { id: "bridge", kind: "function", is_exported: false, name: "bridge" },
+    ],
+    [
+      {
+        src: rootIds[0],
+        dst: "bridge",
+        rel: "call",
+        count: 1,
+        first_line: 1,
+        ref_name: "bridge",
+        kind: "CALLS",
+      },
+      {
+        src: "bridge",
+        dst: rootIds[1],
+        rel: "call",
+        count: 1,
+        first_line: 2,
+        ref_name: rootIds[1],
+        kind: "CALLS",
+      },
+    ],
+    [],
+  );
+  const storage = storageFrom([
+    ...rootIds.map((id) => entity(id, id, "paths.ts")),
+    entity("bridge", "bridge", "paths.ts"),
+  ]);
+  const result = exploreSubgraph(graph, storage, {
+    seedIds: rootIds,
+    maxNodes: 16,
+    includeCallPaths: true,
+  });
+  const retained = new Set(result.nodes.map((node) => node.id));
+  assert.equal(result.nodes.length, 16);
+  assert.equal(retained.has("bridge"), false);
+  assert.equal(result.callPaths.length, 0);
+  assert.ok(
+    result.callPaths.every((path) =>
+      path.nodes.every((id) => retained.has(id)),
+    ),
+  );
+  graph.close();
+});
+
+test("explore maxChars is a hard source-text budget", () => {
+  const graph = new SqliteGraphStorage("", { inMemory: true });
+  graph.upsertFileGraph(
+    "large",
+    [
+      {
+        id: "large-symbol",
+        kind: "function",
+        is_exported: true,
+        name: "large",
+      },
+    ],
+    [],
+    [],
+  );
+  const storage = storageFrom([
+    entity("large-symbol", "large", "large.ts", {
+      symbolType: "function",
+      text: `export function large() {\n${"x".repeat(8_000)}\n}`,
+    }),
+  ]);
+  const result = exploreGraph(graph, storage, {
+    query: "large",
+    maxChars: 1_000,
+    maxFiles: 1,
+  });
+  assert.ok(result.files.length > 0);
+  assert.ok(
+    result.files.reduce((sum, file) => sum + file.text.length, 0) <= 1_000,
+  );
+  assert.match(result.files[0].text, /truncated/);
+  graph.close();
+});
+
 test("exploreSubgraph gives CALLS more RWR weight than REFS", () => {
   const graph = new SqliteGraphStorage("", { inMemory: true });
   graph.upsertFileGraph(

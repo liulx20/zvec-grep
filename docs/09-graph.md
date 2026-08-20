@@ -208,7 +208,8 @@ pending ref，以便再次解析。
 1. 打开 SQLite 时只建立连接并检查 schema，不加载完整节点和边。
 2. `callers`、`callees`、`usages`、`edges` 等直接使用 source、target、kind 等索引查询。
 3. `traverse`、`impact`、`hierarchy` 等在应用层维护 BFS frontier；每一层通过 `json_each()` 批量
-   查询该层节点的邻接边，再批量读取目标节点类型，避免逐节点 N+1 查询。
+   查询该层节点的邻接边，将剩余节点预算作为稳定排序后的 SQL `LIMIT` 下推，再批量读取目标节点类型，
+   避免逐节点 N+1 查询和高扇入/扇出节点的无界物化。
 4. Explore 只把预算内局部子图放进内存并运行 RWR，内存占用与查询子图规模相关，而不是与完整
    仓库图规模相关。
 5. `upsertFileGraph()` 按文件事务增量替换数据，`checkpoint()` 只推进 WAL；WAL 和
@@ -398,8 +399,8 @@ Explore 按下面的顺序执行：
 2. **建立候选子图。** 先扩展基类、派生类和 sibling types，再沿 `CALLS`、`REFS`、
    `INHERITS`、`CONTAINS` 双向遍历。随后补充 roots 的直接 callers、callees 和父容器、兄弟成员。
 
-3. **补全调用路径。** 在多个 roots 之间寻找可证明的调用路径。路径节点会被保护，之后按节点预算
-   裁剪子图时不会优先丢弃。
+3. **补全调用路径。** 在多个 roots 之间寻找可证明的调用路径。路径节点会被优先保留；节点预算
+   仍不足以容纳完整路径时，该路径不会进入输出，保证 `callPaths`、`nodes` 和 `edges` 自洽。
 
 4. **分析修改影响。** 从 callable roots 的参数和返回类型收集 change surface；同时反向查找
    dependents 和测试，形成 blast radius。
@@ -505,8 +506,9 @@ type ExploreEdge = {
 `edges` 是存储层返回的真实类型化边，不是根据邻接节点猜测的关系；同一对节点可以同时出现
 `CALLS` 和 `REFS`，并保留关系子类型、聚合次数、首次行号和提取时名称。
 
-默认输出预算为最多 8 个 seeds、深度 3、200 个子图节点、8 个文件和约 24,000 字符。
-预算影响最终展示内容，但 roots 和调用路径节点在子图裁剪时优先保留。
+默认输出预算为最多 8 个 seeds、深度 3、200 个子图节点、8 个文件和 24,000 字符。
+`maxChars` 是最终源码文本的硬上限，首个符号超过预算时也会截断；roots 和调用路径节点在子图裁剪时
+优先保留，但无法完整保留的调用路径会被删除。
 
 ## 6. 已知问题与限制
 
@@ -515,7 +517,8 @@ type ExploreEdge = {
 这是当前最主要的能力瓶颈。
 
 - 基于名称和启发式作用域解析，不是 TypeScript language service 或编译器级解析。
-- 不完整支持 import alias、namespace、限定名和 re-export 链。
+- JS/TS named import alias 和 Python `from ... import ... as ...` 已通过 binding IR 解析；namespace、
+  限定名、default import 和 re-export 链仍不完整。
 - 不理解 `tsconfig paths`、package exports、workspace package 等完整模块解析规则。
 - 缺少变量类型传播，`obj.method()` 难以稳定解析到具体类的方法。
 - 重载、同名方法、嵌套作用域和跨文件多候选容易保持 `failed`。
@@ -569,7 +572,7 @@ occurrence 仍依赖提取遍历顺序，尚未使用 column 或稳定 source ra
 
 1. **提升引用位置精度**：当前 occurrence 已避免同一行引用冲突；后续采集 column/source range，
    让引用身份不依赖遍历顺序，并为旧数据提供重建策略。
-2. **提升解析正确率**：先实现 import alias、限定名和基于导入绑定的解析，再处理 tsconfig paths。
+2. **提升解析正确率**：继续实现 namespace/default import、限定名和 re-export 链，再处理 tsconfig paths。
 3. **增加解析诊断**：记录失败原因、候选目标和重试次数，暴露 resolved/failed/external 指标。
 4. **强化一致性**：明确主索引成功、图写入失败时的恢复/重建状态，提供可见错误而非静默降级。
 5. **优化高出度遍历**：为超大 frontier 增加分批上限和查询取消，避免单次 SQL 参数或结果集过大。

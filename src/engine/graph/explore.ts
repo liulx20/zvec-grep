@@ -376,6 +376,9 @@ export function exploreSubgraph(
     ...callPaths.flatMap((path) => path.nodes),
   ]);
   trimToMaxNodes(selected, protectedIds, maxNodes);
+  const retainedCallPaths = callPaths.filter((path) =>
+    path.nodes.every((id) => selected.has(id)),
+  );
 
   const nodes: ExploreNode[] = [];
   for (const scored of selected.values()) {
@@ -398,7 +401,7 @@ export function exploreSubgraph(
     rootIds,
     nodes,
     edges,
-    callPaths,
+    callPaths: retainedCallPaths,
     nodeScores: rankNodesWithRwr(nodes, edges, rootIds, options.seedWeights),
   };
 }
@@ -941,6 +944,7 @@ function renderFileText(
   symbols: readonly ExploreSymbolSnippet[],
   budget: number,
 ): string {
+  if (budget <= 0) return "";
   const parts: string[] = [];
   let used = 0;
   let prevEnd = -1;
@@ -952,15 +956,22 @@ function renderFileText(
     const gap =
       prevEnd >= 0 && start > prevEnd + CLUSTER_GAP_LINES ? "\n// ...\n" : "\n";
     const block = `${parts.length === 0 ? "" : gap}${header}\n${sym.content.trimEnd()}\n`;
-    if (used + block.length > budget && parts.length > 0) {
-      parts.push("\n// ... truncated\n");
+    if (used + block.length > budget) {
+      const remaining = budget - used;
+      if (remaining > 0) {
+        const marker = "\n// ... truncated\n";
+        const contentLength = Math.max(0, remaining - marker.length);
+        parts.push(
+          `${block.slice(0, contentLength)}${marker.slice(0, remaining - contentLength)}`,
+        );
+      }
       break;
     }
     parts.push(block);
     used += block.length;
     prevEnd = end;
   }
-  return parts.join("");
+  return parts.join("").slice(0, budget);
 }
 
 function allocateCharBudgets(

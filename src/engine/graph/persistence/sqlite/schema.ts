@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS pending_refs (
  id TEXT PRIMARY KEY, owner_id TEXT NOT NULL,
  owner_is_file INTEGER NOT NULL CHECK (owner_is_file IN (0,1)),
  ref_name TEXT NOT NULL, ref_kind TEXT NOT NULL, line INTEGER NOT NULL,
+ imported_name TEXT, local_name TEXT,
  status TEXT NOT NULL CHECK (status IN ('pending','failed'))
 ) STRICT;
 CREATE TABLE IF NOT EXISTS contains (
@@ -32,12 +33,19 @@ CREATE TABLE IF NOT EXISTS file_imports (
  dst_file_id TEXT NOT NULL REFERENCES files(id) ON DELETE CASCADE,
  spec TEXT NOT NULL, PRIMARY KEY(src_file_id,dst_file_id,spec)
 ) STRICT, WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS file_import_bindings (
+ src_file_id TEXT NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+ dst_file_id TEXT NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+ local_name TEXT NOT NULL, imported_name TEXT NOT NULL,
+ PRIMARY KEY(src_file_id,local_name,dst_file_id,imported_name)
+) STRICT, WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS symbols_file_id_idx ON symbols(file_id);
 CREATE INDEX IF NOT EXISTS symbols_name_idx ON symbols(name) WHERE name IS NOT NULL;
 CREATE INDEX IF NOT EXISTS symbol_edges_src_kind_idx ON symbol_edges(src_id,kind);
 CREATE INDEX IF NOT EXISTS symbol_edges_dst_kind_idx ON symbol_edges(dst_id,kind);
 CREATE INDEX IF NOT EXISTS contains_child_idx ON contains(child_id);
 CREATE INDEX IF NOT EXISTS file_imports_dst_idx ON file_imports(dst_file_id);
+CREATE INDEX IF NOT EXISTS file_import_bindings_local_idx ON file_import_bindings(src_file_id,local_name);
 CREATE INDEX IF NOT EXISTS pending_refs_name_idx ON pending_refs(ref_name,status);
 CREATE INDEX IF NOT EXISTS pending_refs_owner_idx ON pending_refs(owner_id);
 `;
