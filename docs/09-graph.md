@@ -201,7 +201,8 @@ erDiagram
 
 增量更新时，`upsertFileGraph(fileId, ...)` 会先替换该文件原有的节点和出边；删除文件时
 `deleteFileGraph(fileId)` 删除其内容。受更新影响、原本指向被替换符号的入边会重新变成
-pending ref，以便再次解析。
+pending ref，以便再次解析。删除目标文件前也会快照其他文件指向它的 `IMPORTS` 和 import bindings；
+目标文件重试成功后，即使 import 方没有变化，也能恢复文件关系和 alias 调用边。
 
 当前 SQLite backend 的具体工作方式是：
 
@@ -210,6 +211,8 @@ pending ref，以便再次解析。
 3. `traverse`、`impact`、`hierarchy` 等在应用层维护 BFS frontier；每一层通过 `json_each()` 批量
    查询该层节点的邻接边，将剩余节点预算作为稳定排序后的 SQL `LIMIT` 下推，再批量读取目标节点类型，
    避免逐节点 N+1 查询和高扇入/扇出节点的无界物化。
+   `expandSeeds()` 和 `expandFileNeighbors()` 的 limit 则按输入 seed 独立执行，避免高扇出 seed
+   占满其他 seed 的结果窗口。
 4. Explore 只把预算内局部子图放进内存并运行 RWR，内存占用与查询子图规模相关，而不是与完整
    仓库图规模相关。
 5. `upsertFileGraph()` 按文件事务增量替换数据，`checkpoint()` 只推进 WAL；WAL 和

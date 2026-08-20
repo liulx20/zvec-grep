@@ -108,9 +108,15 @@ export class SqlitePendingRefResolver extends SqliteGraphWriter {
     if (ref.imported_name && ref.local_name) {
       this.db
         .prepare(
-          "INSERT OR IGNORE INTO file_import_bindings(src_file_id,dst_file_id,local_name,imported_name) VALUES(?,?,?,?)",
+          "INSERT OR REPLACE INTO file_import_bindings(src_file_id,dst_file_id,local_name,imported_name,spec) VALUES(?,?,?,?,?)",
         )
-        .run(ref.owner_id, result.fileId, ref.local_name, ref.imported_name);
+        .run(
+          ref.owner_id,
+          result.fileId,
+          ref.local_name,
+          ref.imported_name,
+          ref.ref_name,
+        );
     }
     this.deleteRef(ref.id);
   }

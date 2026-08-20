@@ -110,25 +110,17 @@ export class SqliteGraphReader {
   }
 
   expandSeeds(symIds: readonly string[], limit: number): SeedNeighbor[] {
-    const wanted = new Set(symIds),
-      per = new Map(symIds.map((id) => [id, 0])),
-      out: SeedNeighbor[] = [];
-    for (const edge of this.adjacentEdges(
-      symIds,
-      ["CALLS"],
-      "both",
-      symIds.length * Math.max(0, limit),
-    ))
-      for (const sid of [edge.src, edge.dst]) {
-        if (!wanted.has(sid) || (per.get(sid) ?? 0) >= limit) continue;
+    const out: SeedNeighbor[] = [];
+    for (const sid of symIds) {
+      for (const edge of this.adjacentEdges([sid], ["CALLS"], "both", limit)) {
         out.push({
           sid,
           id: edge.src === sid ? edge.dst : edge.src,
           count: edge.count,
           direction: edge.src === sid ? "out" : "in",
         });
-        per.set(sid, (per.get(sid) ?? 0) + 1);
       }
+    }
     return out;
   }
 
@@ -161,24 +153,21 @@ export class SqliteGraphReader {
     fileIds: readonly string[],
     limit: number,
   ): FileNeighbor[] {
-    const wanted = new Set(fileIds),
-      per = new Map(fileIds.map((id) => [id, 0])),
-      out: FileNeighbor[] = [];
-    for (const edge of this.adjacentEdges(
-      fileIds,
-      ["IMPORTS"],
-      "both",
-      fileIds.length * Math.max(0, limit),
-    ))
-      for (const fid of [edge.src, edge.dst]) {
-        if (!wanted.has(fid) || (per.get(fid) ?? 0) >= limit) continue;
+    const out: FileNeighbor[] = [];
+    for (const fid of fileIds) {
+      for (const edge of this.adjacentEdges(
+        [fid],
+        ["IMPORTS"],
+        "both",
+        limit,
+      )) {
         out.push({
           fid,
           id: edge.src === fid ? edge.dst : edge.src,
           direction: edge.src === fid ? "out" : "in",
         });
-        per.set(fid, (per.get(fid) ?? 0) + 1);
       }
+    }
     return out;
   }
 
@@ -616,6 +605,16 @@ export class SqliteGraphReader {
     }
     if (!columns.has("local_name")) {
       this.db.exec("ALTER TABLE pending_refs ADD COLUMN local_name TEXT");
+    }
+    const bindingColumns = new Set(
+      this.all<{ name: string }>("PRAGMA table_info(file_import_bindings)").map(
+        (row) => row.name,
+      ),
+    );
+    if (!bindingColumns.has("spec")) {
+      this.db.exec(
+        "ALTER TABLE file_import_bindings ADD COLUMN spec TEXT NOT NULL DEFAULT ''",
+      );
     }
   }
 }

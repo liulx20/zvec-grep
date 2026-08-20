@@ -2,6 +2,12 @@ import { makeRefId } from "../../ref-id.js";
 import type { LocalEdge, RawRef, SymNode } from "../../types.js";
 import { SqliteGraphReader, type EdgeRow } from "./reader.js";
 
+type IncomingImport = { src_file_id: string; spec: string };
+type IncomingImportBinding = IncomingImport & {
+  local_name: string;
+  imported_name: string;
+};
+
 /** File-scoped graph mutations and transaction handling. */
 export class SqliteGraphWriter extends SqliteGraphReader {
   async checkpoint(): Promise<void> {
@@ -55,6 +61,8 @@ export class SqliteGraphWriter extends SqliteGraphReader {
     this.assertWritable();
     const oldIds = this.symbolIdsForFile(fileId);
     const incoming = this.incomingSnapshots(fileId);
+    const incomingImports = this.incomingImportSnapshots(fileId);
+    const incomingBindings = this.incomingBindingSnapshots(fileId);
     this.transaction(() => {
       this.deletePendingOwners(fileId, oldIds);
       this.db.prepare("DELETE FROM files WHERE id=?").run(fileId);
@@ -63,6 +71,18 @@ export class SqliteGraphWriter extends SqliteGraphReader {
         for (let i = 0; i < Math.max(1, snap.count); i++) {
           this.insertRef(this.snapshotRef(snap, occurrence++), fileId);
         }
+      }
+      for (const snapshot of incomingImports) {
+        this.insertRef(
+          this.importSnapshotRef(snapshot, occurrence++),
+          snapshot.src_file_id,
+        );
+      }
+      for (const snapshot of incomingBindings) {
+        this.insertRef(
+          this.importSnapshotRef(snapshot, occurrence++),
+          snapshot.src_file_id,
+        );
       }
     });
   }
@@ -130,6 +150,43 @@ export class SqliteGraphWriter extends SqliteGraphReader {
       fileId,
       fileId,
     );
+  }
+
+  private incomingImportSnapshots(fileId: string): IncomingImport[] {
+    return this.all<IncomingImport>(
+      "SELECT src_file_id,spec FROM file_imports WHERE dst_file_id=? ORDER BY src_file_id,spec",
+      fileId,
+    );
+  }
+
+  private incomingBindingSnapshots(fileId: string): IncomingImportBinding[] {
+    return this.all<IncomingImportBinding>(
+      "SELECT src_file_id,spec,local_name,imported_name FROM file_import_bindings WHERE dst_file_id=? ORDER BY src_file_id,spec,local_name,imported_name",
+      fileId,
+    ).filter((row) => row.spec.length > 0);
+  }
+
+  private importSnapshotRef(
+    snapshot: IncomingImport | IncomingImportBinding,
+    occurrence: number,
+  ): RawRef {
+    const binding = "local_name" in snapshot ? snapshot : undefined;
+    return {
+      owner: snapshot.src_file_id,
+      id: makeRefId(
+        snapshot.src_file_id,
+        snapshot.spec,
+        "import",
+        0,
+        occurrence,
+      ),
+      ref_name: snapshot.spec,
+      ref_kind: "import",
+      line: 0,
+      owner_is_file: true,
+      imported_name: binding?.imported_name,
+      local_name: binding?.local_name,
+    };
   }
 
   private symbolIdsForFile(fileId: string): string[] {

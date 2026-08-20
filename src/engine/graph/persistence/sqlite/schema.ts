@@ -36,7 +36,7 @@ CREATE TABLE IF NOT EXISTS file_imports (
 CREATE TABLE IF NOT EXISTS file_import_bindings (
  src_file_id TEXT NOT NULL REFERENCES files(id) ON DELETE CASCADE,
  dst_file_id TEXT NOT NULL REFERENCES files(id) ON DELETE CASCADE,
- local_name TEXT NOT NULL, imported_name TEXT NOT NULL,
+ local_name TEXT NOT NULL, imported_name TEXT NOT NULL, spec TEXT NOT NULL DEFAULT '',
  PRIMARY KEY(src_file_id,local_name,dst_file_id,imported_name)
 ) STRICT, WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS symbols_file_id_idx ON symbols(file_id);

@@ -200,6 +200,23 @@ for (const fixture of [
       graph.callees(caller.id, 1, 10).map((item) => item.id),
       [target.id],
     );
+
+    graph.deleteFileGraph(targetFile.id);
+    graph.upsertFileGraph(
+      targetFile.id,
+      targetGraph.nodes,
+      targetGraph.edges,
+      targetGraph.refs,
+    );
+    await graph.resolvePending({ files: [callerFile, targetFile] });
+    assert.deepEqual(
+      graph.expandFileNeighbors([callerFile.id], 10).map((item) => item.id),
+      [targetFile.id],
+    );
+    assert.deepEqual(
+      graph.callees(caller.id, 1, 10).map((item) => item.id),
+      [target.id],
+    );
     graph.close();
   });
 }

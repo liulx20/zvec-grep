@@ -7,6 +7,7 @@ import {
   collectImportSpecs,
   extractFileGraph,
   isExternalImportSpec,
+  rawRef,
   resolveImportPath,
 } from "../../dist/engine/graph/index.js";
 
@@ -23,6 +24,53 @@ function codeFile(id, relativePath, format = "typescript") {
     format,
   };
 }
+
+test("expandFileNeighbors applies limit independently to every seed", async () => {
+  const first = codeFile("a-seed", "src/a.ts");
+  const second = codeFile("z-seed", "src/z.ts");
+  const targets = Array.from({ length: 4 }, (_, index) =>
+    codeFile(`target-${index}`, `src/t${index}.ts`),
+  );
+  const graph = new SqliteGraphStorage("", { inMemory: true });
+  graph.upsertFileGraph(
+    first.id,
+    [],
+    [],
+    targets.slice(0, 3).map((_, index) =>
+      rawRef({
+        owner: first.id,
+        refName: `./t${index}`,
+        refKind: "import",
+        line: index + 1,
+        ownerIsFile: true,
+      }),
+    ),
+  );
+  graph.upsertFileGraph(
+    second.id,
+    [],
+    [],
+    [
+      rawRef({
+        owner: second.id,
+        refName: "./t3",
+        refKind: "import",
+        line: 1,
+        ownerIsFile: true,
+      }),
+    ],
+  );
+  for (const target of targets) graph.upsertFileGraph(target.id, [], [], []);
+  await graph.resolvePending({ files: [first, second, ...targets] });
+
+  const neighbors = graph.expandFileNeighbors([first.id, second.id], 1);
+  assert.deepEqual(
+    neighbors.map((item) => item.fid),
+    [first.id, second.id],
+  );
+  assert.equal(neighbors.length, 2);
+  graph.close();
+});
 
 test("isExternalImportSpec drops npm / node / stdlib", () => {
   assert.equal(isExternalImportSpec("lodash", "typescript"), true);
