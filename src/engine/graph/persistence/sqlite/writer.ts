@@ -1,6 +1,7 @@
 import { makeRefId } from "../../ref-id.js";
 import type { LocalEdge, RawRef, SymNode } from "../../types.js";
-import { SqliteGraphReader, type EdgeRow } from "./reader.js";
+import type { EdgeRow } from "./reader.js";
+import type { SqliteGraphDatabase } from "./database.js";
 
 type IncomingImport = { src_file_id: string; spec: string };
 type IncomingImportBinding = IncomingImport & {
@@ -9,7 +10,32 @@ type IncomingImportBinding = IncomingImport & {
 };
 
 /** File-scoped graph mutations and transaction handling. */
-export class SqliteGraphWriter extends SqliteGraphReader {
+export class SqliteGraphWriter {
+  constructor(private readonly database: SqliteGraphDatabase) {}
+
+  private get db() {
+    return this.database.db;
+  }
+
+  private get readOnly(): boolean {
+    return this.database.readOnly;
+  }
+
+  private assertOpen(): void {
+    this.database.assertOpen();
+  }
+
+  private assertWritable(): void {
+    this.database.assertWritable();
+  }
+
+  private transaction(work: () => void): void {
+    this.database.transaction(work);
+  }
+
+  private all<T>(sql: string, ...params: Array<string | number>): T[] {
+    return this.database.all<T>(sql, ...params);
+  }
   async checkpoint(): Promise<void> {
     this.assertOpen();
     if (!this.readOnly) this.db.exec("PRAGMA wal_checkpoint(PASSIVE)");

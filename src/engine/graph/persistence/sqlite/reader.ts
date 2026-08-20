@@ -1,5 +1,5 @@
 import type { DatabaseSync as NodeDatabaseSync } from "node:sqlite";
-import { openSqliteGraphDatabase } from "./database.js";
+import { SqliteGraphDatabase } from "./database.js";
 import type {
   ContainerNeighbor,
   FileNeighbor,
@@ -58,21 +58,21 @@ export class SqliteGraphReader {
   readonly available = true;
   protected readonly db: NodeDatabaseSync;
   protected readonly readOnly: boolean;
-  private closed = false;
+  protected readonly database: SqliteGraphDatabase;
 
   constructor(
-    directory: string,
+    directory: string | SqliteGraphDatabase,
     options: { readOnly?: boolean; inMemory?: boolean } = {},
   ) {
-    const opened = openSqliteGraphDatabase(directory, options);
-    this.db = opened.db;
-    this.readOnly = opened.readOnly;
+    this.database =
+      directory instanceof SqliteGraphDatabase
+        ? directory
+        : new SqliteGraphDatabase(directory, options);
+    this.db = this.database.db;
+    this.readOnly = this.database.readOnly;
   }
   close(): void {
-    if (!this.closed) {
-      this.db.close();
-      this.closed = true;
-    }
+    this.database.close();
   }
 
   symbolScope(root: string, depth: number, limit: number): string[] {
@@ -554,32 +554,22 @@ export class SqliteGraphReader {
       ?.kind;
   }
   protected transaction(work: () => void): void {
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      work();
-      this.db.exec("COMMIT");
-    } catch (e) {
-      this.db.exec("ROLLBACK");
-      throw e;
-    }
+    this.database.transaction(work);
   }
   protected all<T>(sql: string, ...params: Array<string | number>): T[] {
-    this.assertOpen();
-    return this.db.prepare(sql).all(...params) as T[];
+    return this.database.all<T>(sql, ...params);
   }
   protected one<T>(
     sql: string,
     ...params: Array<string | number>
   ): T | undefined {
-    this.assertOpen();
-    return this.db.prepare(sql).get(...params) as T | undefined;
+    return this.database.one<T>(sql, ...params);
   }
   protected assertOpen(): void {
-    if (this.closed) throw new Error("SqliteGraphStorage is closed");
+    this.database.assertOpen();
   }
   protected assertWritable(): void {
-    this.assertOpen();
-    if (this.readOnly) throw new Error("SqliteGraphStorage is read-only");
+    this.database.assertWritable();
   }
 }
 

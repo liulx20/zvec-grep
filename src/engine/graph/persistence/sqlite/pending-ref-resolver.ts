@@ -4,12 +4,36 @@ import { NameIndex } from "../../name-index.js";
 import { resolveRef } from "../../resolve.js";
 import type { PendingRef, ResolvePendingOptions } from "../../types.js";
 import { type RefRow, type SymbolRow } from "./reader.js";
-import { SqliteGraphWriter } from "./writer.js";
+import type { SqliteGraphDatabase } from "./database.js";
 
 const PER_NAME_CEILING = 500;
 
 /** Converts pending call/ref/import sites into persisted graph edges. */
-export class SqlitePendingRefResolver extends SqliteGraphWriter {
+export class SqlitePendingRefResolver {
+  constructor(private readonly database: SqliteGraphDatabase) {}
+
+  private get db() {
+    return this.database.db;
+  }
+
+  private assertWritable(): void {
+    this.database.assertWritable();
+  }
+
+  private transaction(work: () => void): void {
+    this.database.transaction(work);
+  }
+
+  private all<T>(sql: string, ...params: Array<string | number>): T[] {
+    return this.database.all<T>(sql, ...params);
+  }
+
+  private one<T>(
+    sql: string,
+    ...params: Array<string | number>
+  ): T | undefined {
+    return this.database.one<T>(sql, ...params);
+  }
   async resolvePending(options: ResolvePendingOptions = {}): Promise<void> {
     this.assertWritable();
     const attempt = this.nextAttempt();
