@@ -116,7 +116,7 @@ export class SqlitePendingRefResolver {
         ? {
             importedName: binding.imported_name,
             fileId: binding.dst_file_id,
-            match: binding.local_name === ref.ref_name ? "exact" : "receiver",
+            kind: binding.local_name === ref.ref_name ? "exact" : "receiver",
           }
         : undefined,
       owner.container_name ?? undefined,

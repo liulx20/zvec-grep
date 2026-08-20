@@ -1,11 +1,24 @@
 import { bareName, isExternalRefName } from "./builtins.js";
 
-const LOCAL_RECEIVERS = new Set(["this", "self", "cls", "super"]);
+const OWNER_RECEIVERS = new Set(["this", "self", "cls", "super"]);
 
-export type ImportBindingTarget = {
+export type ReferenceBindingMatch = {
   importedName: string;
   fileId: string;
-  match: "exact" | "receiver";
+  kind: "exact" | "receiver";
+};
+
+export type ReferenceReceiver =
+  | { kind: "none" }
+  | { kind: "owner"; name: string }
+  | { kind: "qualified"; name: string };
+
+export type ReferenceResolutionContext = {
+  reference: { name: string; bareName: string; language?: string };
+  owner: { fileId: string; containerName?: string };
+  receiver: ReferenceReceiver;
+  binding?: ReferenceBindingMatch;
+  preferredFileIds: readonly string[];
 };
 
 export type ReferenceLookupPlan = {
@@ -15,76 +28,87 @@ export type ReferenceLookupPlan = {
   containerNames: string[];
 };
 
-/** Central policy for receiver classification, fallback scope and externals. */
+/** Owns reference receiver, binding and scope semantics for every resolver. */
 export class ReferenceResolutionPolicy {
-  lookupPlan(input: {
+  createContext(input: {
     refName: string;
-    srcFile: string;
+    sourceFileId: string;
+    sourceLanguage?: string;
+    ownerContainerName?: string;
     preferredFileIds?: readonly string[];
-    binding?: ImportBindingTarget;
-    sourceContainerName?: string;
-  }): ReferenceLookupPlan {
-    const classification = this.classify(input.refName);
-    if (input.binding) {
-      const receiverAccess = input.binding.match === "receiver";
+    binding?: ReferenceBindingMatch;
+  }): ReferenceResolutionContext {
+    const receiverName = qualifiedReceiver(input.refName);
+    const receiver: ReferenceReceiver = !receiverName
+      ? { kind: "none" }
+      : OWNER_RECEIVERS.has(receiverName)
+        ? { kind: "owner", name: receiverName }
+        : { kind: "qualified", name: receiverName };
+    return {
+      reference: {
+        name: input.refName,
+        bareName: bareName(input.refName),
+        language: input.sourceLanguage,
+      },
+      owner: {
+        fileId: input.sourceFileId,
+        containerName: input.ownerContainerName,
+      },
+      receiver,
+      binding: input.binding,
+      preferredFileIds: input.preferredFileIds ?? [],
+    };
+  }
+
+  lookupPlan(context: ReferenceResolutionContext): ReferenceLookupPlan {
+    const { binding, owner, receiver, reference, preferredFileIds } = context;
+    if (binding) {
+      const receiverAccess = binding.kind === "receiver";
       return {
-        lookupName: receiverAccess
-          ? classification.bare
-          : input.binding.importedName,
-        preferredFileIds: [input.binding.fileId],
+        lookupName: receiverAccess ? reference.bareName : binding.importedName,
+        preferredFileIds: [binding.fileId],
         allowBareFallback: false,
         containerNames:
-          receiverAccess && input.binding.importedName !== "*"
-            ? [input.binding.importedName]
+          receiverAccess && binding.importedName !== "*"
+            ? [binding.importedName]
             : [],
       };
     }
-    if (classification.localReceiver) {
+    if (receiver.kind === "owner") {
       return {
-        lookupName: classification.bare,
-        preferredFileIds: [input.srcFile, ...(input.preferredFileIds ?? [])],
-        allowBareFallback: true,
-        containerNames: input.sourceContainerName
-          ? [input.sourceContainerName]
-          : [],
+        lookupName: reference.bareName,
+        preferredFileIds: [owner.fileId, ...preferredFileIds],
+        allowBareFallback: false,
+        containerNames: owner.containerName ? [owner.containerName] : [],
       };
     }
-    if (classification.qualified && classification.receiver) {
+    if (receiver.kind === "qualified") {
       return {
-        lookupName: classification.bare,
-        preferredFileIds: [input.srcFile],
+        lookupName: reference.bareName,
+        preferredFileIds: [owner.fileId],
         allowBareFallback: false,
-        containerNames: [classification.receiver],
+        containerNames: [receiver.name],
       };
     }
     return {
-      lookupName: input.refName,
-      preferredFileIds: [...(input.preferredFileIds ?? [])],
-      allowBareFallback: !classification.qualified,
+      lookupName: reference.name,
+      preferredFileIds: [...preferredFileIds],
+      allowBareFallback: true,
       containerNames: [],
     };
   }
 
-  isExternal(refName: string, language?: string): boolean {
-    return isExternalRefName(refName, language);
+  isExternal(context: ReferenceResolutionContext): boolean {
+    return isExternalRefName(
+      context.reference.name,
+      context.reference.language,
+    );
   }
+}
 
-  private classify(refName: string): {
-    bare: string;
-    qualified: boolean;
-    localReceiver: boolean;
-    receiver?: string;
-  } {
-    const qualified = refName.includes(".") || refName.includes("/");
-    const receiver = qualified ? refName.split(/[./]/, 1)[0] : undefined;
-    const localReceiver = receiver ? LOCAL_RECEIVERS.has(receiver) : false;
-    return {
-      bare: bareName(refName),
-      qualified,
-      localReceiver,
-      receiver,
-    };
-  }
+function qualifiedReceiver(refName: string): string | undefined {
+  if (!refName.includes(".") && !refName.includes("/")) return undefined;
+  return refName.split(/[./]/, 1)[0] || undefined;
 }
 
 export const referenceResolutionPolicy = new ReferenceResolutionPolicy();

@@ -1,7 +1,7 @@
 import type { NameIndex } from "./name-index.js";
 import {
   referenceResolutionPolicy,
-  type ImportBindingTarget,
+  type ReferenceBindingMatch,
 } from "./reference-resolution-policy.js";
 import type { PendingRef, RefResolveResult } from "./types.js";
 
@@ -9,16 +9,18 @@ export function resolveRef(
   ref: PendingRef,
   names: NameIndex,
   preferredFileIds: readonly string[] = [],
-  binding?: ImportBindingTarget,
+  binding?: ReferenceBindingMatch,
   sourceContainerName?: string,
 ): RefResolveResult {
-  const plan = referenceResolutionPolicy.lookupPlan({
+  const context = referenceResolutionPolicy.createContext({
     refName: ref.ref_name,
-    srcFile: ref.src_file,
+    sourceFileId: ref.src_file,
+    sourceLanguage: ref.source_language,
     preferredFileIds,
     binding,
-    sourceContainerName,
+    ownerContainerName: sourceContainerName,
   });
+  const plan = referenceResolutionPolicy.lookupPlan(context);
   const hit = names.lookup(
     plan.lookupName,
     ref.src_file,
@@ -27,10 +29,7 @@ export function resolveRef(
     plan.containerNames,
   );
   if (!hit)
-    return referenceResolutionPolicy.isExternal(
-      ref.ref_name,
-      ref.source_language,
-    )
+    return referenceResolutionPolicy.isExternal(context)
       ? { status: "external" }
       : { status: "failed" };
 
