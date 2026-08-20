@@ -15,15 +15,17 @@ import type {
   IndexProgress,
   ZvecGrepContextResult,
 } from "../index.js";
+import type {
+  ZvecGrepExploreOptions,
+  ZvecGrepExploreResult,
+  ZvecGrepGraphNeighborhoodOptions,
+  ZvecGrepGraphNeighborhoodResult,
+} from "../engine/service/types.js";
 import { formatAgentContextResult } from "../cli/format/context.js";
 import {
   formatExploreResult,
   formatNeighborhoodResult,
 } from "../cli/format/explore.js";
-import {
-  exploreWorkspaceGraph,
-  queryWorkspaceGraph,
-} from "../engine/graph/index.js";
 import {
   formatRemoteEmbeddingAuthorizationPrompt,
   remoteEmbeddingDisclosureData,
@@ -210,6 +212,12 @@ export interface ZvecGrepDaemonBackend {
     input: NormalizedSearchInput,
     options?: { authorization?: RemoteEmbeddingOperationPermit },
   ): Promise<ZvecGrepSearchResult>;
+  explore(
+    input: ZvecGrepExploreOptions & { root: string },
+  ): Promise<ZvecGrepExploreResult>;
+  graphNeighborhood(
+    input: ZvecGrepGraphNeighborhoodOptions & { root: string },
+  ): Promise<ZvecGrepGraphNeighborhoodResult>;
   planIndexAuthorization?(
     input: ZvecGrepIndexRequest,
   ): Promise<RemoteEmbeddingAuthorizationPlan | undefined>;
@@ -538,7 +546,7 @@ export function registerZvecGrepTools(
     },
     async (input) => {
       try {
-        const result = exploreWorkspaceGraph({
+        const result = await backend.explore({
           query: input.query,
           seedId: input.seedId,
           searchLimit: input.limit,
@@ -571,7 +579,7 @@ export function registerZvecGrepTools(
       },
       async (input) => {
         try {
-          const result = queryWorkspaceGraph({
+          const result = await backend.graphNeighborhood({
             direction,
             query: input.query,
             seedId: input.seedId,

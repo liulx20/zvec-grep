@@ -1,7 +1,11 @@
 import { mkdirSync } from "node:fs";
-import { createRequire } from "node:module";
 import { join } from "node:path";
 import type { DatabaseSync as NodeDatabaseSync } from "node:sqlite";
+import { loadNodeSqlite } from "./persistence/sqlite/runtime.js";
+import {
+  SQLITE_GRAPH_SCHEMA,
+  SQLITE_GRAPH_SCHEMA_VERSION,
+} from "./persistence/sqlite/schema.js";
 import { FilePathIndex } from "./imports/path-index.js";
 import { resolveImportPath } from "./imports/resolve-path.js";
 import { NameIndex } from "./name-index.js";
@@ -25,49 +29,6 @@ import type {
   TraverseOpts,
   UsageRef,
 } from "./types.js";
-
-const SQLITE_GRAPH_SCHEMA_VERSION = 1;
-const SQLITE_GRAPH_SCHEMA = `
-PRAGMA foreign_keys = ON;
-CREATE TABLE IF NOT EXISTS graph_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;
-CREATE TABLE IF NOT EXISTS files (id TEXT PRIMARY KEY) STRICT;
-CREATE TABLE IF NOT EXISTS symbols (
- id TEXT PRIMARY KEY, file_id TEXT NOT NULL REFERENCES files(id) ON DELETE CASCADE,
- name TEXT, kind TEXT NOT NULL, is_exported INTEGER NOT NULL CHECK (is_exported IN (0,1))
-) STRICT;
-CREATE TABLE IF NOT EXISTS pending_refs (
- id TEXT PRIMARY KEY, owner_id TEXT NOT NULL,
- owner_is_file INTEGER NOT NULL CHECK (owner_is_file IN (0,1)),
- ref_name TEXT NOT NULL, ref_kind TEXT NOT NULL, line INTEGER NOT NULL,
- status TEXT NOT NULL CHECK (status IN ('pending','failed'))
-) STRICT;
-CREATE TABLE IF NOT EXISTS contains (
- parent_id TEXT NOT NULL REFERENCES symbols(id) ON DELETE CASCADE,
- child_id TEXT NOT NULL REFERENCES symbols(id) ON DELETE CASCADE,
- PRIMARY KEY(parent_id,child_id)
-) STRICT, WITHOUT ROWID;
-CREATE TABLE IF NOT EXISTS symbol_edges (
- src_id TEXT NOT NULL REFERENCES symbols(id) ON DELETE CASCADE,
- dst_id TEXT NOT NULL REFERENCES symbols(id) ON DELETE CASCADE,
- kind TEXT NOT NULL CHECK (kind IN ('CALLS','REFS','INHERITS')),
- rel TEXT NOT NULL, count INTEGER NOT NULL DEFAULT 1,
- first_line INTEGER NOT NULL DEFAULT 0, ref_name TEXT NOT NULL DEFAULT '',
- PRIMARY KEY(src_id,dst_id,kind,rel)
-) STRICT, WITHOUT ROWID;
-CREATE TABLE IF NOT EXISTS file_imports (
- src_file_id TEXT NOT NULL REFERENCES files(id) ON DELETE CASCADE,
- dst_file_id TEXT NOT NULL REFERENCES files(id) ON DELETE CASCADE,
- spec TEXT NOT NULL, PRIMARY KEY(src_file_id,dst_file_id,spec)
-) STRICT, WITHOUT ROWID;
-CREATE INDEX IF NOT EXISTS symbols_file_id_idx ON symbols(file_id);
-CREATE INDEX IF NOT EXISTS symbols_name_idx ON symbols(name) WHERE name IS NOT NULL;
-CREATE INDEX IF NOT EXISTS symbol_edges_src_kind_idx ON symbol_edges(src_id,kind);
-CREATE INDEX IF NOT EXISTS symbol_edges_dst_kind_idx ON symbol_edges(dst_id,kind);
-CREATE INDEX IF NOT EXISTS contains_child_idx ON contains(child_id);
-CREATE INDEX IF NOT EXISTS file_imports_dst_idx ON file_imports(dst_file_id);
-CREATE INDEX IF NOT EXISTS pending_refs_name_idx ON pending_refs(ref_name,status);
-CREATE INDEX IF NOT EXISTS pending_refs_owner_idx ON pending_refs(owner_id);
-`;
 
 type EdgeRow = {
   src_id: string;
@@ -104,10 +65,6 @@ const ALL_EDGE_KINDS: readonly GraphEdgeKind[] = [
   "IMPORTS",
 ];
 const PER_NAME_CEILING = 500;
-const require = createRequire(import.meta.url);
-type NodeSqliteModule = { DatabaseSync: typeof NodeDatabaseSync };
-const SQLITE_EXPERIMENTAL_WARNING =
-  "SQLite is an experimental feature and might change at any time";
 
 /** Direct SQLite graph: persistence and indexed queries without loading the full graph. */
 export class SqliteGraphStorage implements GraphStorage {
@@ -861,22 +818,6 @@ export class SqliteGraphStorage implements GraphStorage {
       throw new Error(
         `Unsupported SQLite graph schema version: ${row.value}; expected ${SQLITE_GRAPH_SCHEMA_VERSION}`,
       );
-  }
-}
-
-function loadNodeSqlite(): NodeSqliteModule {
-  // Node 22 labels node:sqlite experimental and writes to stderr on first load.
-  // Suppress only that known runtime warning; Node 24+ does not emit it.
-  const emitWarning = process.emitWarning;
-  process.emitWarning = ((warning: string | Error, ...args: unknown[]) => {
-    const message = warning instanceof Error ? warning.message : warning;
-    if (message === SQLITE_EXPERIMENTAL_WARNING) return;
-    Reflect.apply(emitWarning, process, [warning, ...args]);
-  }) as typeof process.emitWarning;
-  try {
-    return require("node:sqlite") as NodeSqliteModule;
-  } finally {
-    process.emitWarning = emitWarning;
   }
 }
 

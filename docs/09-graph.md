@@ -21,6 +21,9 @@
 <collection>/code-graph/graph.sqlite
 ```
 
+`manifest.json`、`files.zvec`、`index.zvec` 和 `code-graph/graph.sqlite` 的路径统一由
+`WorkspaceIndexLayout` 生成；创建、打开和 drop/rebuild 不再各自拼接 artifact 路径。
+
 支持的 backend 为 `sqlite`、`off`，默认是 `sqlite`。可以通过
 `ZVEC_GREP_GRAPH_BACKEND` 选择。
 
@@ -83,6 +86,8 @@
 - CLI：`zg callers`、`zg callees`、`zg impact`、`zg explore`。
 - MCP：`zvec_grep_callers`、`zvec_grep_callees`、`zvec_grep_impact`、
   `zvec_grep_explore`。
+- CLI 和 MCP 只解析参数和格式化结果。实际调用统一进入 `ZvecGrep` service；Server 模式再经过
+  `ZvecGrepDaemonBackend` 和 workspace read session，因此会复用 daemon 路由、workspace 锁及 session cache。
 - 普通 `zg query` / `zvec_grep_search`：不会调用 `explore`，但会使用图做轻量候选扩展。
 
 ## 3. 数据模型
@@ -171,12 +176,14 @@ erDiagram
 
 索引和持久化按照下面五个阶段执行：
 
-1. **提取代码实体。** 扫描到代码文件后，`CodeExtractor` 生成 `EntityFragment`。这些实体一份写入
-   主索引，用于 FTS、向量检索和源码返回；另一份交给 `extractFileGraph()` 构建关系数据。
+1. **一次解析生成统一 IR。** 扫描到代码文件后，`CodeExtractor.analyzeForIndexing()` 在同一棵
+   Tree-sitter AST 上生成 fragments、imports、calls、refs 和 inheritance sites。AST 只在回调期间
+   存活，后续主索引和图链路消费不含 AST handle 的 `PreparedCodeAnalysis`。
 
-2. **生成文件内图数据。** `extractFileGraph()` 从实体层级生成 `Symbol` 和 `CONTAINS`，同时从
-   源码提取 call、ref、inheritance 和 import sites。此时只做文件内能够确定的解析，不查询其他
-   文件。
+2. **分别消费统一 IR。** fragments 写入主索引，用于 FTS、向量检索和源码返回；
+   `extractFileGraph()` 消费同一份 fragments 和 relation sites，生成 `Symbol`、`CONTAINS` 及引用数据，
+   不再为 imports、inheritance、refs 和 calls 分别重新解析源码。此时只做文件内能够确定的解析，
+   不查询其他文件。
 
 3. **区分直接边和待解析引用。** 如果一个 site 在当前文件中能够唯一匹配目标，立即生成
    `CALLS`、`REFS` 或 `INHERITS` 边；否则生成带 occurrence 的 Ref，暂存在 `pending_refs`。
@@ -204,6 +211,10 @@ pending ref，以便再次解析。
    仓库图规模相关。
 5. `upsertFileGraph()` 按文件事务增量替换数据，`checkpoint()` 只推进 WAL；WAL 和
    `synchronous=NORMAL` 继续负责并发读取与同步策略。
+
+SQLite DDL 和 Node runtime loader 已放入 `graph/persistence/sqlite/`，RWR 排序算法位于
+`graph/application/ranking.ts`。`sqlite.ts` 目前仍作为 storage facade，reader/writer 的进一步物理拆分
+不会改变上层 `GraphReader` / `GraphStorage` 接口。
 
 因此当前只有一套真实图存储实现：“SQLite 索引查询 + 应用层局部遍历”。测试使用 SQLite 的
 `:memory:` 模式，不再维护另一套 Map/Set 图存储逻辑。Explore/RWR 仍会为单次查询构建有预算限制的

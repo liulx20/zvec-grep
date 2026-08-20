@@ -34,38 +34,33 @@ export async function collectImportSpecs(
 
   const language = source.file.format;
   const collected = await withParser(source.text, language, (tree) => {
-    const out: ImportSpec[] = [];
-    const seen = new Set<string>();
+    return collectImportSpecsFromNode(tree.rootNode, language);
+  });
 
-    const visit = (node: TSNode | null): void => {
-      if (!node) {
-        return;
-      }
+  return collected ?? [];
+}
 
-      if (IMPORT_NODE_TYPES.has(node.type)) {
-        for (const spec of extractSpecsFromNode(node, language)) {
-          if (spec.systemInclude) {
-            continue;
-          }
-          const key = `${spec.spec}\0${spec.line}`;
-          if (seen.has(key)) {
-            continue;
-          }
+export function collectImportSpecsFromNode(
+  root: TSNode,
+  language: string,
+): ImportSpec[] {
+  const out: ImportSpec[] = [];
+  const seen = new Set<string>();
+  const visit = (node: TSNode): void => {
+    if (IMPORT_NODE_TYPES.has(node.type)) {
+      for (const spec of extractSpecsFromNode(node, language)) {
+        if (spec.systemInclude) continue;
+        const key = `${spec.spec}\0${spec.line}`;
+        if (!seen.has(key)) {
           seen.add(key);
           out.push(spec);
         }
       }
-
-      for (const child of node.namedChildren ?? []) {
-        visit(child);
-      }
-    };
-
-    visit(tree.rootNode);
-    return out;
-  });
-
-  return collected ?? [];
+    }
+    for (const child of node.namedChildren ?? []) visit(child);
+  };
+  visit(root);
+  return out;
 }
 
 function extractSpecsFromNode(node: TSNode, language: string): ImportSpec[] {

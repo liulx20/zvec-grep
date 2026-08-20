@@ -1,4 +1,5 @@
-export { extract, extractForIndexing } from "./runtime.js";
+export { analyzeForIndexing, extract, extractForIndexing } from "./runtime.js";
+export type { PreparedCodeAnalysis } from "./runtime.js";
 export type { Source, TextSource } from "./source.js";
 export {
   collectFunctionCallSites,

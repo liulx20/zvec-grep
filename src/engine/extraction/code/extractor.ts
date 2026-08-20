@@ -31,6 +31,7 @@ import {
   collectRefSites as collectRefSitesFromNode,
   type RefSite,
 } from "./ref-sites.js";
+import { collectImportSpecsFromNode, type ImportSpec } from "./import-sites.js";
 
 const DEFAULT_CODE_CHUNK_CHARS = 3600;
 const DEFAULT_CODE_CHUNK_OVERLAP_CHARS = 540;
@@ -52,8 +53,15 @@ export class CodeExtractor {
     source: Source,
     options: ChunkOptions = {},
   ): Promise<PreparedCodeFragment[]> {
+    return (await this.analyzeForIndexing(source, options)).fragments;
+  }
+
+  async analyzeForIndexing(
+    source: Source,
+    options: ChunkOptions = {},
+  ): Promise<PreparedCodeAnalysis> {
     if (source.kind !== "text" || source.file.kind !== "code") {
-      return [];
+      return emptyPreparedCodeAnalysis();
     }
 
     validateSourceFile(source);
@@ -61,14 +69,21 @@ export class CodeExtractor {
 
     if (isScriptBlockFormat(source.file.format)) {
       const fragments = await this.extractScriptBlocks(source, chunkOptions);
-      return fragments.length > 0
-        ? fragments
-        : this.fallback(source, chunkOptions);
+      return {
+        ...emptyPreparedCodeAnalysis(),
+        fragments:
+          fragments.length > 0
+            ? fragments
+            : this.fallback(source, chunkOptions),
+      };
     }
 
     const adapter = resolveAdapter(source.file.format);
     if (!hasGrammar(source.file.format) || !adapter) {
-      return this.fallback(source, chunkOptions);
+      return {
+        ...emptyPreparedCodeAnalysis(),
+        fragments: this.fallback(source, chunkOptions),
+      };
     }
 
     const extracted = await withParser(
@@ -112,12 +127,24 @@ export class CodeExtractor {
           appendEntity(entity);
         }
 
-        return output;
+        return {
+          fragments: output,
+          imports: collectImportSpecsFromNode(
+            tree.rootNode,
+            source.file.format,
+          ),
+          calls: callsFromEntities(collected, adapter),
+          refs: refsFromEntities(collected, adapter, source.file.format),
+          inheritance: inheritanceFromEntities(collected, source.file.format),
+        };
       },
     );
 
-    if (!extracted || extracted.length === 0) {
-      return this.fallback(source, chunkOptions);
+    if (!extracted || extracted.fragments.length === 0) {
+      return {
+        ...emptyPreparedCodeAnalysis(),
+        fragments: this.fallback(source, chunkOptions),
+      };
     }
 
     return extracted;
@@ -227,6 +254,84 @@ export type PreparedCodeFragment = {
   fragment: EntityFragment;
   embeddingText?: string;
 };
+
+export type PreparedCodeAnalysis = {
+  fragments: PreparedCodeFragment[];
+  imports: readonly ImportSpec[];
+  calls: readonly FunctionCallSites[];
+  refs: readonly SymbolRefSites[];
+  inheritance: readonly TypeInheritanceSites[];
+};
+
+function emptyPreparedCodeAnalysis(): PreparedCodeAnalysis {
+  return { fragments: [], imports: [], calls: [], refs: [], inheritance: [] };
+}
+
+function callsFromEntities(
+  entities: readonly CodeEntity[],
+  adapter: LanguageAdapter,
+): FunctionCallSites[] {
+  return entities
+    .filter((entity) => entity.symbolType === "function")
+    .map((entity) => ({
+      name: entity.name,
+      symbolType: entity.symbolType,
+      startOffset: entity.node.startIndex,
+      startLine: entity.node.startPosition.row + 1,
+      sites: collectCallSites(entity.node, adapter),
+    }));
+}
+
+function inheritanceFromEntities(
+  entities: readonly CodeEntity[],
+  language: string,
+): TypeInheritanceSites[] {
+  return entities.flatMap((entity) => {
+    if (entity.symbolType !== "class" && entity.symbolType !== "interface") {
+      return [];
+    }
+    const sites = collectInheritanceSitesFromNode(entity.node, language);
+    return sites.length === 0
+      ? []
+      : [
+          {
+            name: entity.name,
+            symbolType: entity.symbolType,
+            startOffset: entity.node.startIndex,
+            startLine: entity.node.startPosition.row + 1,
+            sites,
+          },
+        ];
+  });
+}
+
+function refsFromEntities(
+  entities: readonly CodeEntity[],
+  adapter: LanguageAdapter,
+  language: string,
+): SymbolRefSites[] {
+  return entities.flatMap((entity) => {
+    if (
+      entity.symbolType !== "function" &&
+      entity.symbolType !== "class" &&
+      entity.symbolType !== "interface"
+    ) {
+      return [];
+    }
+    const sites = collectRefSitesFromNode(entity.node, adapter, language);
+    return sites.length === 0
+      ? []
+      : [
+          {
+            name: entity.name,
+            symbolType: entity.symbolType,
+            startOffset: entity.node.startIndex,
+            startLine: entity.node.startPosition.row + 1,
+            sites,
+          },
+        ];
+  });
+}
 
 type ScriptBlock = {
   text: string;

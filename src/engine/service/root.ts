@@ -1,8 +1,8 @@
-import { existsSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { deleteWorkspaceManifest, workspaceManifestPath } from "../manifest.js";
+import { workspaceManifestPath } from "../manifest.js";
 import {
-  deleteWorkspaceIndexStorage,
+  deleteWorkspaceIndexArtifacts,
   hasWorkspaceIndexStorage,
 } from "../storage/index.js";
 import { workspaceIndexPath } from "../storage/layout.js";
@@ -40,13 +40,7 @@ export function workspaceIndexLocation(root: string): WorkspaceIndexLocation {
 }
 
 export function resetWorkspaceIndex(location: WorkspaceIndexLocation): void {
-  deleteWorkspaceManifest(location.home);
-  deleteWorkspaceIndexStorage(location.home);
-  const graphPath = join(location.home, "code-graph");
-  if (dirname(graphPath) !== location.home) {
-    throw new Error("Graph data must be inside the workspace index directory");
-  }
-  rmSync(graphPath, { recursive: true, force: true });
+  deleteWorkspaceIndexArtifacts(location.home);
 }
 
 export function findNearestWorkspaceIndex(

@@ -27,10 +27,6 @@ import { serverStatus } from "../daemon/server-controller.js";
 import { findNearestWorkspace } from "../engine/service/root.js";
 import type { ParsedArgs, CliOptions } from "./types.js";
 import {
-  exploreWorkspaceGraph,
-  queryWorkspaceGraph,
-} from "../engine/graph/index.js";
-import {
   contextWarningLines,
   printCliContextResult,
 } from "./format/context.js";
@@ -584,14 +580,41 @@ async function runStatus(parsed: ParsedArgs): Promise<void> {
 
 async function runExplore(parsed: ParsedArgs): Promise<void> {
   const query = parsed.positionals[0]!;
-  const result = exploreWorkspaceGraph({
+  const root = resolve(process.cwd());
+  const input = {
+    root,
     query,
     seedId: parsed.options.seedId,
     searchLimit: parsed.options.limit,
     traversalDepth: parsed.options.depth,
     maxFiles: parsed.options.maxFiles,
+  };
+  await routeByMode({
+    mode: resolveClientMode(parsed.options.mode),
+    serverAvailable: () => daemonIsReady(parsed.options.home),
+    server: async () => {
+      console.log(
+        await daemonClient(parsed.options).callTextTool("zvec_grep_explore", {
+          root,
+          query,
+          seedId: input.seedId,
+          limit: input.searchLimit,
+          depth: input.traversalDepth,
+          maxFiles: input.maxFiles,
+        }),
+      );
+    },
+    direct: async () => {
+      const service = await createZvecGrep(
+        createServiceOptions(parsed.options, root),
+      );
+      try {
+        printExploreResult(await service.explore(input));
+      } finally {
+        await service.close();
+      }
+    },
   });
-  printExploreResult(result);
 }
 
 async function runGraphNeighborhood(parsed: ParsedArgs): Promise<void> {
@@ -603,14 +626,37 @@ async function runGraphNeighborhood(parsed: ParsedArgs): Promise<void> {
   ) {
     throw new Error(`unexpected graph command: ${parsed.command}`);
   }
-  const result = queryWorkspaceGraph({
+  const root = resolve(process.cwd());
+  const input = {
+    root,
     direction,
     query: parsed.positionals[0]!,
     depth: parsed.options.depth,
     limit: parsed.options.limit,
     seedId: parsed.options.seedId,
+  };
+  await routeByMode({
+    mode: resolveClientMode(parsed.options.mode),
+    serverAvailable: () => daemonIsReady(parsed.options.home),
+    server: async () => {
+      console.log(
+        await daemonClient(parsed.options).callTextTool(
+          `zvec_grep_${direction}`,
+          input,
+        ),
+      );
+    },
+    direct: async () => {
+      const service = await createZvecGrep(
+        createServiceOptions(parsed.options, root),
+      );
+      try {
+        printNeighborhoodResult(await service.graphNeighborhood(input));
+      } finally {
+        await service.close();
+      }
+    },
   });
-  printNeighborhoodResult(result);
 }
 
 async function runQuery(parsed: ParsedArgs): Promise<void> {

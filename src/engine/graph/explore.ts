@@ -2,6 +2,7 @@ import type { StoredEntity } from "../storage/index.js";
 import type { FileInfo, Range } from "../types.js";
 import type { GraphQueryStorage } from "./query.js";
 import type { GraphEdgeKind, GraphReader, SymRef } from "./types.js";
+import { personalizedPageRank } from "./application/ranking.js";
 
 const DEFAULT_SEARCH_LIMIT = 8;
 const DEFAULT_TRAVERSAL_DEPTH = 3;
@@ -13,8 +14,6 @@ const DEFAULT_CONTAINER_GLUE_LIMIT = 40;
 const DEFAULT_PATH_LIMIT = 8;
 const DEFAULT_BLAST_LIMIT = 20;
 const HIERARCHY_BUDGET_RATIO = 0.25;
-const RWR_ALPHA = 0.25;
-const RWR_ITERS = 25;
 const RWR_EDGE_WEIGHTS: Readonly<Record<GraphEdgeKind, number>> = {
   CALLS: 1,
   INHERITS: 0.9,
@@ -991,72 +990,6 @@ function allocateCharBudgets(
     }
   }
   return budgets;
-}
-
-function personalizedPageRank(
-  nodeIds: readonly string[],
-  adj: Map<string, Map<string, number>>,
-  seedIds: readonly string[],
-  seedWeights?: ReadonlyMap<string, number>,
-): Map<string, number> {
-  const scores = new Map<string, number>();
-  if (nodeIds.length === 0) {
-    return scores;
-  }
-  const seeds = seedIds.length > 0 ? seedIds : nodeIds.slice(0, 1);
-  const restart = normalizedSeedWeights(seeds, seedWeights);
-
-  for (const id of nodeIds) {
-    scores.set(id, restart.get(id) ?? 0);
-  }
-
-  for (let iter = 0; iter < RWR_ITERS; iter++) {
-    const next = new Map<string, number>();
-    for (const id of nodeIds) {
-      next.set(id, RWR_ALPHA * (restart.get(id) ?? 0));
-    }
-    for (const id of nodeIds) {
-      const neighbors = [...(adj.get(id)?.entries() ?? [])];
-      const mass = (scores.get(id) ?? 0) * (1 - RWR_ALPHA);
-      if (neighbors.length === 0) {
-        // dangling: redistribute to seeds
-        for (const seed of seeds) {
-          next.set(
-            seed,
-            (next.get(seed) ?? 0) + mass * (restart.get(seed) ?? 0),
-          );
-        }
-        continue;
-      }
-      const totalWeight = neighbors.reduce(
-        (sum, [, weight]) => sum + weight,
-        0,
-      );
-      for (const [neighbor, weight] of neighbors) {
-        const share = totalWeight > 0 ? (mass * weight) / totalWeight : 0;
-        next.set(neighbor, (next.get(neighbor) ?? 0) + share);
-      }
-    }
-    for (const id of nodeIds) {
-      scores.set(id, next.get(id) ?? 0);
-    }
-  }
-  return scores;
-}
-
-function normalizedSeedWeights(
-  seedIds: readonly string[],
-  weights?: ReadonlyMap<string, number>,
-): Map<string, number> {
-  const raw = seedIds.map((id) => ({
-    id,
-    weight: Math.max(0, weights?.get(id) ?? 1),
-  }));
-  const total = raw.reduce((sum, item) => sum + item.weight, 0);
-  const fallback = 1 / Math.max(1, seedIds.length);
-  return new Map(
-    raw.map((item) => [item.id, total > 0 ? item.weight / total : fallback]),
-  );
 }
 
 export function resolveExploreSeeds(

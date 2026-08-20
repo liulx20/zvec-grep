@@ -1,7 +1,6 @@
 import {
-  collectFunctionCallSites,
-  collectSymbolRefSites,
-  collectTypeInheritanceSites,
+  analyzeForIndexing,
+  type PreparedCodeAnalysis,
   type TextSource,
 } from "../extraction/index.js";
 import type { EntityFragment } from "../types.js";
@@ -11,7 +10,7 @@ import {
   type FileGraphInput,
   rawRef,
 } from "./from-fragments.js";
-import { collectImportSpecs } from "./imports/collect.js";
+import { isExternalImportSpec } from "./imports/resolve-path.js";
 import type { LocalEdge } from "./types.js";
 
 type RelationOwner = {
@@ -32,17 +31,24 @@ type RelationOwner = {
 export async function extractFileGraph(
   source: TextSource,
   fragments: readonly EntityFragment[],
+  preparedAnalysis?: Pick<
+    PreparedCodeAnalysis,
+    "imports" | "calls" | "refs" | "inheritance"
+  >,
 ): Promise<FileGraphInput> {
   const base = fileGraphFromFragments(source.file.id, fragments);
   if (source.kind !== "text" || source.file.kind !== "code") {
     return base;
   }
+  const analysis = preparedAnalysis ?? (await analyzeForIndexing(source));
 
   const refs = [...base.refs];
   const seenRefIds = new Set(refs.map((r) => r.id));
   const localEdges = new Map<string, LocalEdge>();
 
-  const importSpecs = await collectImportSpecs(source);
+  const importSpecs = analysis.imports.filter(
+    (spec) => !isExternalImportSpec(spec.spec, source.file.format),
+  );
   for (const [occurrence, spec] of importSpecs.entries()) {
     const ref = rawRef({
       owner: source.file.id,
@@ -69,7 +75,7 @@ export async function extractFileGraph(
     nameToIds.set(node.name, list);
   }
 
-  const inheritance = await collectTypeInheritanceSites(source);
+  const inheritance = analysis.inheritance;
   absorbRelationOwners({
     owners: inheritance,
     edgeKind: "INHERITS",
@@ -81,7 +87,7 @@ export async function extractFileGraph(
     seenRefIds,
   });
 
-  const symbolRefs = await collectSymbolRefSites(source);
+  const symbolRefs = analysis.refs;
   absorbRelationOwners({
     owners: symbolRefs,
     edgeKind: "REFS",
@@ -93,7 +99,7 @@ export async function extractFileGraph(
     seenRefIds,
   });
 
-  const calls = await collectFunctionCallSites(source);
+  const calls = analysis.calls;
   absorbRelationOwners({
     owners: calls,
     edgeKind: "CALLS",

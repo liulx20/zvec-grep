@@ -30,7 +30,7 @@ import { sha256Bytes } from "../../utils/hash.js";
 import { normalizePath } from "../../utils/path.js";
 import { ConcurrentTiming, TimingCollector } from "../../utils/timing.js";
 import {
-  extractForIndexing,
+  analyzeForIndexing,
   type Source,
   vectorContentForFragment,
 } from "../../extraction/index.js";
@@ -852,7 +852,8 @@ async function prepareFile(
       ctx.embeddingModel.info.limits.maxInputTokens,
       source.kind === "text" ? source.text : undefined,
     );
-    const extracted = await extractForIndexing(source, chunkOptions);
+    const analysis = await analyzeForIndexing(source, chunkOptions);
+    const extracted = analysis.fragments;
     throwIfIndexCancelled(ctx);
     const fragments = extracted
       .filter(({ fragment }) =>
@@ -872,6 +873,7 @@ async function prepareFile(
       graph = await extractFileGraph(
         source,
         fragments.map(({ fragment }) => fragment),
+        analysis,
       );
     }
 

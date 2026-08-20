@@ -3,6 +3,10 @@ import { openWorkspaceReadSession } from "../engine/service/zvec-grep.js";
 import type {
   ZvecGrepContextOptions,
   ZvecGrepContextResult,
+  ZvecGrepExploreOptions,
+  ZvecGrepExploreResult,
+  ZvecGrepGraphNeighborhoodOptions,
+  ZvecGrepGraphNeighborhoodResult,
 } from "../engine/service/types.js";
 import type {
   EmbeddingModelLoadRequest,
@@ -120,35 +124,31 @@ export class RootRuntime {
       await this.writerReady;
     }
 
-    return this.runGenerationSerial(async () => {
-      if (this.closed) {
-        throw new Error("Root runtime is closed.");
-      }
-      const request = modelLoadRequest ?? this.modelLoadRequest;
-      if (!request) {
-        throw new Error("Root runtime does not have an embedding model.");
-      }
-      const desiredKey = this.options.modelPool.keyFor(request);
-      if (this.generation?.key !== desiredKey) {
-        await this.generation?.cache.close();
-        this.generation = {
-          key: desiredKey,
-          cache: new WorkspaceReadSessionCache({
-            open: () => this.openLeasedSession(request),
-            idleTtlMs: this.options.readSessionIdleTtlMs,
-            serializeOperations: true,
-          }),
-        };
-      }
+    return this.withReadSession(modelLoadRequest, (session) =>
+      session.context({
+        ...options,
+        root: this.canonicalRoot,
+        autoUpdate: false,
+      }),
+    );
+  }
 
-      return this.generation.cache.withRead((session) =>
-        session.context({
-          ...options,
-          root: this.canonicalRoot,
-          autoUpdate: false,
-        }),
-      );
-    });
+  async explore(
+    options: ZvecGrepExploreOptions,
+  ): Promise<ZvecGrepExploreResult> {
+    await this.waitForWriter();
+    return this.withReadSession(undefined, (session) =>
+      session.explore({ ...options, root: this.canonicalRoot }),
+    );
+  }
+
+  async graphNeighborhood(
+    options: ZvecGrepGraphNeighborhoodOptions,
+  ): Promise<ZvecGrepGraphNeighborhoodResult> {
+    await this.waitForWriter();
+    return this.withReadSession(undefined, (session) =>
+      session.graphNeighborhood({ ...options, root: this.canonicalRoot }),
+    );
   }
 
   setWriterPending(pending: boolean): void {
@@ -355,6 +355,9 @@ export class RootRuntime {
       root: session.root,
       modelKey: lease.key,
       context: (contextOptions) => session.context(contextOptions),
+      explore: (exploreOptions) => session.explore(exploreOptions),
+      graphNeighborhood: (graphOptions) =>
+        session.graphNeighborhood(graphOptions),
       async close() {
         if (closed) {
           return;
@@ -367,6 +370,37 @@ export class RootRuntime {
         }
       },
     };
+  }
+
+  private async waitForWriter(): Promise<void> {
+    while (this.writerPending && this.writerReady) {
+      await this.writerReady;
+    }
+  }
+
+  private async withReadSession<T>(
+    modelLoadRequest: EmbeddingModelLoadRequest | undefined,
+    fn: (session: LeasedReadSession) => Promise<T>,
+  ): Promise<T> {
+    return this.runGenerationSerial(async () => {
+      if (this.closed) throw new Error("Root runtime is closed.");
+      const request = modelLoadRequest ?? this.modelLoadRequest;
+      if (!request)
+        throw new Error("Root runtime does not have an embedding model.");
+      const desiredKey = this.options.modelPool.keyFor(request);
+      if (this.generation?.key !== desiredKey) {
+        await this.generation?.cache.close();
+        this.generation = {
+          key: desiredKey,
+          cache: new WorkspaceReadSessionCache({
+            open: () => this.openLeasedSession(request),
+            idleTtlMs: this.options.readSessionIdleTtlMs,
+            serializeOperations: true,
+          }),
+        };
+      }
+      return this.generation.cache.withRead(fn);
+    });
   }
 
   private async withWriterContext(

@@ -37,6 +37,7 @@ import type {
 } from "../types.js";
 import { CURRENT_INDEX_VERSION } from "../types.js";
 import { indexStatusNeedsRefresh } from "../index-status.js";
+import { exploreGraph, queryGraphNeighborhood } from "../graph/index.js";
 import {
   workspaceIndexInfoFromManifest,
   CURRENT_MANIFEST_VERSION,
@@ -69,6 +70,10 @@ import type {
   ZvecGrepContextItem,
   ZvecGrepContextOptions,
   ZvecGrepContextResult,
+  ZvecGrepExploreOptions,
+  ZvecGrepExploreResult,
+  ZvecGrepGraphNeighborhoodOptions,
+  ZvecGrepGraphNeighborhoodResult,
   ZvecGrepInfoOptions,
   ZvecGrepInfoResult,
   ZvecGrepIndexOptions,
@@ -97,6 +102,10 @@ export async function createZvecGrep(
 export type WorkspaceReadSession = {
   readonly root: string;
   context(options: ZvecGrepContextOptions): Promise<ZvecGrepContextResult>;
+  explore(options: ZvecGrepExploreOptions): Promise<ZvecGrepExploreResult>;
+  graphNeighborhood(
+    options: ZvecGrepGraphNeighborhoodOptions,
+  ): Promise<ZvecGrepGraphNeighborhoodResult>;
   close(): Promise<void>;
 };
 
@@ -150,6 +159,25 @@ export function openWorkspaceReadSession(
         ),
       );
       return withContextTimings(result, timings);
+    },
+    async explore(options) {
+      assertReadSessionOpen(closed);
+      return await withHomeReadLock(location.home, "daemon.explore", () =>
+        exploreOpenWorkspaceIndex(location.root, workspaceIndex, options),
+      );
+    },
+    async graphNeighborhood(options) {
+      assertReadSessionOpen(closed);
+      return await withHomeReadLock(
+        location.home,
+        "daemon.graph-neighborhood",
+        () =>
+          graphNeighborhoodOpenWorkspaceIndex(
+            location.root,
+            workspaceIndex,
+            options,
+          ),
+      );
     },
     async close() {
       if (closed) {
@@ -402,6 +430,57 @@ class ZvecGrepService implements ZvecGrep {
         this.contextWithTimings(options, timings),
       );
       return withContextTimings(result, timings);
+    });
+  }
+
+  async explore(
+    options: ZvecGrepExploreOptions,
+  ): Promise<ZvecGrepExploreResult> {
+    this.ensureOpen();
+    return await this.withGraphWorkspace(
+      options.root ?? this.root,
+      "explore",
+      (root, workspaceIndex) =>
+        exploreOpenWorkspaceIndex(root, workspaceIndex, options),
+    );
+  }
+
+  async graphNeighborhood(
+    options: ZvecGrepGraphNeighborhoodOptions,
+  ): Promise<ZvecGrepGraphNeighborhoodResult> {
+    this.ensureOpen();
+    return await this.withGraphWorkspace(
+      options.root ?? this.root,
+      "graph-neighborhood",
+      (root, workspaceIndex) =>
+        graphNeighborhoodOpenWorkspaceIndex(root, workspaceIndex, options),
+    );
+  }
+
+  private async withGraphWorkspace<T>(
+    startRoot: string,
+    operation: string,
+    fn: (root: string, workspaceIndex: WorkspaceIndex) => T | Promise<T>,
+  ): Promise<T> {
+    const start = resolveZvecGrepRoot(startRoot);
+    assertNearestWorkspaceHomeUnlocked(start, operation);
+    const nearest = findNearestWorkspaceIndex(start);
+    if (!nearest) throw workspaceIndexMissingError(start, "undecided");
+    const { location, info } = nearest;
+    if (info.indexPolicy === "disabled")
+      throw workspaceIndexDisabledError(location.root);
+    if (!isWorkspaceIndexed(info) || !hasWorkspaceIndex(location))
+      throw workspaceIndexMissingError(
+        location.root,
+        info.indexPolicy ?? "enabled",
+      );
+    return await withHomeReadLock(location.home, operation, async () => {
+      const workspaceIndex = new WorkspaceIndex(info, { mode: "read" });
+      try {
+        return await fn(location.root, workspaceIndex);
+      } finally {
+        workspaceIndex.close();
+      }
     });
   }
 
@@ -925,6 +1004,36 @@ class ZvecGrepService implements ZvecGrep {
       });
     }
   }
+}
+
+function assertReadSessionOpen(closed: boolean): void {
+  if (closed) {
+    throw new EngineError("Workspace read session is already closed", {
+      code: "ZVEC_GREP.ENGINE.SERVICE.READ_SESSION_CLOSED",
+    });
+  }
+}
+
+async function exploreOpenWorkspaceIndex(
+  root: string,
+  workspaceIndex: WorkspaceIndex,
+  options: ZvecGrepExploreOptions,
+): Promise<ZvecGrepExploreResult> {
+  return {
+    ...exploreGraph(workspaceIndex.graph, workspaceIndex, options),
+    root,
+  };
+}
+
+async function graphNeighborhoodOpenWorkspaceIndex(
+  root: string,
+  workspaceIndex: WorkspaceIndex,
+  options: ZvecGrepGraphNeighborhoodOptions,
+): Promise<ZvecGrepGraphNeighborhoodResult> {
+  return {
+    ...queryGraphNeighborhood(workspaceIndex.graph, workspaceIndex, options),
+    root,
+  };
 }
 
 async function contextFromOpenWorkspaceIndex(input: {

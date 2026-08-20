@@ -1,5 +1,10 @@
 import type { EmbeddingModel } from "../models/index.js";
 import type {
+  ExploreResult,
+  GraphNeighborhoodResult,
+  GraphQueryDirection,
+} from "../graph/index.js";
+import type {
   CodeSymbolType,
   WorkspaceIndexPolicy,
   WorkspaceIndexStatus,
@@ -110,6 +115,31 @@ export type ZvecGrepContextOptions = {
   modifiedAfter?: number;
   modifiedBefore?: number;
   embeddingConcurrency?: number;
+};
+
+export type ZvecGrepExploreOptions = {
+  root?: string;
+  query: string;
+  seedId?: string;
+  searchLimit?: number;
+  traversalDepth?: number;
+  maxNodes?: number;
+  maxFiles?: number;
+  maxChars?: number;
+};
+
+export type ZvecGrepGraphNeighborhoodOptions = {
+  root?: string;
+  direction: GraphQueryDirection;
+  query: string;
+  seedId?: string;
+  depth?: number;
+  limit?: number;
+};
+
+export type ZvecGrepExploreResult = ExploreResult & { root: string };
+export type ZvecGrepGraphNeighborhoodResult = GraphNeighborhoodResult & {
+  root: string;
 };
 
 export type ZvecGrepSearchOptions = {
@@ -264,6 +294,10 @@ export type ZvecGrep = {
   disableIndex(options?: ZvecGrepInfoOptions): Promise<ZvecGrepInfoResult>;
   info(options?: ZvecGrepInfoOptions): Promise<ZvecGrepInfoResult>;
   context(options: ZvecGrepContextOptions): Promise<ZvecGrepContextResult>;
+  explore(options: ZvecGrepExploreOptions): Promise<ZvecGrepExploreResult>;
+  graphNeighborhood(
+    options: ZvecGrepGraphNeighborhoodOptions,
+  ): Promise<ZvecGrepGraphNeighborhoodResult>;
   close(): Promise<void>;
 };
 

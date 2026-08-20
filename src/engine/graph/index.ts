@@ -68,8 +68,3 @@ export type {
   ExploreSubgraphStorage,
   ExploreSymbolSnippet,
 } from "./explore.js";
-export { exploreWorkspaceGraph, queryWorkspaceGraph } from "./workspace.js";
-export type {
-  WorkspaceExploreOptions,
-  WorkspaceGraphQueryOptions,
-} from "./workspace.js";

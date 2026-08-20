@@ -1,4 +1,3 @@
-import { join } from "node:path";
 import {
   workspaceIndexDetail,
   detail,
@@ -16,6 +15,7 @@ import type { GraphReader, GraphStorage } from "../graph/index.js";
 import { openGraphStorage } from "../graph/index.js";
 import {
   createWorkspaceIndexStorage,
+  resolveWorkspaceIndexLayout,
   type StoredEntity,
   type StorageSearchHit,
   type WorkspaceIndexStorage,
@@ -66,9 +66,12 @@ export class WorkspaceIndex {
         readOnly: true,
       });
     }
-    this.graphStorage = openGraphStorage(join(info.path, "code-graph"), {
-      readOnly: options.mode === "read",
-    });
+    this.graphStorage = openGraphStorage(
+      resolveWorkspaceIndexLayout(info.path).graphPath,
+      {
+        readOnly: options.mode === "read",
+      },
+    );
   }
 
   get graph(): GraphReader {

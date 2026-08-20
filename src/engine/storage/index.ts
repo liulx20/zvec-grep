@@ -79,6 +79,9 @@ export interface WorkspaceIndexStorage {
 
 export { createWorkspaceIndexStorage } from "./zvec.js";
 export {
+  deleteWorkspaceIndexArtifacts,
   deleteWorkspaceIndexStorage,
   hasWorkspaceIndexStorage,
+  resolveWorkspaceIndexLayout,
+  type WorkspaceIndexLayout,
 } from "./layout.js";

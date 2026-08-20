@@ -21,6 +21,10 @@ export type {
   ZvecGrepInfoOptions,
   ZvecGrepInfoResult,
   ZvecGrepIndexOptions,
+  ZvecGrepExploreOptions,
+  ZvecGrepExploreResult,
+  ZvecGrepGraphNeighborhoodOptions,
+  ZvecGrepGraphNeighborhoodResult,
   ZvecGrepRgDiagnostics,
   ZvecGrepSearchOptions,
 } from "./engine/service/index.js";
