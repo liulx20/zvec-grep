@@ -11,6 +11,18 @@ import {
   rawRef,
 } from "../../dist/engine/graph/index.js";
 
+function edge(src, dst, kind, rel) {
+  return {
+    src,
+    dst,
+    kind,
+    rel,
+    count: 1,
+    first_line: 1,
+    ref_name: dst,
+  };
+}
+
 test("graph open reports corruption and writable mode fails loudly", async (t) => {
   const dir = await mkdtemp(join(tmpdir(), "zvec-grep-broken-graph-"));
   t.after(async () => {
@@ -290,6 +302,47 @@ test("retry batches process unrelated names only once per invocation", async () 
     { ref_name: "missingCold", last_attempt: 2, count: 1 },
     { ref_name: "missingHot", last_attempt: 2, count: 1_001 },
   ]);
+  graph.close();
+});
+
+test("owner receiver refs reuse inheritance lookup within an invocation", async () => {
+  const graph = new SqliteGraphStorage("", { inMemory: true });
+  graph.upsertFileGraph(
+    "scoped",
+    [
+      { id: "base", kind: "class", is_exported: false, name: "Base" },
+      { id: "helper-a", kind: "method", is_exported: false, name: "helperA" },
+      { id: "helper-b", kind: "method", is_exported: false, name: "helperB" },
+      { id: "child", kind: "class", is_exported: false, name: "Child" },
+      { id: "run", kind: "method", is_exported: false, name: "run" },
+    ],
+    [
+      edge("base", "helper-a", "CONTAINS", "contains"),
+      edge("base", "helper-b", "CONTAINS", "contains"),
+      edge("child", "run", "CONTAINS", "contains"),
+      edge("child", "base", "INHERITS", "extends"),
+    ],
+    [
+      rawRef({ owner: "run", refName: "this.helperA", line: 1 }),
+      rawRef({ owner: "run", refName: "this.helperB", line: 2 }),
+      rawRef({ owner: "run", refName: "ordinaryMissing", line: 3 }),
+    ],
+  );
+  let hierarchyQueries = 0;
+  const resolver = graph.resolver;
+  const original = resolver.inheritanceContainers.bind(resolver);
+  resolver.inheritanceContainers = (...args) => {
+    hierarchyQueries += 1;
+    return original(...args);
+  };
+
+  await graph.resolvePending();
+
+  assert.equal(hierarchyQueries, 1);
+  assert.deepEqual(
+    graph.callees("run", 1, 10).map((item) => item.id),
+    ["helper-a", "helper-b"],
+  );
   graph.close();
 });
 

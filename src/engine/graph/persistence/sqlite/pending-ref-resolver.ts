@@ -1,6 +1,7 @@
 import { FilePathIndex } from "../../imports/path-index.js";
 import { resolveImportPath } from "../../imports/resolve-path.js";
 import { NameIndex } from "../../name-index.js";
+import { referenceResolutionPolicy } from "../../reference-resolution-policy.js";
 import { resolveRef } from "../../resolve.js";
 import type { PendingRef, ResolvePendingOptions } from "../../types.js";
 import { type RefRow, type SymbolRow } from "./reader.js";
@@ -62,6 +63,7 @@ export class SqlitePendingRefResolver {
     const paths = new FilePathIndex(options.files ?? []);
     const attempt = this.nextAttempt();
     const rounds = this.retryRounds(attempt);
+    const hierarchyCache = new Map<string, readonly string[]>();
     for (let round = 0; round < rounds; round++) {
       this.transaction(() => {
         const refs = this.retryableRefs(attempt);
@@ -74,16 +76,21 @@ export class SqlitePendingRefResolver {
           (item) => !item.owner_is_file && item.ref_kind !== "import",
         );
         for (const ref of symbolRefs.filter(isInheritanceRef)) {
-          this.resolveSymbol(ref, names, attempt);
+          this.resolveSymbol(ref, names, attempt, hierarchyCache);
         }
         for (const ref of symbolRefs.filter((ref) => !isInheritanceRef(ref))) {
-          this.resolveSymbol(ref, names, attempt);
+          this.resolveSymbol(ref, names, attempt, hierarchyCache);
         }
       });
     }
   }
 
-  private resolveSymbol(ref: RefRow, names: NameIndex, attempt: number): void {
+  private resolveSymbol(
+    ref: RefRow,
+    names: NameIndex,
+    attempt: number,
+    hierarchyCache: Map<string, readonly string[]>,
+  ): void {
     const owner = this.one<{
       file_id: string;
       container_id: string | null;
@@ -106,6 +113,10 @@ export class SqlitePendingRefResolver {
       status: ref.status,
       source_language: ref.source_language ?? undefined,
     };
+    const reference = referenceResolutionPolicy.analyzeReference(
+      ref.ref_name,
+      ref.source_language ?? undefined,
+    );
     const preferred = this.all<{ dst_file_id: string }>(
       "SELECT dst_file_id FROM file_imports WHERE src_file_id=?",
       owner.file_id,
@@ -136,12 +147,14 @@ export class SqlitePendingRefResolver {
         : undefined,
       owner.container_name ?? undefined,
       owner.container_id ?? undefined,
-      owner.container_id
-        ? this.inheritanceContainers(
+      reference.receiver.kind === "owner" && owner.container_id
+        ? this.cachedInheritanceContainers(
+            hierarchyCache,
             owner.container_id,
-            refReceiver(ref.ref_name) !== "super",
+            reference.receiver.includeOwner,
           )
         : [],
+      reference,
     );
     if (result.status === "external") return this.deleteRef(ref.id);
     if (result.status !== "resolved") return this.failRef(ref.id, attempt);
@@ -235,6 +248,19 @@ export class SqlitePendingRefResolver {
       containerId,
       includeOwner ? 0 : 1,
     ).map((row) => row.id);
+  }
+
+  private cachedInheritanceContainers(
+    cache: Map<string, readonly string[]>,
+    containerId: string,
+    includeOwner: boolean,
+  ): readonly string[] {
+    const key = `${containerId}\0${includeOwner ? "with-owner" : "bases-only"}`;
+    const cached = cache.get(key);
+    if (cached) return cached;
+    const containers = this.inheritanceContainers(containerId, includeOwner);
+    cache.set(key, containers);
+    return containers;
   }
 
   private retryRounds(attemptWatermark: number): number {

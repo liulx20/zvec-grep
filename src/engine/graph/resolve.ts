@@ -1,6 +1,7 @@
 import type { NameIndex } from "./name-index.js";
 import {
   referenceResolutionPolicy,
+  type AnalyzedReference,
   type ReferenceBindingMatch,
 } from "./reference-resolution-policy.js";
 import type { PendingRef, RefResolveResult } from "./types.js";
@@ -13,11 +14,14 @@ export function resolveRef(
   sourceContainerName?: string,
   sourceContainerId?: string,
   hierarchyContainerIds: readonly string[] = [],
+  analyzedReference?: AnalyzedReference,
 ): RefResolveResult {
-  const reference = referenceResolutionPolicy.analyzeReference(
-    ref.ref_name,
-    ref.source_language,
-  );
+  const reference =
+    analyzedReference ??
+    referenceResolutionPolicy.analyzeReference(
+      ref.ref_name,
+      ref.source_language,
+    );
   const context = referenceResolutionPolicy.createContext(reference, {
     sourceFileId: ref.src_file,
     ownerContainerId: sourceContainerId,
