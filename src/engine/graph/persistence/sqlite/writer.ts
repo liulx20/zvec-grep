@@ -98,7 +98,7 @@ export class SqliteGraphWriter {
       ).run(edge.src, edge.dst);
       return;
     }
-    const sourceEdgeId = `local:${makeRefId(
+    const sourceEdgeId = edge.id ?? `local:${makeRefId(
       edge.src,
       edge.ref_name,
       edge.kind === "INSTANTIATES" ? "new" : edge.rel,
@@ -107,14 +107,19 @@ export class SqliteGraphWriter {
     this.db.prepare(
       `INSERT OR REPLACE INTO edges(
          id,src_id,dst_id,src_is_file,dst_is_file,kind,rel,count,first_line,
-         ref_name,provenance,confidence
-       ) VALUES(?,?,?,0,0,?,?,?,?,?,'static',1)`,
+         ref_name,source_language,receiver_kind,receiver_name,member_name,
+         resolution_hints,provenance,confidence
+       ) VALUES(?,?,?,0,0,?,?,?,?,?,?,?,?,?,?,'static',1)`,
     ).run(
-      edge.kind === "INSTANTIATES"
+      edge.id ?? (edge.kind === "INSTANTIATES"
         ? `${sourceEdgeId}:instantiates`
-        : sourceEdgeId,
+        : sourceEdgeId),
       edge.src, edge.dst, edge.kind, edge.rel, edge.count, edge.first_line,
-      edge.ref_name,
+      edge.ref_name, edge.source_language ?? null,
+      edge.target?.receiver?.kind ?? null,
+      edge.target?.receiver?.name ?? null,
+      edge.target?.member ?? null,
+      edge.target?.hints ? JSON.stringify(edge.target.hints) : null,
     );
   }
 

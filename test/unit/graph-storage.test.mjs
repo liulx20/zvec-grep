@@ -720,6 +720,10 @@ test("reprojecting a local constructor keeps one instantiation fact", async () =
   await graph.resolvePending();
 
   assert.equal(graph.instantiationRows(), 1);
+  assert.equal(
+    graph.outgoingEdges(["make"], ["INSTANTIATES"], 10)[0]?.count,
+    1,
+  );
   assert.deepEqual(graph.callees("make", 1, 10).map((item) => item.id), [
     "local-widget",
   ]);

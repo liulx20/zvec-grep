@@ -42,8 +42,9 @@ export function run() {
   assert.ok(graphInput.nodes.some((n) => n.name === "helper"));
 
   const localCalls = graphInput.edges.filter((e) => e.kind === "CALLS");
-  assert.equal(localCalls.length, 1);
-  assert.equal(localCalls[0].count, 2);
+  assert.equal(localCalls.length, 2);
+  assert.equal(new Set(localCalls.map((edge) => edge.id)).size, 2);
+  assert.deepEqual(localCalls.map((edge) => edge.count), [1, 1]);
   assert.equal(localCalls[0].rel, "call");
 
   assert.ok(
@@ -75,6 +76,19 @@ export function run() {
     [helper.id],
   );
   assert.equal(graph.callees(run.id, 1, 10)[0].count, 2);
+
+  graph.upsertFileGraph(
+    "other-file",
+    [{ id: "other-helper", kind: "function", is_exported: true, name: "helper" }],
+    [],
+    [],
+  );
+  await graph.resolvePending();
+  assert.equal(
+    graph.callees(run.id, 1, 10).find((item) => item.id === helper.id)?.count,
+    2,
+    "reprojection must preserve every local call occurrence",
+  );
   graph.close();
 });
 

@@ -178,6 +178,19 @@ function absorbRelationOwners(input: {
     }
 
     for (const site of owner.sites) {
+      const occurrence = nextOccurrence(
+        occurrences,
+        `${ownerId}\0${site.name}\0${site.kind}\0${site.line}`,
+      );
+      const siteRef = rawRef({
+        owner: ownerId,
+        refName: site.name,
+        refKind: site.kind,
+        line: site.line,
+        occurrence,
+        sourceLanguage: input.sourceLanguage,
+        target: site.target,
+      });
       const reference = referenceResolutionPolicy.analyzeReference(
         site.target,
         input.sourceLanguage,
@@ -193,25 +206,23 @@ function absorbRelationOwners(input: {
 
       if (targets.length === 1) {
         const dst = targets[0]!;
-        const key = `${ownerId}\0${dst}\0${site.kind}\0${input.edgeKind}`;
-        const existing = input.localEdges.get(key);
-        if (existing) {
-          existing.count += 1;
-          existing.first_line = Math.min(existing.first_line, site.line);
-        } else {
-          input.localEdges.set(key, {
-            src: ownerId,
-            dst,
-            rel: site.kind,
-            count: 1,
-            first_line: site.line,
-            ref_name: site.name,
-            kind: input.edgeKind,
-          });
-        }
+        const key = `${ownerId}\0${dst}\0${site.kind}\0${input.edgeKind}\0${site.line}\0${occurrence}`;
+        input.localEdges.set(key, {
+          id: siteRef.id,
+          src: ownerId,
+          dst,
+          rel: site.kind,
+          count: 1,
+          first_line: site.line,
+          ref_name: site.name,
+          kind: input.edgeKind,
+          source_language: input.sourceLanguage,
+          target: site.target,
+        });
         if (site.kind === "new") {
-          const instantiateKey = `${ownerId}\0${dst}\0instantiates\0INSTANTIATES`;
+          const instantiateKey = `${key}\0INSTANTIATES`;
           input.localEdges.set(instantiateKey, {
+            id: `${siteRef.id}:instantiates`,
             src: ownerId,
             dst,
             rel: "instantiates",
@@ -219,6 +230,8 @@ function absorbRelationOwners(input: {
             first_line: site.line,
             ref_name: site.name,
             kind: "INSTANTIATES",
+            source_language: input.sourceLanguage,
+            target: site.target,
           });
         }
         continue;
@@ -226,18 +239,7 @@ function absorbRelationOwners(input: {
 
       if (referenceResolutionPolicy.isExternal(reference)) continue;
 
-      const ref = rawRef({
-        owner: ownerId,
-        refName: site.name,
-        refKind: site.kind,
-        line: site.line,
-        occurrence: nextOccurrence(
-          occurrences,
-          `${ownerId}\0${site.name}\0${site.kind}\0${site.line}`,
-        ),
-        sourceLanguage: input.sourceLanguage,
-        target: site.target,
-      });
+      const ref = siteRef;
       if (!input.seenRefIds.has(ref.id)) {
         input.seenRefIds.add(ref.id);
         input.refs.push(ref);

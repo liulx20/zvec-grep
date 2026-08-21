@@ -194,8 +194,8 @@ erDiagram
 - `DEFINES` 没有单独建表，由 `symbols.file_id` 推导。
 - `edges.kind` 表示大类，`rel` 保存更细的语义，例如 `call`、`new`、
   `extends`、`type`、`member`。
-- `edges` 以源码 occurrence 为主；文件内直接解析阶段可以用 `count` 保存已分组的相同关系次数。
-  `first_line` 保存首次出现行号，`ref_name` 保存提取时名称。
+- `edges` 对调用、引用和继承关系按源码 occurrence 保存；查询时再按 `src / dst / kind / rel`
+  聚合 `count`。`first_line` 保存首次出现行号，`ref_name` 保存提取时名称。
 - `stats` 中的关系数量按 `SUM(count)` 统计，表示源码 occurrence 数，而不是物理 edge 行数。
 - `edges.provenance` 区分 `static` 和 `heuristic`；`confidence` 保存关系置信度，`evidence`
   保存启发式规则，例如 `unique_member_in_visible_files`。静态边的默认置信度为 1。

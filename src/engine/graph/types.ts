@@ -106,6 +106,8 @@ export type SymNode = {
 };
 
 export type LocalEdge = {
+  /** Stable source occurrence id; structural/legacy callers may omit it. */
+  id?: string;
   src: string;
   dst: string;
   rel: string;
@@ -113,6 +115,8 @@ export type LocalEdge = {
   first_line: number;
   ref_name: string;
   kind: "CALLS" | "REFS" | "INHERITS" | "CONTAINS" | "INSTANTIATES";
+  source_language?: string;
+  target?: ReferenceTarget;
 };
 
 type RawRefBase = {

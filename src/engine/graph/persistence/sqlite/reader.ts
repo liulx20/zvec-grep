@@ -20,7 +20,7 @@ import type {
 export type EdgeRow = {
   src_id: string;
   dst_id: string;
-  kind: "CALLS" | "REFS" | "INHERITS";
+  kind: "CALLS" | "REFS" | "INHERITS" | "IMPORTS" | "INSTANTIATES";
   rel: string;
   count: number;
   first_line: number;
@@ -271,7 +271,8 @@ export class SqliteGraphReader {
         `SELECT src_id,dst_id,kind,rel,SUM(count) AS count,
                 MIN(first_line) AS first_line,MIN(ref_name) AS ref_name,
                 CASE WHEN MAX(provenance)='static' THEN 'static' ELSE 'heuristic' END AS provenance,
-                MAX(confidence) AS confidence,MIN(evidence) AS evidence
+                MAX(confidence) AS confidence,
+                CASE WHEN MAX(provenance)='static' THEN NULL ELSE MIN(evidence) END AS evidence
          FROM edges WHERE src_id=? AND src_is_file=0 AND kind='CALLS'
          GROUP BY src_id,dst_id,kind,rel ORDER BY count DESC,dst_id LIMIT ?`,
         id,
@@ -291,7 +292,8 @@ export class SqliteGraphReader {
       `SELECT src_id,dst_id,kind,rel,SUM(count) AS count,
               MIN(first_line) AS first_line,MIN(ref_name) AS ref_name,
               CASE WHEN MAX(provenance)='static' THEN 'static' ELSE 'heuristic' END AS provenance,
-              MAX(confidence) AS confidence,MIN(evidence) AS evidence
+              MAX(confidence) AS confidence,
+              CASE WHEN MAX(provenance)='static' THEN NULL ELSE MIN(evidence) END AS evidence
        FROM edges WHERE dst_id=? AND dst_is_file=0
        GROUP BY src_id,dst_id,kind,rel ORDER BY first_line LIMIT ?`,
       id,
@@ -439,7 +441,8 @@ export class SqliteGraphReader {
         `SELECT src_id AS src,dst_id AS dst,kind,rel,SUM(count) AS count,
                 MIN(first_line) AS first_line,MIN(ref_name) AS ref_name,
                 CASE WHEN MAX(provenance)='static' THEN 'static' ELSE 'heuristic' END AS provenance,
-                MAX(confidence) AS confidence,MIN(evidence) AS evidence
+                MAX(confidence) AS confidence,
+                CASE WHEN MAX(provenance)='static' THEN NULL ELSE MIN(evidence) END AS evidence
          FROM edges
          WHERE src_id IN(SELECT value FROM json_each(?))
            AND dst_id IN(SELECT value FROM json_each(?)) AND kind IN(${p})
@@ -474,7 +477,8 @@ export class SqliteGraphReader {
         `SELECT src_id AS src,dst_id AS dst,kind,rel,SUM(count) AS count,
                 MIN(first_line) AS first_line,MIN(ref_name) AS ref_name,
                 CASE WHEN MAX(provenance)='static' THEN 'static' ELSE 'heuristic' END AS provenance,
-                MAX(confidence) AS confidence,MIN(evidence) AS evidence
+                MAX(confidence) AS confidence,
+                CASE WHEN MAX(provenance)='static' THEN NULL ELSE MIN(evidence) END AS evidence
          FROM edges
          WHERE kind='IMPORTS' AND src_is_file=1 AND dst_is_file=1
            AND src_id IN(SELECT value FROM json_each(?))
@@ -488,7 +492,9 @@ export class SqliteGraphReader {
         `SELECT src_id AS src,dst_id AS dst,kind,rel,SUM(count) AS count,
                 MIN(first_line) AS first_line,MIN(ref_name) AS ref_name,
                 CASE WHEN MAX(provenance)='static' THEN 'static' ELSE 'heuristic' END AS provenance,
-                MAX(confidence) AS confidence,MIN(evidence) AS evidence FROM edges
+                MAX(confidence) AS confidence,
+                CASE WHEN MAX(provenance)='static' THEN NULL ELSE MIN(evidence) END AS evidence
+         FROM edges
          WHERE kind='INSTANTIATES' AND src_is_file=0 AND dst_is_file=0
            AND src_id IN(SELECT value FROM json_each(?))
            AND dst_id IN(SELECT value FROM json_each(?))
@@ -620,7 +626,8 @@ export class SqliteGraphReader {
             `SELECT src_id,dst_id,kind,rel,SUM(count) AS count,
                     MIN(first_line) AS first_line,MIN(ref_name) AS ref_name,
                     CASE WHEN MAX(provenance)='static' THEN 'static' ELSE 'heuristic' END AS provenance,
-                    MAX(confidence) AS confidence,MIN(evidence) AS evidence
+                    MAX(confidence) AS confidence,
+                    CASE WHEN MAX(provenance)='static' THEN NULL ELSE MIN(evidence) END AS evidence
              FROM edges
              WHERE ${side} IN(SELECT value FROM json_each(?))
                AND src_is_file=0 AND dst_is_file=0 AND kind IN(${p})
@@ -672,17 +679,16 @@ export class SqliteGraphReader {
           ...this.all<EdgeRow>(
             `SELECT src_id,dst_id,kind,rel,SUM(count) AS count,
                     MIN(first_line) AS first_line,MIN(ref_name) AS ref_name,
-                    'static' AS provenance,MAX(confidence) AS confidence,
-                    MIN(evidence) AS evidence
+                    CASE WHEN MAX(provenance)='static' THEN 'static' ELSE 'heuristic' END AS provenance,
+                    MAX(confidence) AS confidence,
+                    CASE WHEN MAX(provenance)='static' THEN NULL ELSE MIN(evidence) END AS evidence
              FROM edges WHERE kind='IMPORTS' AND src_is_file=1 AND dst_is_file=1
                AND ${side} IN(SELECT value FROM json_each(?))
              GROUP BY src_id,dst_id,kind,rel
              ORDER BY ${side},src_id,dst_id,rel LIMIT ?`,
             ids,
             remaining,
-          ).map((r) =>
-            structuralEdge(r.src_id, r.dst_id, "IMPORTS", r.rel),
-          ),
+          ).map(toGraphEdge),
         );
       }
     }
@@ -694,8 +700,9 @@ export class SqliteGraphReader {
           ...this.all<EdgeRow>(
             `SELECT src_id,dst_id,kind,rel,SUM(count) AS count,
                     MIN(first_line) AS first_line,MIN(ref_name) AS ref_name,
-                    'static' AS provenance,MAX(confidence) AS confidence,
-                    MIN(evidence) AS evidence
+                    CASE WHEN MAX(provenance)='static' THEN 'static' ELSE 'heuristic' END AS provenance,
+                    MAX(confidence) AS confidence,
+                    CASE WHEN MAX(provenance)='static' THEN NULL ELSE MIN(evidence) END AS evidence
              FROM edges WHERE kind='INSTANTIATES'
                AND src_is_file=0 AND dst_is_file=0
                AND ${side} IN(SELECT value FROM json_each(?))
@@ -703,10 +710,7 @@ export class SqliteGraphReader {
              ORDER BY ${side},src_id,dst_id,rel LIMIT ?`,
             ids,
             remaining,
-          ).map((row) => ({
-            ...structuralEdge(row.src_id, row.dst_id, "INSTANTIATES", row.rel),
-            first_line: row.first_line,
-          })),
+          ).map(toGraphEdge),
         );
       }
     }
