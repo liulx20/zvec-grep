@@ -177,7 +177,7 @@ export class SqlitePendingRefResolver {
           evidence: "receiver_type_member",
         },
       );
-      return this.deleteRef(ref.id);
+      return;
     }
     if (semanticCandidates.length > 1) {
       this.persistDynamicCall(ref, target, semanticCandidates);
@@ -206,7 +206,7 @@ export class SqlitePendingRefResolver {
       reference,
     );
     if (result.status === "external") {
-      this.db.prepare("UPDATE pending_refs SET status='external' WHERE id=?").run(
+      this.db.prepare("UPDATE reference_edges SET status='external' WHERE id=?").run(
         ref.id,
       );
       return;
@@ -224,10 +224,9 @@ export class SqlitePendingRefResolver {
         confidence: 0.35,
         evidence: "unique_member_in_visible_files",
       });
-      return this.deleteRef(ref.id);
+      return;
     }
     this.insertSymbolEdge(ref, result.dst, result.edgeKind);
-    this.deleteRef(ref.id);
   }
 
   private heuristicCandidate(
@@ -252,31 +251,26 @@ export class SqlitePendingRefResolver {
     candidates: readonly string[],
   ): void {
     this.db.prepare(
-      `INSERT OR REPLACE INTO dynamic_calls(
-         id,owner_id,ref_name,ref_kind,member_name,line,source_language,
-         receiver_kind,receiver_name,resolution_hints,reason
-       ) VALUES(?,?,?,?,?,?,?,?,?,?,'polymorphic_dispatch')`,
+      `UPDATE reference_edges
+       SET status='dynamic',dynamic_reason='polymorphic_dispatch',
+           target_symbol_id=NULL,target_file_id=NULL,edge_kind=NULL,edge_rel=NULL,
+           member_name=?,receiver_kind=?,receiver_name=?,resolution_hints=?
+       WHERE id=?`,
     ).run(
-      ref.id,
-      ref.owner_id,
-      ref.ref_name,
-      ref.ref_kind,
       target.member,
-      ref.line,
-      ref.source_language,
       target.receiver?.kind ?? null,
       target.receiver?.name ?? null,
       target.hints ? JSON.stringify(target.hints) : null,
+      ref.id,
     );
-    this.db.prepare("DELETE FROM dispatch_candidates WHERE call_id=?").run(ref.id);
+    this.db.prepare("DELETE FROM edge_candidates WHERE edge_id=?").run(ref.id);
     const insert = this.db.prepare(
-      "INSERT INTO dispatch_candidates(call_id,target_id,reason,confidence) VALUES(?,?,?,?)",
+      "INSERT INTO edge_candidates(edge_id,target_id,reason,confidence) VALUES(?,?,?,?)",
     );
     const reason = target.hints?.genericBounds?.length
       ? "generic_bound"
       : "hierarchy";
     for (const candidate of candidates) insert.run(ref.id, candidate, reason, 0.65);
-    this.deleteRef(ref.id);
   }
 
   private insertSymbolEdge(
@@ -317,9 +311,21 @@ export class SqlitePendingRefResolver {
         metadata.evidence ?? null,
       );
     this.db.prepare(
-      `INSERT OR REPLACE INTO resolved_source_refs(ref_id,src_id,dst_id,kind,rel)
-       SELECT ?,?,?,?,? WHERE EXISTS(SELECT 1 FROM source_refs WHERE id=?)`,
-    ).run(ref.id, ref.owner_id, dst, edgeKind, ref.ref_kind, ref.id);
+      `UPDATE reference_edges
+       SET status='resolved',target_symbol_id=?,target_file_id=NULL,
+           edge_kind=?,edge_rel=?,dynamic_reason=NULL,
+           provenance=?,confidence=?,evidence=?
+       WHERE id=?`,
+    ).run(
+      dst,
+      edgeKind,
+      ref.ref_kind,
+      metadata.provenance,
+      metadata.confidence,
+      metadata.evidence ?? null,
+      ref.id,
+    );
+    this.db.prepare("DELETE FROM edge_candidates WHERE edge_id=?").run(ref.id);
   }
 
   private resolveImport(
@@ -336,7 +342,7 @@ export class SqlitePendingRefResolver {
       paths,
     );
     if (result.status === "external") {
-      this.db.prepare("UPDATE pending_refs SET status='external' WHERE id=?").run(
+      this.db.prepare("UPDATE reference_edges SET status='external' WHERE id=?").run(
         ref.id,
       );
       return;
@@ -361,18 +367,11 @@ export class SqlitePendingRefResolver {
         );
     }
     this.db.prepare(
-      `INSERT OR REPLACE INTO resolved_import_refs(
-         ref_id,src_file_id,dst_file_id,spec,local_name,imported_name
-       ) VALUES(?,?,?,?,?,?)`,
-    ).run(
-      ref.id,
-      ref.owner_id,
-      result.fileId,
-      ref.ref_name,
-      ref.local_name,
-      ref.imported_name,
-    );
-    this.deleteRef(ref.id);
+      `UPDATE reference_edges
+       SET status='resolved',target_file_id=?,target_symbol_id=NULL,
+           edge_kind='IMPORTS',edge_rel='import',dynamic_reason=NULL
+       WHERE id=?`,
+    ).run(result.fileId, ref.id);
   }
 
   private retryableRefs(
@@ -383,15 +382,15 @@ export class SqlitePendingRefResolver {
     return this.all<RefRow>(
       `SELECT id,owner_id,owner_is_file,ref_name,ref_kind,line,status,imported_name,local_name,source_language,receiver_kind,receiver_name,member_name,resolution_hints,last_attempt
        FROM (
-         SELECT pending_refs.*,
+         SELECT reference_edges.*,
                 row_number() OVER (PARTITION BY ref_name ORDER BY last_attempt,id) AS retry_rank
-         FROM pending_refs
+         FROM reference_edges
          WHERE status='failed' AND last_attempt<? AND ${phaseCondition}
        )
        WHERE retry_rank<=?
        UNION ALL
        SELECT id,owner_id,owner_is_file,ref_name,ref_kind,line,status,imported_name,local_name,source_language,receiver_kind,receiver_name,member_name,resolution_hints,last_attempt
-       FROM pending_refs
+       FROM reference_edges
        WHERE status='pending' AND last_attempt<? AND ${phaseCondition}
        ORDER BY ref_name,id`,
       attemptWatermark,
@@ -440,7 +439,7 @@ export class SqlitePendingRefResolver {
     const phaseCondition = resolvePhaseCondition(phase);
     const row = this.one<{ max_count: number }>(
       `SELECT COALESCE(MAX(ref_count),0) AS max_count FROM (
-         SELECT COUNT(*) AS ref_count FROM pending_refs
+         SELECT COUNT(*) AS ref_count FROM reference_edges
          WHERE status='failed' AND last_attempt<? AND ${phaseCondition}
          GROUP BY ref_name
        )`,
@@ -452,13 +451,9 @@ export class SqlitePendingRefResolver {
   private failRef(id: string, attempt: number): void {
     this.db
       .prepare(
-        "UPDATE pending_refs SET status='failed',last_attempt=? WHERE id=?",
+        "UPDATE reference_edges SET status='failed',last_attempt=? WHERE id=?",
       )
       .run(attempt, id);
-  }
-
-  private deleteRef(id: string): void {
-    this.db.prepare("DELETE FROM pending_refs WHERE id=?").run(id);
   }
 
   private nextAttempt(): number {

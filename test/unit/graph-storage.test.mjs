@@ -197,10 +197,20 @@ test("external refs are dropped without creating edges", async () => {
 
 test("resolved references retain durable source facts", async () => {
   class InspectableGraph extends SqliteGraphStorage {
-    sourceRefCount() {
+    resolvedOccurrenceCount() {
       return this.database.db
-        .prepare("SELECT COUNT(*) AS count FROM source_refs")
+        .prepare(
+          "SELECT COUNT(*) AS count FROM reference_edges WHERE status='resolved'",
+        )
         .get().count;
+    }
+    referenceTableNames() {
+      return this.database.db
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type='table' AND (name LIKE '%ref%' OR name LIKE '%dynamic%' OR name LIKE '%candidate%') ORDER BY name",
+        )
+        .all()
+        .map((row) => row.name);
     }
   }
   const graph = new InspectableGraph("", { inMemory: true });
@@ -217,7 +227,11 @@ test("resolved references retain durable source facts", async () => {
 
   assert.equal(graph.stats().callsCount, 1);
   assert.equal(graph.stats().refCount, 0);
-  assert.equal(graph.sourceRefCount(), 1);
+  assert.equal(graph.resolvedOccurrenceCount(), 1);
+  assert.deepEqual(graph.referenceTableNames(), [
+    "edge_candidates",
+    "reference_edges",
+  ]);
   graph.close();
 });
 
@@ -455,7 +469,7 @@ test("retry batches process unrelated names only once per invocation", async () 
     pendingAttempts() {
       return this.database.db
         .prepare(
-          "SELECT ref_name,last_attempt,COUNT(*) AS count FROM pending_refs GROUP BY ref_name,last_attempt ORDER BY ref_name,last_attempt",
+          "SELECT ref_name,last_attempt,COUNT(*) AS count FROM reference_edges WHERE status='failed' GROUP BY ref_name,last_attempt ORDER BY ref_name,last_attempt",
         )
         .all()
         .map((row) => ({ ...row }));

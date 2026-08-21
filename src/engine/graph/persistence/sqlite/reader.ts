@@ -103,8 +103,9 @@ export class SqliteGraphReader {
       reason: "polymorphic_dispatch";
     }>(
       `SELECT id,owner_id,ref_name,member_name,receiver_kind,receiver_name,
-              resolution_hints,reason
-       FROM dynamic_calls WHERE owner_id IN (${placeholders})
+              resolution_hints,dynamic_reason AS reason
+       FROM reference_edges
+       WHERE status='dynamic' AND owner_id IN (${placeholders})
        ORDER BY owner_id,line,id LIMIT ?`,
       ...ids,
       limit,
@@ -114,8 +115,8 @@ export class SqliteGraphReader {
         reason: "hierarchy" | "generic_bound" | "method_set";
         confidence: number;
       }>(
-        `SELECT target_id,reason,confidence FROM dispatch_candidates
-         WHERE call_id=? ORDER BY confidence DESC,target_id LIMIT 64`,
+        `SELECT target_id,reason,confidence FROM edge_candidates
+         WHERE edge_id=? ORDER BY confidence DESC,target_id LIMIT 64`,
         row.id,
       ).map((candidate) => ({
         targetId: candidate.target_id,
@@ -141,7 +142,7 @@ export class SqliteGraphReader {
     if (remaining === 0) return persisted;
     const unresolved = this.all<RefRow>(
       `SELECT id,owner_id,owner_is_file,ref_name,ref_kind,line,status,imported_name,local_name,source_language,receiver_kind,receiver_name,member_name,resolution_hints,last_attempt
-       FROM pending_refs
+       FROM reference_edges
        WHERE owner_is_file=0 AND status='failed' AND receiver_kind IS NOT NULL
          AND owner_id IN (${placeholders})
        ORDER BY owner_id,line,id LIMIT ?`,
@@ -511,7 +512,7 @@ export class SqliteGraphReader {
       symCount: count("symbols"),
       fileCount: count("files"),
       refCount: this.one<{ count: number }>(
-        "SELECT COUNT(*) AS count FROM pending_refs WHERE status<>'external'",
+        "SELECT COUNT(*) AS count FROM reference_edges WHERE status IN ('pending','failed')",
       )?.count ?? 0,
       callsCount: count("symbol_edges", "WHERE kind='CALLS'"),
       refsCount: count("symbol_edges", "WHERE kind='REFS'"),

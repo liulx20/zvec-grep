@@ -140,11 +140,11 @@ export class SqliteGraphWriter {
 
   protected insertRef(ref: RawRef, fallbackOwner: string): void {
     this.db.prepare(
-      `INSERT OR REPLACE INTO source_refs(
+      `INSERT OR REPLACE INTO reference_edges(
          id,owner_id,owner_is_file,ref_name,ref_kind,member_name,line,
          source_language,imported_name,local_name,receiver_kind,receiver_name,
-         resolution_hints
-       ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+         resolution_hints,status,last_attempt
+       ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',0)`,
     ).run(
       ref.id,
       ref.owner || fallbackOwner,
@@ -164,29 +164,6 @@ export class SqliteGraphWriter {
         ? JSON.stringify(ref.target.hints)
         : null,
     );
-    this.db
-      .prepare(
-        "INSERT OR REPLACE INTO pending_refs(id,owner_id,owner_is_file,ref_name,ref_kind,line,imported_name,local_name,source_language,receiver_kind,receiver_name,member_name,resolution_hints,status,last_attempt) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',0)",
-      )
-      .run(
-        ref.id,
-        ref.owner || fallbackOwner,
-        ref.type === "symbol" ? 0 : 1,
-        ref.ref_name,
-        ref.ref_kind,
-        ref.line,
-        ref.type === "import_binding" ? ref.imported_name : null,
-        ref.type === "import_binding" ? ref.local_name : null,
-        ref.type === "symbol" || ref.type === "import_binding"
-          ? (ref.source_language ?? null)
-          : null,
-        ref.type === "symbol" ? (ref.target.receiver?.kind ?? null) : null,
-        ref.type === "symbol" ? (ref.target.receiver?.name ?? null) : null,
-        ref.type === "symbol" ? ref.target.member : null,
-        ref.type === "symbol" && ref.target.hints
-          ? JSON.stringify(ref.target.hints)
-          : null,
-      );
   }
 
   private insertLocalEdge(edge: LocalEdge): void {
@@ -242,17 +219,19 @@ export class SqliteGraphWriter {
   private incomingSnapshots(fileId: string): EdgeRow[] {
     return this.all<EdgeRow>(
       `SELECT e.src_id,e.dst_id,e.kind,e.rel,
-              e.count-(SELECT COUNT(*) FROM resolved_source_refs r
-                       WHERE r.src_id=e.src_id AND r.dst_id=e.dst_id
-                         AND r.kind=e.kind AND r.rel=e.rel) AS count,
+              e.count-(SELECT COUNT(*) FROM reference_edges r
+                       WHERE r.owner_id=e.src_id AND r.target_symbol_id=e.dst_id
+                         AND r.edge_kind=e.kind AND r.edge_rel=e.rel
+                         AND r.status='resolved') AS count,
               e.first_line,e.ref_name,e.provenance,e.confidence,e.evidence
        FROM symbol_edges e
        JOIN symbols d ON d.id=e.dst_id
        JOIN symbols s ON s.id=e.src_id
        WHERE d.file_id=? AND s.file_id<>?
-         AND e.count>(SELECT COUNT(*) FROM resolved_source_refs r
-                     WHERE r.src_id=e.src_id AND r.dst_id=e.dst_id
-                       AND r.kind=e.kind AND r.rel=e.rel)`,
+         AND e.count>(SELECT COUNT(*) FROM reference_edges r
+                     WHERE r.owner_id=e.src_id AND r.target_symbol_id=e.dst_id
+                       AND r.edge_kind=e.kind AND r.edge_rel=e.rel
+                       AND r.status='resolved')`,
       fileId,
       fileId,
     );
@@ -260,11 +239,11 @@ export class SqliteGraphWriter {
 
   private incomingSymbolRefIds(fileId: string): string[] {
     return this.all<{ ref_id: string }>(
-      `SELECT r.ref_id FROM resolved_source_refs r
-       JOIN symbols target ON target.id=r.dst_id
-       JOIN symbols source ON source.id=r.src_id
+      `SELECT r.id AS ref_id FROM reference_edges r
+       JOIN symbols target ON target.id=r.target_symbol_id
+       JOIN symbols source ON source.id=r.owner_id
        WHERE target.file_id=? AND source.file_id<>?
-       ORDER BY r.ref_id`,
+         AND r.status='resolved' ORDER BY r.id`,
       fileId,
       fileId,
     ).map((row) => row.ref_id);
@@ -272,8 +251,9 @@ export class SqliteGraphWriter {
 
   private incomingImportRefIds(fileId: string): string[] {
     return this.all<{ ref_id: string }>(
-      `SELECT ref_id FROM resolved_import_refs
-       WHERE dst_file_id=? AND src_file_id<>? ORDER BY ref_id`,
+      `SELECT id AS ref_id FROM reference_edges
+       WHERE target_file_id=? AND owner_id<>? AND owner_is_file=1
+         AND status='resolved' ORDER BY id`,
       fileId,
       fileId,
     ).map((row) => row.ref_id);
@@ -297,14 +277,14 @@ export class SqliteGraphWriter {
            AND edge.rel IN ('extends','implements','trait')
        )
        SELECT DISTINCT fact.id AS ref_id
-       FROM source_refs fact
+       FROM reference_edges fact
        JOIN symbols source ON source.id=fact.owner_id
        WHERE fact.owner_is_file=0
          AND source.file_id<>?
          AND (
            fact.id IN (
-             SELECT call.id FROM dynamic_calls call
-             JOIN dispatch_candidates candidate ON candidate.call_id=call.id
+             SELECT call.id FROM reference_edges call
+             JOIN edge_candidates candidate ON candidate.edge_id=call.id
              JOIN symbols target ON target.id=candidate.target_id
              WHERE target.file_id=?
            )
@@ -324,8 +304,8 @@ export class SqliteGraphWriter {
                WHERE id IN (SELECT id FROM related_types) AND name IS NOT NULL
              )
              OR fact.id IN (
-               SELECT call.id FROM dynamic_calls call
-               JOIN dispatch_candidates candidate ON candidate.call_id=call.id
+               SELECT call.id FROM reference_edges call
+               JOIN edge_candidates candidate ON candidate.edge_id=call.id
                JOIN contains ownership ON ownership.child_id=candidate.target_id
                JOIN symbols container ON container.id=ownership.parent_id
                WHERE container.name IN (SELECT value FROM json_each(?))
@@ -369,9 +349,9 @@ export class SqliteGraphWriter {
     return this.all<IncomingImport>(
       `SELECT i.src_file_id,i.spec FROM file_imports i
        WHERE i.dst_file_id=? AND NOT EXISTS(
-         SELECT 1 FROM resolved_import_refs r
-         WHERE r.src_file_id=i.src_file_id AND r.dst_file_id=i.dst_file_id
-           AND r.spec=i.spec AND r.local_name IS NULL
+         SELECT 1 FROM reference_edges r
+         WHERE r.owner_id=i.src_file_id AND r.target_file_id=i.dst_file_id
+           AND r.ref_name=i.spec AND r.local_name IS NULL AND r.status='resolved'
        ) ORDER BY i.src_file_id,i.spec`,
       fileId,
     );
@@ -382,10 +362,11 @@ export class SqliteGraphWriter {
       `SELECT b.src_file_id,b.spec,b.local_name,b.imported_name
        FROM file_import_bindings b
        WHERE b.dst_file_id=? AND NOT EXISTS(
-         SELECT 1 FROM resolved_import_refs r
-         WHERE r.src_file_id=b.src_file_id AND r.dst_file_id=b.dst_file_id
-           AND r.spec=b.spec AND r.local_name=b.local_name
+         SELECT 1 FROM reference_edges r
+         WHERE r.owner_id=b.src_file_id AND r.target_file_id=b.dst_file_id
+           AND r.ref_name=b.spec AND r.local_name=b.local_name
            AND r.imported_name=b.imported_name
+           AND r.status='resolved'
        ) ORDER BY b.src_file_id,b.spec,b.local_name,b.imported_name`,
       fileId,
     ).filter((row) => row.spec.length > 0);
@@ -440,19 +421,15 @@ export class SqliteGraphWriter {
     const ids = JSON.stringify([...new Set(refIds)]);
     this.db
       .prepare(
-        "DELETE FROM dynamic_calls WHERE id IN(SELECT value FROM json_each(?))",
+        "DELETE FROM edge_candidates WHERE edge_id IN(SELECT value FROM json_each(?))",
       )
       .run(ids);
     this.db.prepare(
-      `INSERT OR REPLACE INTO pending_refs(
-         id,owner_id,owner_is_file,ref_name,ref_kind,line,imported_name,
-         local_name,source_language,receiver_kind,receiver_name,member_name,
-         resolution_hints,status,last_attempt
-       )
-       SELECT id,owner_id,owner_is_file,ref_name,ref_kind,line,imported_name,
-              local_name,source_language,receiver_kind,receiver_name,member_name,
-              resolution_hints,'pending',0
-       FROM source_refs WHERE id IN(SELECT value FROM json_each(?))`,
+      `UPDATE reference_edges
+       SET status='pending',last_attempt=0,target_symbol_id=NULL,target_file_id=NULL,
+           edge_kind=NULL,edge_rel=NULL,dynamic_reason=NULL,
+           provenance=NULL,confidence=NULL,evidence=NULL
+       WHERE id IN(SELECT value FROM json_each(?))`,
     ).run(ids);
   }
 
@@ -465,8 +442,11 @@ export class SqliteGraphWriter {
       kind: string;
       rel: string;
     }>(
-      `SELECT src_id,dst_id,kind,rel FROM resolved_source_refs
-       WHERE ref_id IN(SELECT value FROM json_each(?))`,
+      `SELECT owner_id AS src_id,target_symbol_id AS dst_id,
+              edge_kind AS kind,edge_rel AS rel
+       FROM reference_edges
+       WHERE id IN(SELECT value FROM json_each(?))
+         AND status='resolved' AND target_symbol_id IS NOT NULL`,
       ids,
     );
     const count = this.db.prepare(
@@ -503,31 +483,18 @@ export class SqliteGraphWriter {
         ).run(projection.src_id, projection.dst_id);
       }
     }
-    this.db
-      .prepare(
-        "DELETE FROM resolved_source_refs WHERE ref_id IN(SELECT value FROM json_each(?))",
-      )
-      .run(ids);
   }
 
   private deletePendingOwners(fileId: string, ids: readonly string[]): void {
     this.db
-      .prepare("DELETE FROM pending_refs WHERE owner_is_file=1 AND owner_id=?")
+      .prepare("DELETE FROM reference_edges WHERE owner_is_file=1 AND owner_id=?")
       .run(fileId);
     if (ids.length > 0) {
       this.db
         .prepare(
-          "DELETE FROM pending_refs WHERE owner_id IN(SELECT value FROM json_each(?))",
-        )
-        .run(JSON.stringify(ids));
-      this.db
-        .prepare(
-          "DELETE FROM source_refs WHERE owner_is_file=0 AND owner_id IN(SELECT value FROM json_each(?))",
+          "DELETE FROM reference_edges WHERE owner_is_file=0 AND owner_id IN(SELECT value FROM json_each(?))",
         )
         .run(JSON.stringify(ids));
     }
-    this.db
-      .prepare("DELETE FROM source_refs WHERE owner_is_file=1 AND owner_id=?")
-      .run(fileId);
   }
 }

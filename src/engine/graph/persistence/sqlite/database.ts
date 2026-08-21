@@ -81,9 +81,10 @@ function openDatabase(
     } else {
       db.exec("PRAGMA journal_mode=WAL");
       db.exec("PRAGMA synchronous=NORMAL");
+      const existingSchema = hasSchema(db);
+      if (existingSchema) ensureVersion(db, false);
       db.exec(SQLITE_GRAPH_SCHEMA);
-      ensureOptionalColumns(db);
-      ensureVersion(db, false);
+      if (!existingSchema) ensureVersion(db, false);
     }
     return { db, readOnly };
   } catch (error) {
@@ -116,71 +117,8 @@ function ensureVersion(db: NodeDatabaseSync, readOnly: boolean): void {
       "INSERT INTO graph_meta(key,value) VALUES('schema_version',?)",
     ).run(String(SQLITE_GRAPH_SCHEMA_VERSION));
   } else if (Number(row.value) !== SQLITE_GRAPH_SCHEMA_VERSION) {
-    if (!readOnly && Number(row.value) === 1 && SQLITE_GRAPH_SCHEMA_VERSION === 2) {
-      db.prepare("UPDATE graph_meta SET value=? WHERE key='schema_version'").run(
-        String(SQLITE_GRAPH_SCHEMA_VERSION),
-      );
-      return;
-    }
     throw new Error(
       `Unsupported SQLite graph schema version: ${row.value}; expected ${SQLITE_GRAPH_SCHEMA_VERSION}`,
     );
   }
-}
-
-function ensureOptionalColumns(db: NodeDatabaseSync): void {
-  const symbolColumns = tableColumns(db, "symbols");
-  if (!symbolColumns.has("signature"))
-    db.exec("ALTER TABLE symbols ADD COLUMN signature TEXT");
-  if (!symbolColumns.has("arity"))
-    db.exec("ALTER TABLE symbols ADD COLUMN arity INTEGER");
-  if (!symbolColumns.has("return_type"))
-    db.exec("ALTER TABLE symbols ADD COLUMN return_type TEXT");
-  const columns = tableColumns(db, "pending_refs");
-  if (!columns.has("imported_name"))
-    db.exec("ALTER TABLE pending_refs ADD COLUMN imported_name TEXT");
-  if (!columns.has("local_name"))
-    db.exec("ALTER TABLE pending_refs ADD COLUMN local_name TEXT");
-  if (!columns.has("source_language"))
-    db.exec("ALTER TABLE pending_refs ADD COLUMN source_language TEXT");
-  if (!columns.has("receiver_kind"))
-    db.exec("ALTER TABLE pending_refs ADD COLUMN receiver_kind TEXT");
-  if (!columns.has("receiver_name"))
-    db.exec("ALTER TABLE pending_refs ADD COLUMN receiver_name TEXT");
-  if (!columns.has("member_name"))
-    db.exec("ALTER TABLE pending_refs ADD COLUMN member_name TEXT");
-  if (!columns.has("resolution_hints"))
-    db.exec("ALTER TABLE pending_refs ADD COLUMN resolution_hints TEXT");
-  if (!columns.has("last_attempt"))
-    db.exec(
-      "ALTER TABLE pending_refs ADD COLUMN last_attempt INTEGER NOT NULL DEFAULT 0",
-    );
-  db.exec(
-    "CREATE INDEX IF NOT EXISTS pending_refs_retry_idx ON pending_refs(ref_name,status,last_attempt,id)",
-  );
-
-  const bindingColumns = tableColumns(db, "file_import_bindings");
-  if (!bindingColumns.has("spec")) {
-    db.exec(
-      "ALTER TABLE file_import_bindings ADD COLUMN spec TEXT NOT NULL DEFAULT ''",
-    );
-  }
-
-  const edgeColumns = tableColumns(db, "symbol_edges");
-  if (!edgeColumns.has("provenance"))
-    db.exec("ALTER TABLE symbol_edges ADD COLUMN provenance TEXT NOT NULL DEFAULT 'static'");
-  if (!edgeColumns.has("confidence"))
-    db.exec("ALTER TABLE symbol_edges ADD COLUMN confidence REAL NOT NULL DEFAULT 1.0");
-  if (!edgeColumns.has("evidence"))
-    db.exec("ALTER TABLE symbol_edges ADD COLUMN evidence TEXT");
-}
-
-function tableColumns(db: NodeDatabaseSync, table: string): Set<string> {
-  return new Set(
-    (
-      db.prepare(`PRAGMA table_info(${table})`).all() as unknown as {
-        name: string;
-      }[]
-    ).map((row) => row.name),
-  );
 }
