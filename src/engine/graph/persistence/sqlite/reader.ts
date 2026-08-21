@@ -90,7 +90,10 @@ export class SqliteGraphReader {
     this.database.close();
   }
 
-  dynamicBoundaries(nodeIds: readonly string[], limit: number): DynamicBoundary[] {
+  dynamicBoundaries(
+    nodeIds: readonly string[],
+    limit: number,
+  ): DynamicBoundary[] {
     if (nodeIds.length === 0 || limit <= 0) return [];
     const ids = [...new Set(nodeIds)];
     const placeholders = ids.map(() => "?").join(",");
@@ -131,9 +134,10 @@ export class SqliteGraphReader {
         target: {
           raw: row.ref_name,
           member: row.member_name,
-          receiver: row.receiver_kind && row.receiver_name
-            ? { kind: row.receiver_kind, name: row.receiver_name }
-            : undefined,
+          receiver:
+            row.receiver_kind && row.receiver_name
+              ? { kind: row.receiver_kind, name: row.receiver_name }
+              : undefined,
           ...resolutionHintsField(row.resolution_hints),
         },
         reason: row.reason,
@@ -157,9 +161,10 @@ export class SqliteGraphReader {
       const target = {
         raw: row.ref_name,
         member: row.member_name ?? row.ref_name,
-        receiver: row.receiver_kind && row.receiver_name
-          ? { kind: row.receiver_kind, name: row.receiver_name }
-          : undefined,
+        receiver:
+          row.receiver_kind && row.receiver_name
+            ? { kind: row.receiver_kind, name: row.receiver_name }
+            : undefined,
         ...resolutionHintsField(row.resolution_hints),
       } as DynamicBoundary["target"];
       const candidateRows = hints?.receiverType
@@ -176,18 +181,19 @@ export class SqliteGraphReader {
       return {
         sourceId: row.owner_id,
         target,
-        reason: candidates.length > 1 || hints?.dispatch
-          ? "polymorphic_dispatch"
-          : row.receiver_kind === "owner" || row.receiver_kind === "super"
+        reason:
+          candidates.length > 1 || hints?.dispatch
             ? "polymorphic_dispatch"
-            : "unknown_receiver_type",
+            : row.receiver_kind === "owner" || row.receiver_kind === "super"
+              ? "polymorphic_dispatch"
+              : "unknown_receiver_type",
         candidates,
         candidatesTruncated: candidateRows.length > 64,
         candidateDetails: candidates.map((targetId) => ({
           targetId,
           reason: hints?.genericBounds?.length
-            ? "generic_bound" as const
-            : "hierarchy" as const,
+            ? ("generic_bound" as const)
+            : ("hierarchy" as const),
           confidence: 0.5,
         })),
       };
@@ -581,7 +587,10 @@ export class SqliteGraphReader {
       const next: string[] = [];
       const active = new Set(frontier);
       const remaining = Math.max(0, limit - ordered.length);
-      let edgeBudget = Math.min(MAX_TRAVERSAL_EDGE_READ, Math.max(1, remaining));
+      let edgeBudget = Math.min(
+        MAX_TRAVERSAL_EDGE_READ,
+        Math.max(1, remaining),
+      );
       while (next.length < remaining) {
         const adjacent = this.adjacentEdges(
           frontier,
@@ -598,7 +607,10 @@ export class SqliteGraphReader {
             if (ordered.length >= Math.max(0, limit))
               return this.refsForIds(ordered);
           }
-        if (adjacent.length < edgeBudget || edgeBudget >= MAX_TRAVERSAL_EDGE_READ)
+        if (
+          adjacent.length < edgeBudget ||
+          edgeBudget >= MAX_TRAVERSAL_EDGE_READ
+        )
           break;
         edgeBudget = Math.min(MAX_TRAVERSAL_EDGE_READ, edgeBudget * 2);
       }
@@ -642,7 +654,13 @@ export class SqliteGraphReader {
     const buckets = new Map<GraphEdgeKind, GraphEdge[]>();
     const exhausted = new Set<GraphEdgeKind>();
     for (const kind of requested) {
-      const rows = this.queryDirectionalEdgeKind(ids, kind, direction, quota, 0);
+      const rows = this.queryDirectionalEdgeKind(
+        ids,
+        kind,
+        direction,
+        quota,
+        0,
+      );
       buckets.set(kind, rows);
       if (rows.length < quota) exhausted.add(kind);
     }
@@ -653,7 +671,11 @@ export class SqliteGraphReader {
         if (exhausted.has(kind)) continue;
         const bucket = buckets.get(kind)!;
         const rows = this.queryDirectionalEdgeKind(
-          ids, kind, direction, quota, bucket.length,
+          ids,
+          kind,
+          direction,
+          quota,
+          bucket.length,
         );
         bucket.push(...rows);
         progressed ||= rows.length > 0;
@@ -674,9 +696,10 @@ export class SqliteGraphReader {
   ): GraphEdge[] {
     if (REL_KINDS.has(kind) || kind === "INSTANTIATES" || kind === "IMPORTS") {
       const side = direction === "outgoing" ? "src_id" : "dst_id";
-      const fileFlags = kind === "IMPORTS"
-        ? "src_is_file=1 AND dst_is_file=1"
-        : "src_is_file=0 AND dst_is_file=0";
+      const fileFlags =
+        kind === "IMPORTS"
+          ? "src_is_file=1 AND dst_is_file=1"
+          : "src_is_file=0 AND dst_is_file=0";
       return this.all<EdgeRow>(
         `SELECT src_id,dst_id,kind,rel,SUM(count) AS count,
                 MIN(first_line) AS first_line,MIN(ref_name) AS ref_name,
@@ -687,7 +710,10 @@ export class SqliteGraphReader {
            AND ${side} IN(SELECT value FROM json_each(?))
          GROUP BY src_id,dst_id,kind,rel
          ORDER BY ${side},src_id,dst_id,rel LIMIT ? OFFSET ?`,
-        kind, ids, limit, offset,
+        kind,
+        ids,
+        limit,
+        offset,
       ).map(toGraphEdge);
     }
     if (kind === "CONTAINS") {
@@ -696,17 +722,21 @@ export class SqliteGraphReader {
         `SELECT parent_id,child_id FROM contains
          WHERE ${side} IN(SELECT value FROM json_each(?))
          ORDER BY ${side},parent_id,child_id LIMIT ? OFFSET ?`,
-        ids, limit, offset,
-      ).map((row) => structuralEdge(
-        row.parent_id, row.child_id, "CONTAINS", "contains",
-      ));
+        ids,
+        limit,
+        offset,
+      ).map((row) =>
+        structuralEdge(row.parent_id, row.child_id, "CONTAINS", "contains"),
+      );
     }
     const side = direction === "outgoing" ? "file_id" : "id";
     return this.all<{ file_id: string; id: string }>(
       `SELECT file_id,id FROM symbols
        WHERE ${side} IN(SELECT value FROM json_each(?))
        ORDER BY ${side},file_id,id LIMIT ? OFFSET ?`,
-      ids, limit, offset,
+      ids,
+      limit,
+      offset,
     ).map((row) => structuralEdge(row.file_id, row.id, "DEFINES", "defines"));
   }
 
@@ -792,9 +822,9 @@ function parseResolutionHints(
   }
 }
 
-function resolutionHintsField(
-  value: string | null,
-): { hints?: ReferenceResolutionHints } {
+function resolutionHintsField(value: string | null): {
+  hints?: ReferenceResolutionHints;
+} {
   const hints = parseResolutionHints(value);
   return hints ? { hints } : {};
 }
@@ -804,7 +834,17 @@ function structuralEdge(
   kind: GraphEdgeKind,
   rel: string,
 ): GraphEdge {
-  return { src, dst, kind, rel, count: 1, first_line: 0, ref_name: rel, provenance: "static", confidence: 1 };
+  return {
+    src,
+    dst,
+    kind,
+    rel,
+    count: 1,
+    first_line: 0,
+    ref_name: rel,
+    provenance: "static",
+    confidence: 1,
+  };
 }
 function dedupeEdges(edges: readonly GraphEdge[]): GraphEdge[] {
   const seen = new Set<string>();

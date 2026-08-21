@@ -46,9 +46,10 @@ export class SqlitePendingRefResolver {
   }
   async resolvePending(options: ResolvePendingOptions = {}): Promise<void> {
     this.assertWritable();
-    const resolvable = this.one<{ count: number }>(
-      "SELECT COUNT(*) AS count FROM unresolved_refs WHERE status IN ('pending','failed')",
-    )?.count ?? 0;
+    const resolvable =
+      this.one<{ count: number }>(
+        "SELECT COUNT(*) AS count FROM unresolved_refs WHERE status IN ('pending','failed')",
+      )?.count ?? 0;
     if (resolvable === 0) return;
     const names = new NameIndex();
     const lookupNames = this.pendingSymbolNames();
@@ -210,8 +211,10 @@ export class SqlitePendingRefResolver {
         })
       : { candidates: [], abstractDispatch: false, rtaActive: false };
     const semanticCandidates = semanticResolution.candidates;
-    if (semanticCandidates.length === 1 &&
-        (!semanticResolution.abstractDispatch || semanticResolution.rtaActive)) {
+    if (
+      semanticCandidates.length === 1 &&
+      (!semanticResolution.abstractDispatch || semanticResolution.rtaActive)
+    ) {
       this.insertSymbolEdge(
         ref,
         semanticCandidates[0]!,
@@ -224,9 +227,11 @@ export class SqlitePendingRefResolver {
       );
       return;
     }
-    if ((semanticResolution.abstractDispatch && !semanticResolution.rtaActive) ||
-        semanticCandidates.length > 1 ||
-        (semanticCandidates.length === 0 && target.hints?.dispatch)) {
+    if (
+      (semanticResolution.abstractDispatch && !semanticResolution.rtaActive) ||
+      semanticCandidates.length > 1 ||
+      (semanticCandidates.length === 0 && target.hints?.dispatch)
+    ) {
       this.persistDynamicCall(ref, target, semanticCandidates);
       return;
     }
@@ -253,9 +258,9 @@ export class SqlitePendingRefResolver {
       reference,
     );
     if (result.status === "external") {
-      this.db.prepare("UPDATE unresolved_refs SET status='external' WHERE id=?").run(
-        ref.id,
-      );
+      this.db
+        .prepare("UPDATE unresolved_refs SET status='external' WHERE id=?")
+        .run(ref.id);
       return;
     }
     if (result.status !== "resolved") {
@@ -276,7 +281,9 @@ export class SqlitePendingRefResolver {
     this.insertSymbolEdge(ref, result.dst, result.edgeKind, {
       provenance: "static",
       confidence: 1,
-      evidence: result.evidence,
+      // A same-file resolution is derivable from the edge endpoints. Persist
+      // only evidence that cannot be reconstructed from the graph itself.
+      evidence: result.evidence === "same_file" ? undefined : result.evidence,
     });
   }
 
@@ -287,12 +294,11 @@ export class SqlitePendingRefResolver {
     preferredFileIds: readonly string[],
   ): string | null {
     if (ref.receiver_kind !== "qualified" || !ref.member_name) return null;
-    const candidates = names.candidates(ref.member_name, [
-      sourceFileId,
-      ...preferredFileIds,
-    ]).filter(
-      (entry) => entry.id !== ref.owner_id && entry.containerId !== undefined,
-    );
+    const candidates = names
+      .candidates(ref.member_name, [sourceFileId, ...preferredFileIds])
+      .filter(
+        (entry) => entry.id !== ref.owner_id && entry.containerId !== undefined,
+      );
     return candidates.length === 1 ? candidates[0]!.id : null;
   }
 
@@ -301,18 +307,20 @@ export class SqlitePendingRefResolver {
     target: NonNullable<PendingRef["target"]>,
     candidates: readonly string[],
   ): void {
-    this.db.prepare(
-      `UPDATE unresolved_refs
+    this.db
+      .prepare(
+        `UPDATE unresolved_refs
        SET status='dynamic',dynamic_reason='polymorphic_dispatch',
            member_name=?,receiver_kind=?,receiver_name=?,resolution_hints=?
        WHERE id=?`,
-    ).run(
-      target.member,
-      target.receiver?.kind ?? null,
-      target.receiver?.name ?? null,
-      target.hints ? JSON.stringify(target.hints) : null,
-      ref.id,
-    );
+      )
+      .run(
+        target.member,
+        target.receiver?.kind ?? null,
+        target.receiver?.name ?? null,
+        target.hints ? JSON.stringify(target.hints) : null,
+        ref.id,
+      );
     this.db.prepare("DELETE FROM edge_candidates WHERE edge_id=?").run(ref.id);
     const insert = this.db.prepare(
       "INSERT INTO edge_candidates(edge_id,target_id,reason,confidence) VALUES(?,?,?,?)",
@@ -320,7 +328,8 @@ export class SqlitePendingRefResolver {
     const reason = target.hints?.genericBounds?.length
       ? "generic_bound"
       : "hierarchy";
-    for (const candidate of candidates) insert.run(ref.id, candidate, reason, 0.65);
+    for (const candidate of candidates)
+      insert.run(ref.id, candidate, reason, 0.65);
   }
 
   private insertSymbolEdge(
@@ -334,13 +343,21 @@ export class SqlitePendingRefResolver {
     } = { provenance: "static", confidence: 1 },
   ): void {
     if (ref.ref_kind === "new") {
-      this.db.prepare(
-        `INSERT OR REPLACE INTO edges(
+      this.db
+        .prepare(
+          `INSERT OR REPLACE INTO edges(
            id,src_id,dst_id,src_is_file,dst_is_file,kind,rel,count,first_line,
            ref_name,source_language,provenance,confidence
          ) VALUES(?,?,?,0,0,'INSTANTIATES','new',1,?,?,?,'static',1)`,
-      ).run(`${ref.id}:instantiates`, ref.owner_id, dst, ref.line, ref.ref_name,
-        ref.source_language);
+        )
+        .run(
+          `${ref.id}:instantiates`,
+          ref.owner_id,
+          dst,
+          ref.line,
+          ref.ref_name,
+          ref.source_language,
+        );
     }
     this.db
       .prepare(
@@ -387,32 +404,34 @@ export class SqlitePendingRefResolver {
       paths,
     );
     if (result.status === "external") {
-      this.db.prepare("UPDATE unresolved_refs SET status='external' WHERE id=?").run(
-        ref.id,
-      );
+      this.db
+        .prepare("UPDATE unresolved_refs SET status='external' WHERE id=?")
+        .run(ref.id);
       return;
     }
     if (result.status !== "resolved") return this.failRef(ref.id, attempt);
-    this.db.prepare(
-      `INSERT OR REPLACE INTO edges(
+    this.db
+      .prepare(
+        `INSERT OR REPLACE INTO edges(
          id,src_id,dst_id,src_is_file,dst_is_file,kind,rel,count,first_line,
          ref_name,source_language,imported_name,local_name,receiver_kind,
          receiver_name,member_name,resolution_hints,provenance,confidence,evidence
        ) VALUES(?,?,?,1,1,'IMPORTS','import',1,?,?,?,?,?,?,?,?,?,'static',1,NULL)`,
-    ).run(
-      ref.id,
-      ref.owner_id,
-      result.fileId,
-      ref.line,
-      ref.ref_name,
-      ref.source_language,
-      ref.imported_name,
-      ref.local_name,
-      ref.receiver_kind,
-      ref.receiver_name,
-      ref.member_name,
-      ref.resolution_hints,
-    );
+      )
+      .run(
+        ref.id,
+        ref.owner_id,
+        result.fileId,
+        ref.line,
+        ref.ref_name,
+        ref.source_language,
+        ref.imported_name,
+        ref.local_name,
+        ref.receiver_kind,
+        ref.receiver_name,
+        ref.member_name,
+        ref.resolution_hints,
+      );
     this.db.prepare("DELETE FROM unresolved_refs WHERE id=?").run(ref.id);
   }
 
@@ -474,10 +493,7 @@ export class SqlitePendingRefResolver {
     return containers;
   }
 
-  private retryRounds(
-    attemptWatermark: number,
-    phase: ResolvePhase,
-  ): number {
+  private retryRounds(attemptWatermark: number, phase: ResolvePhase): number {
     const phaseCondition = resolvePhaseCondition(phase);
     const row = this.one<{ max_count: number }>(
       `SELECT COALESCE(MAX(ref_count),0) AS max_count FROM (
@@ -511,8 +527,7 @@ export class SqlitePendingRefResolver {
 }
 
 function resolvePhaseCondition(phase: ResolvePhase): string {
-  if (phase === "imports")
-    return "(owner_is_file=1 OR ref_kind='import')";
+  if (phase === "imports") return "(owner_is_file=1 OR ref_kind='import')";
   if (phase === "inheritance")
     return "owner_is_file=0 AND ref_kind IN ('extends','implements','overrides')";
   return "owner_is_file=0 AND ref_kind NOT IN ('import','extends','implements','overrides')";

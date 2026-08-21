@@ -201,9 +201,7 @@ test("resolved references move their durable source facts onto edges", async () 
   class InspectableGraph extends SqliteGraphStorage {
     resolvedOccurrenceCount() {
       return this.database.db
-        .prepare(
-          "SELECT COUNT(*) AS count FROM edges WHERE kind='CALLS'",
-        )
+        .prepare("SELECT COUNT(*) AS count FROM edges WHERE kind='CALLS'")
         .get().count;
     }
     graphTableNames() {
@@ -254,8 +252,18 @@ test("unchanged resolve does not replay stable receiver facts", async () => {
     "stable-receivers",
     [
       ...callers,
-      { id: "receiver-type", kind: "class", is_exported: false, name: "Receiver" },
-      { id: "receiver-helper", kind: "method", is_exported: false, name: "helper" },
+      {
+        id: "receiver-type",
+        kind: "class",
+        is_exported: false,
+        name: "Receiver",
+      },
+      {
+        id: "receiver-helper",
+        kind: "method",
+        is_exported: false,
+        name: "helper",
+      },
     ],
     [edge("receiver-type", "receiver-helper", "CONTAINS", "contains")],
     callers.map((caller, occurrence) =>
@@ -299,11 +307,16 @@ test("new same-name symbols invalidate ordinary resolved projections", async () 
     [],
   );
   await graph.resolvePending();
-  assert.deepEqual(graph.callees("caller", 1, 10).map((item) => item.id), ["target-a"]);
+  assert.deepEqual(
+    graph.callees("caller", 1, 10).map((item) => item.id),
+    ["target-a"],
+  );
   assert.equal(
-    graph.database.db.prepare(
-      "SELECT evidence FROM edges WHERE src_id='caller' AND kind='CALLS'",
-    ).get().evidence,
+    graph.database.db
+      .prepare(
+        "SELECT evidence FROM edges WHERE src_id='caller' AND kind='CALLS'",
+      )
+      .get().evidence,
     "workspace_unique",
   );
 
@@ -325,23 +338,42 @@ test("new same-name symbols preserve same-file resolved projections", async () =
   graph.upsertFileGraph(
     "local-file",
     [
-      { id: "local-caller", kind: "function", is_exported: false, name: "caller" },
-      { id: "local-target", kind: "function", is_exported: false, name: "target" },
+      {
+        id: "local-caller",
+        kind: "function",
+        is_exported: false,
+        name: "caller",
+      },
+      {
+        id: "local-target",
+        kind: "function",
+        is_exported: false,
+        name: "target",
+      },
     ],
     [edge("local-caller", "local-target", "CALLS", "call")],
     [],
   );
 
   assert.equal(
-    graph.database.db.prepare(
-      "SELECT evidence FROM edges WHERE src_id='local-caller' AND kind='CALLS'",
-    ).get().evidence,
-    "same_file",
+    graph.database.db
+      .prepare(
+        "SELECT evidence FROM edges WHERE src_id='local-caller' AND kind='CALLS'",
+      )
+      .get().evidence,
+    null,
   );
 
   graph.upsertFileGraph(
     "unrelated-file",
-    [{ id: "unrelated-target", kind: "function", is_exported: true, name: "target" }],
+    [
+      {
+        id: "unrelated-target",
+        kind: "function",
+        is_exported: true,
+        name: "target",
+      },
+    ],
     [],
     [],
   );
@@ -355,11 +387,99 @@ test("new same-name symbols preserve same-file resolved projections", async () =
   graph.close();
 });
 
+test("new symbols in an imported file invalidate preferred-file projections", async () => {
+  const sourceFiles = [
+    { id: "caller-file", relativePath: "src/caller.ts" },
+    { id: "preferred-a", relativePath: "src/a.ts" },
+    { id: "preferred-b", relativePath: "src/b.ts" },
+  ].map((item) => ({
+    ...item,
+    collectionId: "collection-1",
+    absolutePath: `/repo/${item.relativePath}`,
+    rootPath: "/repo",
+    sizeBytes: 1,
+    lastModifiedTime: 1,
+    kind: "code",
+    format: "typescript",
+  }));
+  const graph = new SqliteGraphStorage("", { inMemory: true });
+  graph.upsertFileGraph(
+    "caller-file",
+    [
+      {
+        id: "preferred-caller",
+        kind: "function",
+        is_exported: true,
+        name: "caller",
+      },
+    ],
+    [],
+    [
+      rawRef({ owner: "preferred-caller", refName: "target", line: 1 }),
+      rawRef({ type: "import", owner: "caller-file", refName: "./a", line: 1 }),
+      rawRef({ type: "import", owner: "caller-file", refName: "./b", line: 2 }),
+    ],
+  );
+  graph.upsertFileGraph(
+    "preferred-a",
+    [
+      {
+        id: "preferred-target-a",
+        kind: "function",
+        is_exported: true,
+        name: "target",
+      },
+    ],
+    [],
+    [],
+  );
+  graph.upsertFileGraph("preferred-b", [], [], []);
+  await graph.resolvePending({ files: sourceFiles });
+
+  assert.deepEqual(
+    graph.callees("preferred-caller", 1, 10).map((item) => item.id),
+    ["preferred-target-a"],
+  );
+  assert.equal(
+    graph.database.db
+      .prepare(
+        "SELECT evidence FROM edges WHERE src_id='preferred-caller' AND kind='CALLS'",
+      )
+      .get().evidence,
+    "preferred_file",
+  );
+  graph.upsertFileGraph(
+    "preferred-b",
+    [
+      {
+        id: "preferred-target-b",
+        kind: "function",
+        is_exported: true,
+        name: "target",
+      },
+    ],
+    [],
+    [],
+  );
+  await graph.resolvePending({ files: sourceFiles });
+
+  assert.deepEqual(graph.callees("preferred-caller", 1, 10), []);
+  assert.equal(graph.stats().failedRefCount, 1);
+  graph.close();
+});
+
 test("renaming a receiver type invalidates existing dynamic candidates", async () => {
   const graph = new SqliteGraphStorage("", { inMemory: true });
   graph.upsertFileGraph(
     "contract",
-    [{ id: "old-contract", kind: "interface", is_exported: true, name: "OldContract" }],
+    [
+      {
+        id: "old-contract",
+        kind: "interface",
+        is_exported: true,
+        name: "OldContract",
+      },
+    ],
     [],
     [],
   );
@@ -374,8 +494,14 @@ test("renaming a receiver type invalidates existing dynamic candidates", async (
     [
       edge("impl-a", "helper-a", "CONTAINS", "contains"),
       edge("impl-b", "helper-b", "CONTAINS", "contains"),
-      { ...edge("impl-a", "old-contract", "INHERITS", "implements"), ref_name: "OldContract" },
-      { ...edge("impl-b", "old-contract", "INHERITS", "implements"), ref_name: "OldContract" },
+      {
+        ...edge("impl-a", "old-contract", "INHERITS", "implements"),
+        ref_name: "OldContract",
+      },
+      {
+        ...edge("impl-b", "old-contract", "INHERITS", "implements"),
+        ref_name: "OldContract",
+      },
     ],
     [],
   );
@@ -385,18 +511,22 @@ test("renaming a receiver type invalidates existing dynamic candidates", async (
     [],
     [],
   );
-  graph.database.db.prepare(
-    `INSERT INTO unresolved_refs(
+  graph.database.db
+    .prepare(
+      `INSERT INTO unresolved_refs(
        id,owner_id,owner_is_file,ref_name,ref_kind,line,source_language,
        receiver_kind,receiver_name,member_name,resolution_hints,status,
        last_attempt,dynamic_reason
      ) VALUES('dynamic-call','caller',0,'value.helper','call',1,'typescript',
        'qualified','value','helper',?,'dynamic',0,'polymorphic_dispatch')`,
-  ).run(JSON.stringify({
-    receiverType: "OldContract",
-    candidateTypes: ["OldContract"],
-    dispatch: "interface",
-  }));
+    )
+    .run(
+      JSON.stringify({
+        receiverType: "OldContract",
+        candidateTypes: ["OldContract"],
+        dispatch: "interface",
+      }),
+    );
   const insertCandidate = graph.database.db.prepare(
     "INSERT INTO edge_candidates(edge_id,target_id,reason,confidence) VALUES('dynamic-call',?,'hierarchy',0.65)",
   );
@@ -411,7 +541,14 @@ test("renaming a receiver type invalidates existing dynamic candidates", async (
 
   graph.upsertFileGraph(
     "contract",
-    [{ id: "new-contract", kind: "interface", is_exported: true, name: "NewContract" }],
+    [
+      {
+        id: "new-contract",
+        kind: "interface",
+        is_exported: true,
+        name: "NewContract",
+      },
+    ],
     [],
     [],
   );
@@ -451,23 +588,30 @@ test("RTA invalidation expands concrete types to receiver interfaces", async () 
     [edge("maker", "alpha", "INSTANTIATES", "new")],
     [],
   );
-  graph.database.db.prepare(
-    `INSERT INTO edges(
+  graph.database.db
+    .prepare(
+      `INSERT INTO edges(
        id,src_id,dst_id,src_is_file,dst_is_file,kind,rel,count,first_line,
        ref_name,source_language,receiver_kind,receiver_name,member_name,
        resolution_hints,provenance,confidence,evidence
      ) VALUES('dispatch','caller','fallback-run',0,0,'CALLS','call',1,1,
        'value.run','java','qualified','value','run',?,'heuristic',0.75,
        'receiver_type_member')`,
-  ).run(JSON.stringify({
-    receiverType: "Runner",
-    candidateTypes: ["Runner"],
-    dispatch: "interface",
-  }));
+    )
+    .run(
+      JSON.stringify({
+        receiverType: "Runner",
+        candidateTypes: ["Runner"],
+        dispatch: "interface",
+      }),
+    );
 
   graph.deleteFileGraph("maker-file");
 
-  assert.equal(graph.edges(["caller", "fallback-run"], ["CALLS"], 10).edges.length, 0);
+  assert.equal(
+    graph.edges(["caller", "fallback-run"], ["CALLS"], 10).edges.length,
+    0,
+  );
   assert.equal(graph.stats().pendingRefCount, 1);
   graph.close();
 });
@@ -477,13 +621,28 @@ test("RTA distinguishes unrelated same-name concrete type identities", async () 
   graph.upsertFileGraph(
     "types",
     [
-      { id: "runner-one", kind: "interface", is_exported: true, name: "RunnerOne" },
+      {
+        id: "runner-one",
+        kind: "interface",
+        is_exported: true,
+        name: "RunnerOne",
+      },
       { id: "alpha-one", kind: "class", is_exported: true, name: "Alpha" },
       { id: "run-one", kind: "method", is_exported: true, name: "run" },
-      { id: "runner-two", kind: "interface", is_exported: true, name: "RunnerTwo" },
+      {
+        id: "runner-two",
+        kind: "interface",
+        is_exported: true,
+        name: "RunnerTwo",
+      },
       { id: "alpha-two", kind: "class", is_exported: true, name: "Alpha" },
       { id: "run-two", kind: "method", is_exported: true, name: "run" },
-      { id: "same-name-caller", kind: "function", is_exported: true, name: "caller" },
+      {
+        id: "same-name-caller",
+        kind: "function",
+        is_exported: true,
+        name: "caller",
+      },
     ],
     [
       edge("alpha-one", "run-one", "CONTAINS", "contains"),
@@ -495,29 +654,47 @@ test("RTA distinguishes unrelated same-name concrete type identities", async () 
   );
   graph.upsertFileGraph(
     "maker-one-file",
-    [{ id: "maker-one", kind: "function", is_exported: true, name: "makerOne" }],
+    [
+      {
+        id: "maker-one",
+        kind: "function",
+        is_exported: true,
+        name: "makerOne",
+      },
+    ],
     [edge("maker-one", "alpha-one", "INSTANTIATES", "new")],
     [],
   );
   graph.upsertFileGraph(
     "maker-two-file",
-    [{ id: "maker-two", kind: "function", is_exported: true, name: "makerTwo" }],
+    [
+      {
+        id: "maker-two",
+        kind: "function",
+        is_exported: true,
+        name: "makerTwo",
+      },
+    ],
     [edge("maker-two", "alpha-two", "INSTANTIATES", "new")],
     [],
   );
-  graph.database.db.prepare(
-    `INSERT INTO edges(
+  graph.database.db
+    .prepare(
+      `INSERT INTO edges(
        id,src_id,dst_id,src_is_file,dst_is_file,kind,rel,count,first_line,
        ref_name,source_language,receiver_kind,receiver_name,member_name,
        resolution_hints,provenance,confidence,evidence
      ) VALUES('same-name-dispatch','same-name-caller','run-one',0,0,
        'CALLS','call',1,1,'value.run','java','qualified','value','run',?,
        'heuristic',0.75,'receiver_type_member')`,
-  ).run(JSON.stringify({
-    receiverType: "RunnerOne",
-    candidateTypes: ["RunnerOne"],
-    dispatch: "interface",
-  }));
+    )
+    .run(
+      JSON.stringify({
+        receiverType: "RunnerOne",
+        candidateTypes: ["RunnerOne"],
+        dispatch: "interface",
+      }),
+    );
 
   graph.deleteFileGraph("maker-one-file");
 
@@ -581,7 +758,12 @@ test("inheritance batches are fully drained before receiver calls", async () => 
     is_exported: false,
     name: `Child${index}`,
   }));
-  const run = { id: "child-run", kind: "method", is_exported: false, name: "run" };
+  const run = {
+    id: "child-run",
+    kind: "method",
+    is_exported: false,
+    name: "run",
+  };
   graph.upsertFileGraph(
     "children",
     [...children, run],
@@ -897,11 +1079,13 @@ test("occurrence edges are grouped before traversal limits are applied", async (
   await graph.resolvePending();
 
   assert.deepEqual(
-    graph.outgoingEdges(["caller"], ["CALLS"], 2).map((edge) => [
-      edge.dst,
-      edge.count,
-    ]),
-    [["b", 3], ["c", 1]],
+    graph
+      .outgoingEdges(["caller"], ["CALLS"], 2)
+      .map((edge) => [edge.dst, edge.count]),
+    [
+      ["b", 3],
+      ["c", 1],
+    ],
   );
   assert.deepEqual(
     graph.context("caller").outgoing.map((edge) => edge.id),
@@ -932,7 +1116,8 @@ test("mixed directional queries reserve budget per edge kind and refill unused q
   );
 
   assert.deepEqual(
-    graph.outgoingEdges(["a"], ["CALLS", "CONTAINS"], 2)
+    graph
+      .outgoingEdges(["a"], ["CALLS", "CONTAINS"], 2)
       .map((item) => item.kind),
     ["CALLS", "CONTAINS"],
   );
@@ -962,12 +1147,14 @@ test("traversal node limits refill edges that point to an already seen node", ()
   );
 
   assert.deepEqual(
-    graph.traverse("a", {
-      edgeKinds: ["CALLS", "REFS"],
-      direction: "outgoing",
-      maxDepth: 1,
-      limit: 2,
-    }).map((item) => item.id),
+    graph
+      .traverse("a", {
+        edgeKinds: ["CALLS", "REFS"],
+        direction: "outgoing",
+        maxDepth: 1,
+        limit: 2,
+      })
+      .map((item) => item.id),
     ["b", "c"],
   );
   graph.close();
@@ -977,7 +1164,9 @@ test("reprojecting a local constructor keeps one instantiation fact", async () =
   class InspectableGraph extends SqliteGraphStorage {
     instantiationRows() {
       return this.database.db
-        .prepare("SELECT COUNT(*) AS count FROM edges WHERE kind='INSTANTIATES'")
+        .prepare(
+          "SELECT COUNT(*) AS count FROM edges WHERE kind='INSTANTIATES'",
+        )
         .get().count;
     }
   }
@@ -1007,9 +1196,10 @@ test("reprojecting a local constructor keeps one instantiation fact", async () =
     graph.outgoingEdges(["make"], ["INSTANTIATES"], 10)[0]?.count,
     1,
   );
-  assert.deepEqual(graph.callees("make", 1, 10).map((item) => item.id), [
-    "local-widget",
-  ]);
+  assert.deepEqual(
+    graph.callees("make", 1, 10).map((item) => item.id),
+    ["local-widget"],
+  );
   graph.close();
 });
 

@@ -44,13 +44,16 @@ export type SymContext = {
 };
 
 export type GraphEdgeKind =
-  "CALLS" | "REFS" | "INHERITS" | "CONTAINS" | "DEFINES" | "IMPORTS" | "INSTANTIATES";
+  | "CALLS"
+  | "REFS"
+  | "INHERITS"
+  | "CONTAINS"
+  | "DEFINES"
+  | "IMPORTS"
+  | "INSTANTIATES";
 
 export type ResolutionEvidence =
-  | "same_file"
-  | "preferred_file"
-  | "container_scope"
-  | "workspace_unique";
+  "same_file" | "preferred_file" | "container_scope" | "workspace_unique";
 
 /** A persisted graph edge with its original relation metadata intact. */
 export type GraphEdge = {
@@ -240,7 +243,10 @@ export interface GraphReader {
     edgeKinds: readonly GraphEdgeKind[],
     limit: number,
   ): InducedEdgesResult;
-  dynamicBoundaries(nodeIds: readonly string[], limit: number): DynamicBoundary[];
+  dynamicBoundaries(
+    nodeIds: readonly string[],
+    limit: number,
+  ): DynamicBoundary[];
 
   stats(): GraphStats;
 }

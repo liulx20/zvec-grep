@@ -120,7 +120,9 @@ test("nested entity parameters do not overwrite outer receiver types", async () 
       }`,
     ),
   );
-  const invoke = calls.find((owner) => owner.sites.some((site) => site.name === "value.run"));
+  const invoke = calls.find((owner) =>
+    owner.sites.some((site) => site.name === "value.run"),
+  );
   const site = invoke?.sites.find((item) => item.name === "value.run");
   assert.ok(site);
   assert.equal(site.target.hints?.receiverType, "Runner");
@@ -143,7 +145,8 @@ test("receiver type hints follow block scope and call position", async () => {
       }`,
     ),
   );
-  const runSites = calls.flatMap((owner) => owner.sites)
+  const runSites = calls
+    .flatMap((owner) => owner.sites)
     .filter((site) => site.name === "value.run");
   assert.equal(runSites.length, 2);
   assert.deepEqual(
@@ -168,7 +171,9 @@ for (const fixture of [
     const calls = await collectFunctionCallSites(
       source("typescript", "facts.ts", fixture.text),
     );
-    const site = calls.flatMap((owner) => owner.sites).find((item) => item.name === fixture.raw);
+    const site = calls
+      .flatMap((owner) => owner.sites)
+      .find((item) => item.name === fixture.raw);
     assert.ok(site);
     assert.equal(site.target.hints?.receiverType, "Runner");
   });
@@ -246,7 +251,9 @@ for (const fixture of [
     const calls = await collectFunctionCallSites(
       source(fixture.format, fixture.path, fixture.text),
     );
-    const site = calls.flatMap((owner) => owner.sites).find((item) => item.name === fixture.raw);
+    const site = calls
+      .flatMap((owner) => owner.sites)
+      .find((item) => item.name === fixture.raw);
     assert.ok(site);
     assert.deepEqual(site.target.hints, fixture.hints);
   });

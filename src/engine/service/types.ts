@@ -157,7 +157,13 @@ export type ZvecGrepGraphNode = {
 };
 
 export type ZvecGrepGraphEdgeKind =
-  "CONTAINS" | "CALLS" | "REFS" | "INHERITS" | "DEFINES" | "IMPORTS" | "INSTANTIATES";
+  | "CONTAINS"
+  | "CALLS"
+  | "REFS"
+  | "INHERITS"
+  | "DEFINES"
+  | "IMPORTS"
+  | "INSTANTIATES";
 
 export type ZvecGrepGraphEdge = {
   src: string;

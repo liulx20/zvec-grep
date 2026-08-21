@@ -39,9 +39,11 @@ export async function extractFileGraph(
     "imports" | "calls" | "refs" | "inheritance" | "ownership"
   >,
 ): Promise<FileGraphInput> {
-  const analysis = preparedAnalysis ?? (source.kind === "text" && source.file.kind === "code"
-    ? await analyzeForIndexing(source)
-    : undefined);
+  const analysis =
+    preparedAnalysis ??
+    (source.kind === "text" && source.file.kind === "code"
+      ? await analyzeForIndexing(source)
+      : undefined);
   const base = fileGraphFromFragments(
     source.file.id,
     fragments,

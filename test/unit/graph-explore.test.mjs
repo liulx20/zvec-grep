@@ -88,7 +88,9 @@ test("exploreSubgraph bounds failed call-path attempts and edge reads", () => {
   });
 
   assert.equal(result.rootIds.length, 16);
-  assert.ok(result.rootIds.every((id) => result.nodes.some((node) => node.id === id)));
+  assert.ok(
+    result.rootIds.every((id) => result.nodes.some((node) => node.id === id)),
+  );
   assert.equal(graph.pathAttempts, 32);
   assert.ok(graph.edgeBudget <= 20_000);
   graph.close();

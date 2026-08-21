@@ -94,10 +94,11 @@ export function exploreGraph(
   });
   const { nodes, edges, edgesTruncated, callPaths } = subgraph;
   const dynamicBoundaryLimit = Math.min(100, maxNodes);
-  const dynamicBoundaryRows = graph.dynamicBoundaries?.(
-    nodes.map((node) => node.id),
-    dynamicBoundaryLimit + 1,
-  ) ?? [];
+  const dynamicBoundaryRows =
+    graph.dynamicBoundaries?.(
+      nodes.map((node) => node.id),
+      dynamicBoundaryLimit + 1,
+    ) ?? [];
   const dynamicBoundaries = dynamicBoundaryRows.slice(0, dynamicBoundaryLimit);
   const dynamicBoundariesTruncated =
     dynamicBoundaryRows.length > dynamicBoundaryLimit;

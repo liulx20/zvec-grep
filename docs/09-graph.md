@@ -200,7 +200,9 @@ erDiagram
   未解析统计分别提供 `pendingRefCount`、`failedRefCount`、`dynamicBoundaryCount` 和
   `externalRefCount`；兼容字段 `refCount` 等于 pending 与 failed 的合计。
 - `edges.provenance` 区分 `static` 和 `heuristic`；`confidence` 保存关系置信度，`evidence`
-  保存启发式规则，例如 `unique_member_in_visible_files`。静态边的默认置信度为 1。
+  只保存无法由端点推导的解析依据，例如 `preferred_file`、`workspace_unique` 和
+  `unique_member_in_visible_files`。同文件静态关系的 `evidence` 留空，可由 source/target 所属文件推导，
+  避免为每条 occurrence 重复存储 `same_file`。静态边的默认置信度为 1。
 - `unresolved_refs` 与 `edges` 都保留 receiver、member 和 resolution hints；成功解析不会丢失重新投影所需的信息。
   `resolution_hints` 以 JSON 保存语言分析器提供的 receiver type、泛型约束、候选类型和分派方式。
   `last_attempt` 用于控制失败引用的公平分批重试。
@@ -594,6 +596,8 @@ Go 支持方法 receiver、参数类型和类型参数 constraint；Rust 支持�
 会按语言的结构化 typing 规则在可见文件内使用 method set 候选；Java interface 和 Rust trait 必须来自
 显式 `implements` / trait impl 关系，不能用无关类的同名方法补候选。唯一候选可以生成带 provenance/confidence 的关系；
 多个候选保留为 `polymorphic_dispatch` boundary，不会伪造唯一调用边。
+Go method set 校验会沿嵌入 interface/type 的 `INHERITS` provider closure 递归展开，因此 promoted method
+也可用于判断一个具体类型是否完整实现 interface。
 
 候选选择同时使用方法 `arity` 过滤重载。字段、局部变量显式类型以及简单的 `new Type()` 赋值会补充
 receiver type；`INSTANTIATES` 记录实际构造过的类型。当 CHA 得到多个实现且其中只有部分类型被实例化时，

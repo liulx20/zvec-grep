@@ -273,7 +273,12 @@ export type EntityOwnership = {
 
 function emptyPreparedCodeAnalysis(): PreparedCodeAnalysis {
   return {
-    fragments: [], imports: [], calls: [], refs: [], inheritance: [], ownership: [],
+    fragments: [],
+    imports: [],
+    calls: [],
+    refs: [],
+    inheritance: [],
+    ownership: [],
   };
 }
 
@@ -396,9 +401,11 @@ function walkCodeNode(
       const name = adapter.extractName(child);
       const scopeNode = adapter.enterScopeNode?.(child) ?? child;
       const indexedScope = isEntity
-        ? (adapter.resolveEntities?.(child) ?? [
-            adapter.resolveEntity ? adapter.resolveEntity(child) : child,
-          ]).find((entity) => sameNode(entity, scopeNode))
+        ? (
+            adapter.resolveEntities?.(child) ?? [
+              adapter.resolveEntity ? adapter.resolveEntity(child) : child,
+            ]
+          ).find((entity) => sameNode(entity, scopeNode))
         : undefined;
       walkCodeNode(
         scopeNode,
@@ -416,13 +423,19 @@ function walkCodeNode(
   }
 }
 
-function ownershipFromEntities(entities: readonly CodeEntity[]): EntityOwnership[] {
-  return entities.flatMap((entity) => entity.ownerStartOffset === undefined
-    ? []
-    : [{
-        parentStartOffset: entity.ownerStartOffset,
-        childStartOffset: entity.node.startIndex,
-      }]);
+function ownershipFromEntities(
+  entities: readonly CodeEntity[],
+): EntityOwnership[] {
+  return entities.flatMap((entity) =>
+    entity.ownerStartOffset === undefined
+      ? []
+      : [
+          {
+            parentStartOffset: entity.ownerStartOffset,
+            childStartOffset: entity.node.startIndex,
+          },
+        ],
+  );
 }
 
 function codeEntityToSearchFragments(

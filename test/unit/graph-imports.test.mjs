@@ -270,7 +270,14 @@ test("deleted and re-added import targets are reprojected from source facts", as
     caller.id,
     [],
     [],
-    [rawRef({ type: "import", owner: caller.id, refName: "./target", line: 1 })],
+    [
+      rawRef({
+        type: "import",
+        owner: caller.id,
+        refName: "./target",
+        line: 1,
+      }),
+    ],
   );
   graph.upsertFileGraph(target.id, [], [], []);
   await graph.resolvePending({ files: [caller, target] });

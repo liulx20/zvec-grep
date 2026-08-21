@@ -190,9 +190,7 @@ function relationNotes(result: ExploreOutput, fileId: string): string[] {
       continue;
     }
     if (srcIn && dstIn) {
-      notes.push(
-        relationNote(result, edge),
-      );
+      notes.push(relationNote(result, edge));
     } else if (srcIn) {
       notes.push(relationNote(result, edge));
     } else {
@@ -209,9 +207,10 @@ function relationNote(
   result: ExploreOutput,
   edge: ExploreOutput["edges"][number],
 ): string {
-  const certainty = edge.provenance === "heuristic"
-    ? `? confidence=${edge.confidence.toFixed(2)}`
-    : "";
+  const certainty =
+    edge.provenance === "heuristic"
+      ? `? confidence=${edge.confidence.toFixed(2)}`
+      : "";
   return `${shortName(result, edge.src)} -${edge.kind}${certainty}-> ${shortName(result, edge.dst)}`;
 }
 

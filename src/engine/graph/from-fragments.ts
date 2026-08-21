@@ -100,25 +100,31 @@ export function fileGraphFromFragments(
       continue;
     }
     const parentFragments = publicFragments
-      .filter((candidate) =>
-        candidate.metadata?.kind === "code" &&
-        candidate.metadata.symbolName === parentName &&
-        candidate.range.kind === "text" &&
-        fragment.range.kind === "text" &&
-        candidate.range.startOffset <= fragment.range.startOffset &&
-        candidate.range.endOffset >= fragment.range.endOffset &&
-        publicEntityId(candidate) !== publicEntityId(fragment)
+      .filter(
+        (candidate) =>
+          candidate.metadata?.kind === "code" &&
+          candidate.metadata.symbolName === parentName &&
+          candidate.range.kind === "text" &&
+          fragment.range.kind === "text" &&
+          candidate.range.startOffset <= fragment.range.startOffset &&
+          candidate.range.endOffset >= fragment.range.endOffset &&
+          publicEntityId(candidate) !== publicEntityId(fragment),
       )
       .sort((left, right) => {
         if (left.range.kind !== "text" || right.range.kind !== "text") return 0;
-        return (left.range.endOffset - left.range.startOffset) -
-          (right.range.endOffset - right.range.startOffset);
+        return (
+          left.range.endOffset -
+          left.range.startOffset -
+          (right.range.endOffset - right.range.startOffset)
+        );
       });
     const containingParent = parentFragments[0];
     const parents = byName.get(parentName);
     const parentId = containingParent
       ? publicEntityId(containingParent)
-      : parents?.length === 1 ? parents[0] : undefined;
+      : parents?.length === 1
+        ? parents[0]
+        : undefined;
     if (!parentId) {
       continue;
     }
@@ -142,15 +148,18 @@ function containsEdge(
     rel: "contains",
     count: 1,
     first_line: 0,
-    ref_name: fragment.metadata?.kind === "code"
-      ? (fragment.metadata.symbolName ?? childId)
-      : childId,
+    ref_name:
+      fragment.metadata?.kind === "code"
+        ? (fragment.metadata.symbolName ?? childId)
+        : childId,
     kind: "CONTAINS",
   };
 }
 
 function signatureReturnType(signature: string): string | undefined {
-  const match = signature.match(/\)\s*(?::|->)?\s*([A-Za-z_][^\s{]*)\s*(?:\{|$)/);
+  const match = signature.match(
+    /\)\s*(?::|->)?\s*([A-Za-z_][^\s{]*)\s*(?:\{|$)/,
+  );
   return match?.[1];
 }
 

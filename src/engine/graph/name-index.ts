@@ -57,14 +57,16 @@ export class NameIndex {
     containerNames: readonly string[] = [],
     containerIds: readonly string[] = [],
   ): NameEntry | null {
-    return this.lookupWithEvidence(
-      refName,
-      srcFile,
-      preferredFileIds,
-      allowBareFallback,
-      containerNames,
-      containerIds,
-    )?.entry ?? null;
+    return (
+      this.lookupWithEvidence(
+        refName,
+        srcFile,
+        preferredFileIds,
+        allowBareFallback,
+        containerNames,
+        containerIds,
+      )?.entry ?? null
+    );
   }
 
   lookupWithEvidence(
@@ -119,10 +121,7 @@ export class NameIndex {
     return null;
   }
 
-  candidates(
-    name: string,
-    fileIds: readonly string[],
-  ): NameEntry[] {
+  candidates(name: string, fileIds: readonly string[]): NameEntry[] {
     const allowed = new Set(fileIds);
     return [...(this.byName.get(name) ?? [])]
       .filter((entry) => allowed.has(entry.fileId))

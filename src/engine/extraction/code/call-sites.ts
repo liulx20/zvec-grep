@@ -72,7 +72,8 @@ export function collectCallSites(
 }
 
 function callArity(node: TSNode): number | undefined {
-  const args = node.childForFieldName("arguments") ??
+  const args =
+    node.childForFieldName("arguments") ??
     node.namedChildren.find((child) =>
       ["arguments", "argument_list", "value_arguments"].includes(child.type),
     );

@@ -13,8 +13,9 @@ export function extractCallableArity(
 ): number | undefined {
   const parameters = findParameterList(node);
   if (!parameters) return undefined;
-  const entries = parameters.namedChildren.filter((child) =>
-    !child.type.includes("comment") && child.type !== "type_parameters"
+  const entries = parameters.namedChildren.filter(
+    (child) =>
+      !child.type.includes("comment") && child.type !== "type_parameters",
   );
   if (entries.length === 1 && /^(?:void)?$/.test(entries[0]!.text.trim()))
     return 0;
@@ -39,22 +40,21 @@ function findParameterList(node: TSNode): TSNode | undefined {
   return undefined;
 }
 
-function parameterArity(
-  node: TSNode,
-  language: string,
-  index: number,
-): number {
+function parameterArity(node: TSNode, language: string, index: number): number {
   const text = node.text.trim();
-  if (language === "rust" && (
-    node.type === "self_parameter" || /^(?:&\s*)?(?:mut\s+)?self\b/.test(text)
-  )) return 0;
+  if (
+    language === "rust" &&
+    (node.type === "self_parameter" || /^(?:&\s*)?(?:mut\s+)?self\b/.test(text))
+  )
+    return 0;
   if (language === "python" && index === 0 && /^(?:self|cls)\b/.test(text))
     return 0;
   if (language === "go") {
     const typeNode = node.childForFieldName("type");
-    const names = node.namedChildren.filter((child) =>
-      (!typeNode || !sameSyntaxNode(child, typeNode)) &&
-      /identifier$/.test(child.type)
+    const names = node.namedChildren.filter(
+      (child) =>
+        (!typeNode || !sameSyntaxNode(child, typeNode)) &&
+        /identifier$/.test(child.type),
     );
     if (names.length > 0) return names.length;
   }
@@ -62,7 +62,9 @@ function parameterArity(
 }
 
 function sameSyntaxNode(left: TSNode, right: TSNode): boolean {
-  return left.type === right.type &&
+  return (
+    left.type === right.type &&
     left.startIndex === right.startIndex &&
-    left.endIndex === right.endIndex;
+    left.endIndex === right.endIndex
+  );
 }
