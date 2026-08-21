@@ -157,7 +157,7 @@ export type ZvecGrepGraphNode = {
 };
 
 export type ZvecGrepGraphEdgeKind =
-  "CONTAINS" | "CALLS" | "REFS" | "INHERITS" | "DEFINES" | "IMPORTS";
+  "CONTAINS" | "CALLS" | "REFS" | "INHERITS" | "DEFINES" | "IMPORTS" | "INSTANTIATES";
 
 export type ZvecGrepGraphEdge = {
   src: string;
@@ -232,10 +232,16 @@ export type ZvecGrepExploreResult = {
         candidateTypes?: string[];
         genericBounds?: string[];
         dispatch?: "static" | "virtual" | "interface" | "trait" | "dynamic";
+        callArity?: number;
       };
     };
     reason: "unknown_receiver_type" | "polymorphic_dispatch";
     candidates: string[];
+    candidateDetails: {
+      targetId: string;
+      reason: "hierarchy" | "generic_bound" | "method_set";
+      confidence: number;
+    }[];
   }[];
   files: ZvecGrepExploreFileBundle[];
   emptyReason?: "graph_unavailable" | "no_seeds" | "no_context";
@@ -334,7 +340,7 @@ export type ZvecGrepGraphRelationship = {
   dstId: string;
   srcLabel: string;
   dstLabel: string;
-  kind: "CALLS" | "REFS" | "INHERITS" | "CONTAINS" | "IMPORTS";
+  kind: "CALLS" | "REFS" | "INHERITS" | "CONTAINS" | "IMPORTS" | "INSTANTIATES";
   scope: "symbol" | "file";
 };
 

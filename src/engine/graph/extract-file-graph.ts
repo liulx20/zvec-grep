@@ -209,6 +209,18 @@ function absorbRelationOwners(input: {
             kind: input.edgeKind,
           });
         }
+        if (site.kind === "new") {
+          const instantiateKey = `${ownerId}\0${dst}\0instantiates\0INSTANTIATES`;
+          input.localEdges.set(instantiateKey, {
+            src: ownerId,
+            dst,
+            rel: "instantiates",
+            count: 1,
+            first_line: site.line,
+            ref_name: site.name,
+            kind: "INSTANTIATES",
+          });
+        }
         continue;
       }
 

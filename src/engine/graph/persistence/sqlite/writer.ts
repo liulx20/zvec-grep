@@ -62,7 +62,7 @@ export class SqliteGraphWriter {
         .prepare("DELETE FROM file_import_bindings WHERE src_file_id=?")
         .run(fileId);
       const insert = this.db.prepare(
-        "INSERT INTO symbols(id,file_id,name,kind,is_exported) VALUES (?,?,?,?,?)",
+        "INSERT INTO symbols(id,file_id,name,kind,is_exported,signature,arity,return_type) VALUES (?,?,?,?,?,?,?,?)",
       );
       for (const node of nodes) {
         insert.run(
@@ -71,6 +71,9 @@ export class SqliteGraphWriter {
           node.name ?? null,
           node.kind,
           node.is_exported ? 1 : 0,
+          node.signature ?? null,
+          node.arity ?? null,
+          node.returnType ?? null,
         );
       }
       for (const edge of edges) this.insertLocalEdge(edge);
@@ -147,6 +150,14 @@ export class SqliteGraphWriter {
           "INSERT OR REPLACE INTO contains(parent_id,child_id) VALUES(?,?)",
         )
         .run(edge.src, edge.dst);
+      return;
+    }
+    if (edge.kind === "INSTANTIATES") {
+      this.db
+        .prepare(
+          "INSERT OR REPLACE INTO instantiates(src_id,type_id,first_line) VALUES(?,?,?)",
+        )
+        .run(edge.src, edge.dst, edge.first_line);
       return;
     }
     this.db

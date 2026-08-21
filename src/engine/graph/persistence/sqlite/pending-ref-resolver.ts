@@ -39,6 +39,7 @@ export class SqlitePendingRefResolver {
   }
   async resolvePending(options: ResolvePendingOptions = {}): Promise<void> {
     this.assertWritable();
+    this.requeueDynamicCalls();
     const names = new NameIndex();
     names.load(
       this.all<
@@ -151,6 +152,7 @@ export class SqlitePendingRefResolver {
           target.hints.candidateTypes ?? [target.hints.receiverType],
           target.member,
           [owner.file_id, ...preferred],
+          target.hints.callArity,
         )
       : [];
     if (semanticCandidates.length === 1) {
@@ -166,7 +168,10 @@ export class SqlitePendingRefResolver {
       );
       return this.deleteRef(ref.id);
     }
-    if (semanticCandidates.length > 1) return this.failRef(ref.id, attempt);
+    if (semanticCandidates.length > 1) {
+      this.persistDynamicCall(ref, target, semanticCandidates);
+      return;
+    }
     const result = resolveRef(
       pending,
       names,
@@ -229,6 +234,7 @@ export class SqlitePendingRefResolver {
     typeNames: readonly string[],
     memberName: string,
     visibleFileIds: readonly string[],
+    callArity?: number,
   ): string[] {
     const names = JSON.stringify([...new Set(typeNames)]);
     const files = JSON.stringify([...new Set(visibleFileIds)]);
@@ -251,19 +257,75 @@ export class SqlitePendingRefResolver {
          FROM contains owned JOIN symbols member ON member.id=owned.child_id
          WHERE member.name=? AND EXISTS(SELECT 1 FROM roots WHERE kind='interface')
            AND member.file_id IN (SELECT value FROM json_each(?))
-       )
-       SELECT DISTINCT member.id
+       ), candidate_members(id,container_id) AS (
+         SELECT DISTINCT member.id,scope.id
        FROM candidate_containers scope
        JOIN contains owned ON owned.parent_id=scope.id
        JOIN symbols member ON member.id=owned.child_id
-       WHERE member.name=?
-       ORDER BY member.id LIMIT 65`,
+       WHERE member.name=? AND (?<0 OR member.arity IS NULL OR member.arity=?)
+       )
+       SELECT id FROM candidate_members
+       WHERE NOT EXISTS(
+         SELECT 1 FROM candidate_members candidate
+         JOIN instantiates made ON made.type_id=candidate.container_id
+       ) OR container_id IN (SELECT type_id FROM instantiates)
+       ORDER BY id LIMIT 65`,
       names,
       files,
       memberName,
       files,
       memberName,
+      callArity ?? -1,
+      callArity ?? -1,
     ).map((row) => row.id);
+  }
+
+  private persistDynamicCall(
+    ref: RefRow,
+    target: NonNullable<PendingRef["target"]>,
+    candidates: readonly string[],
+  ): void {
+    this.db.prepare(
+      `INSERT OR REPLACE INTO dynamic_calls(
+         id,owner_id,ref_name,ref_kind,member_name,line,source_language,
+         receiver_kind,receiver_name,resolution_hints,reason
+       ) VALUES(?,?,?,?,?,?,?,?,?,?,'polymorphic_dispatch')`,
+    ).run(
+      ref.id,
+      ref.owner_id,
+      ref.ref_name,
+      ref.ref_kind,
+      target.member,
+      ref.line,
+      ref.source_language,
+      target.receiver?.kind ?? null,
+      target.receiver?.name ?? null,
+      target.hints ? JSON.stringify(target.hints) : null,
+    );
+    this.db.prepare("DELETE FROM dispatch_candidates WHERE call_id=?").run(ref.id);
+    const insert = this.db.prepare(
+      "INSERT INTO dispatch_candidates(call_id,target_id,reason,confidence) VALUES(?,?,?,?)",
+    );
+    const reason = target.hints?.genericBounds?.length
+      ? "generic_bound"
+      : "hierarchy";
+    for (const candidate of candidates) insert.run(ref.id, candidate, reason, 0.65);
+    this.deleteRef(ref.id);
+  }
+
+  private requeueDynamicCalls(): void {
+    this.transaction(() => {
+      this.db.exec(
+        `INSERT OR REPLACE INTO pending_refs(
+           id,owner_id,owner_is_file,ref_name,ref_kind,line,source_language,
+           receiver_kind,receiver_name,member_name,resolution_hints,status,last_attempt
+         )
+         SELECT id,owner_id,0,ref_name,ref_kind,line,source_language,
+                receiver_kind,receiver_name,member_name,resolution_hints,'pending',0
+         FROM dynamic_calls;
+         DELETE FROM dynamic_calls;`,
+      );
+    });
   }
 
   private insertSymbolEdge(
@@ -276,6 +338,11 @@ export class SqlitePendingRefResolver {
       evidence?: string;
     } = { provenance: "static", confidence: 1 },
   ): void {
+    if (ref.ref_kind === "new") {
+      this.db.prepare(
+        "INSERT OR REPLACE INTO instantiates(src_id,type_id,first_line) VALUES(?,?,?)",
+      ).run(ref.owner_id, dst, ref.line);
+    }
     this.db
       .prepare(
         `INSERT INTO symbol_edges(src_id,dst_id,kind,rel,count,first_line,ref_name,provenance,confidence,evidence)

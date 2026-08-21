@@ -1,4 +1,4 @@
-export const SQLITE_GRAPH_SCHEMA_VERSION = 1;
+export const SQLITE_GRAPH_SCHEMA_VERSION = 2;
 
 export const SQLITE_GRAPH_SCHEMA = `
 PRAGMA foreign_keys = ON;
@@ -6,7 +6,8 @@ CREATE TABLE IF NOT EXISTS graph_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL
 CREATE TABLE IF NOT EXISTS files (id TEXT PRIMARY KEY) STRICT;
 CREATE TABLE IF NOT EXISTS symbols (
  id TEXT PRIMARY KEY, file_id TEXT NOT NULL REFERENCES files(id) ON DELETE CASCADE,
- name TEXT, kind TEXT NOT NULL, is_exported INTEGER NOT NULL CHECK (is_exported IN (0,1))
+ name TEXT, kind TEXT NOT NULL, is_exported INTEGER NOT NULL CHECK (is_exported IN (0,1)),
+ signature TEXT, arity INTEGER, return_type TEXT
 ) STRICT;
 CREATE TABLE IF NOT EXISTS pending_refs (
  id TEXT PRIMARY KEY, owner_id TEXT NOT NULL,
@@ -45,6 +46,25 @@ CREATE TABLE IF NOT EXISTS file_import_bindings (
  local_name TEXT NOT NULL, imported_name TEXT NOT NULL, spec TEXT NOT NULL DEFAULT '',
  PRIMARY KEY(src_file_id,local_name,dst_file_id,imported_name)
 ) STRICT, WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS instantiates (
+ src_id TEXT NOT NULL REFERENCES symbols(id) ON DELETE CASCADE,
+ type_id TEXT NOT NULL REFERENCES symbols(id) ON DELETE CASCADE,
+ first_line INTEGER NOT NULL DEFAULT 0,
+ PRIMARY KEY(src_id,type_id)
+) STRICT, WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS dynamic_calls (
+ id TEXT PRIMARY KEY,
+ owner_id TEXT NOT NULL REFERENCES symbols(id) ON DELETE CASCADE,
+ ref_name TEXT NOT NULL, ref_kind TEXT NOT NULL, member_name TEXT NOT NULL, line INTEGER NOT NULL,
+ source_language TEXT, receiver_kind TEXT, receiver_name TEXT,
+ resolution_hints TEXT, reason TEXT NOT NULL
+) STRICT;
+CREATE TABLE IF NOT EXISTS dispatch_candidates (
+ call_id TEXT NOT NULL REFERENCES dynamic_calls(id) ON DELETE CASCADE,
+ target_id TEXT NOT NULL REFERENCES symbols(id) ON DELETE CASCADE,
+ reason TEXT NOT NULL, confidence REAL NOT NULL,
+ PRIMARY KEY(call_id,target_id)
+) STRICT, WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS symbols_file_id_idx ON symbols(file_id);
 CREATE INDEX IF NOT EXISTS symbols_name_idx ON symbols(name) WHERE name IS NOT NULL;
 CREATE INDEX IF NOT EXISTS symbol_edges_src_kind_idx ON symbol_edges(src_id,kind);
@@ -55,4 +75,6 @@ CREATE INDEX IF NOT EXISTS file_import_bindings_local_idx ON file_import_binding
 CREATE INDEX IF NOT EXISTS pending_refs_name_idx ON pending_refs(ref_name,status);
 CREATE INDEX IF NOT EXISTS pending_refs_owner_idx ON pending_refs(owner_id);
 CREATE INDEX IF NOT EXISTS pending_refs_retry_idx ON pending_refs(ref_name,status,last_attempt,id);
+CREATE INDEX IF NOT EXISTS instantiates_type_idx ON instantiates(type_id);
+CREATE INDEX IF NOT EXISTS dynamic_calls_owner_idx ON dynamic_calls(owner_id);
 `;

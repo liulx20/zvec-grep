@@ -1697,6 +1697,7 @@ function selectGraphRelationships(
     CONTAINS: 2,
     REFS: 3,
     IMPORTS: 4,
+    INSTANTIATES: 2,
   };
   return relations
     .filter((relation) => {

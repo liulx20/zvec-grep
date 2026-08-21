@@ -46,7 +46,13 @@ export const EXPLORE_POLICY = {
   pathLimit: 8,
   blastLimit: 20,
   hierarchyBudgetRatio: 0.25,
-  traverseEdgeKinds: ["CALLS", "REFS", "INHERITS", "CONTAINS"] as const,
+  traverseEdgeKinds: [
+    "CALLS",
+    "REFS",
+    "INHERITS",
+    "CONTAINS",
+    "INSTANTIATES",
+  ] as const,
   rwrEdgeWeights: {
     CALLS: 1,
     INHERITS: 0.9,
@@ -54,6 +60,7 @@ export const EXPLORE_POLICY = {
     REFS: 0.5,
     DEFINES: 0.4,
     IMPORTS: 0.4,
+    INSTANTIATES: 0.6,
   } satisfies Readonly<Record<GraphEdgeKind, number>>,
 };
 

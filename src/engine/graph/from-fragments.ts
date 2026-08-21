@@ -42,6 +42,13 @@ export function fileGraphFromFragments(
       kind,
       is_exported: isExported,
       name: name ?? undefined,
+      ...(metadata?.kind === "code" && metadata.signature
+        ? {
+            signature: metadata.signature,
+            arity: signatureArity(metadata.signature),
+            returnType: signatureReturnType(metadata.signature),
+          }
+        : {}),
     };
   });
 
@@ -91,6 +98,18 @@ export function fileGraphFromFragments(
   }
 
   return { nodes, edges, refs: [] };
+}
+
+function signatureArity(signature: string): number | undefined {
+  const matches = [...signature.matchAll(/\(([^()]*)\)/g)];
+  const parameters = matches.at(-1)?.[1]?.trim();
+  if (parameters === undefined) return undefined;
+  return parameters ? parameters.split(",").length : 0;
+}
+
+function signatureReturnType(signature: string): string | undefined {
+  const match = signature.match(/\)\s*(?::|->)?\s*([A-Za-z_][^\s{]*)\s*(?:\{|$)/);
+  return match?.[1];
 }
 
 /** Test / extractor helper for pending cross-file refs. */

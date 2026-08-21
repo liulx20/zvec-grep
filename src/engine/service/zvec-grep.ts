@@ -1115,6 +1115,9 @@ async function exploreOpenWorkspaceIndex(
       },
       reason: boundary.reason,
       candidates: [...boundary.candidates],
+      candidateDetails: boundary.candidateDetails.map((candidate) => ({
+        ...candidate,
+      })),
     })),
     files: result.files.map((bundle) => ({
       file: mapGraphFile(bundle.file),

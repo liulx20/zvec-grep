@@ -678,6 +678,7 @@ func invoke[T Runner](value T) { value.Run() }
   assert.equal(boundaries[0].reason, "polymorphic_dispatch");
   assert.deepEqual(boundaries[0].target.hints, {
     receiverType: "T",
+    callArity: 0,
     candidateTypes: ["T", "Runner"],
     genericBounds: ["Runner"],
     dispatch: "interface",
@@ -686,6 +687,10 @@ func invoke[T Runner](value T) { value.Run() }
     .map((id) => input.nodes.find((node) => node.id === id)?.name)
     .filter(Boolean);
   assert.deepEqual(candidateNames, ["Run", "Run", "Run"]);
+  assert.equal(graph.stats().refCount, 0);
+  assert.equal(boundaries[0].candidateDetails.length, 3);
+  await graph.resolvePending();
+  assert.equal(graph.dynamicBoundaries([invoke.id], 10).length, 1);
   graph.close();
 });
 
@@ -740,5 +745,85 @@ class Use { void invoke(Runner value) { value.run(); } }
   assert.equal(boundary.target.hints?.receiverType, "Runner");
   assert.equal(boundary.target.hints?.dispatch, "virtual");
   assert.equal(boundary.candidates.length, 2);
+  graph.close();
+});
+
+test("RTA narrows virtual candidates to instantiated implementations", async () => {
+  const file = { ...codeFile("Rta.java"), format: "java" };
+  const source = {
+    kind: "text",
+    file,
+    text: `interface Runner { void run(); }
+class Alpha implements Runner { public void run() {} }
+class Beta implements Runner { public void run() {} }
+class Use {
+  void invoke(Runner value) { value.run(); }
+  void create() { new Alpha(); }
+}
+`,
+  };
+  const input = await extractFileGraph(
+    source,
+    await new CodeExtractor().extract(source),
+  );
+  const invoke = input.nodes.find((node) => node.name === "invoke");
+  const create = input.nodes.find((node) => node.name === "create");
+  const alphaType = input.nodes.find((node) => node.name === "Alpha");
+  const alphaRun = input.nodes.find((node) => {
+    if (node.name !== "run") return false;
+    const parent = input.edges.find(
+      (edge) => edge.kind === "CONTAINS" && edge.dst === node.id,
+    )?.src;
+    return input.nodes.find((candidate) => candidate.id === parent)?.name === "Alpha";
+  });
+  assert.ok(invoke && create && alphaType && alphaRun);
+  assert.ok(input.edges.some((edge) => edge.kind === "INSTANTIATES"));
+
+  const graph = new SqliteGraphStorage("", { inMemory: true });
+  graph.upsertFileGraph(file.id, input.nodes, input.edges, input.refs);
+  await graph.resolvePending();
+  assert.equal(
+    graph.edges([create.id, alphaType.id], ["INSTANTIATES"], 10).edges.length,
+    1,
+  );
+  assert.equal(graph.dynamicBoundaries([invoke.id], 10).length, 0);
+  assert.deepEqual(
+    graph.callees(invoke.id, 1, 10).map((candidate) => candidate.id),
+    [alphaRun.id],
+  );
+  const edge = graph.edges([invoke.id, alphaRun.id], ["CALLS"], 10).edges[0];
+  assert.equal(edge?.provenance, "heuristic");
+  assert.equal(edge?.evidence, "receiver_type_member");
+  graph.close();
+});
+
+test("dynamic candidate selection filters overloads by call arity", async () => {
+  const file = { ...codeFile("Overload.java"), format: "java" };
+  const source = {
+    kind: "text",
+    file,
+    text: `class Target {
+  void run() {}
+  void run(int value) {}
+}
+class Use { void invoke(Target value) { value.run(1); } }
+`,
+  };
+  const input = await extractFileGraph(
+    source,
+    await new CodeExtractor().extract(source),
+  );
+  const invoke = input.nodes.find((node) => node.name === "invoke");
+  const oneArg = input.nodes.find(
+    (node) => node.name === "run" && node.arity === 1,
+  );
+  assert.ok(invoke && oneArg);
+  const graph = new SqliteGraphStorage("", { inMemory: true });
+  graph.upsertFileGraph(file.id, input.nodes, input.edges, input.refs);
+  await graph.resolvePending();
+  assert.deepEqual(
+    graph.callees(invoke.id, 1, 10).map((candidate) => candidate.id),
+    [oneArg.id],
+  );
   graph.close();
 });

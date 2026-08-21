@@ -116,6 +116,12 @@ function ensureVersion(db: NodeDatabaseSync, readOnly: boolean): void {
       "INSERT INTO graph_meta(key,value) VALUES('schema_version',?)",
     ).run(String(SQLITE_GRAPH_SCHEMA_VERSION));
   } else if (Number(row.value) !== SQLITE_GRAPH_SCHEMA_VERSION) {
+    if (!readOnly && Number(row.value) === 1 && SQLITE_GRAPH_SCHEMA_VERSION === 2) {
+      db.prepare("UPDATE graph_meta SET value=? WHERE key='schema_version'").run(
+        String(SQLITE_GRAPH_SCHEMA_VERSION),
+      );
+      return;
+    }
     throw new Error(
       `Unsupported SQLite graph schema version: ${row.value}; expected ${SQLITE_GRAPH_SCHEMA_VERSION}`,
     );
@@ -123,6 +129,13 @@ function ensureVersion(db: NodeDatabaseSync, readOnly: boolean): void {
 }
 
 function ensureOptionalColumns(db: NodeDatabaseSync): void {
+  const symbolColumns = tableColumns(db, "symbols");
+  if (!symbolColumns.has("signature"))
+    db.exec("ALTER TABLE symbols ADD COLUMN signature TEXT");
+  if (!symbolColumns.has("arity"))
+    db.exec("ALTER TABLE symbols ADD COLUMN arity INTEGER");
+  if (!symbolColumns.has("return_type"))
+    db.exec("ALTER TABLE symbols ADD COLUMN return_type TEXT");
   const columns = tableColumns(db, "pending_refs");
   if (!columns.has("imported_name"))
     db.exec("ALTER TABLE pending_refs ADD COLUMN imported_name TEXT");

@@ -44,7 +44,11 @@ export function collectCallSites(
     if (isCallNode(current)) {
       const target = extractCallTarget(current);
       if (target) {
-        const enrichedTarget = enrichReferenceTarget(target, resolutionContext);
+        const enrichedTarget = enrichReferenceTarget(
+          target,
+          resolutionContext,
+          callArity(current),
+        );
         sites.push({
           name: enrichedTarget.raw,
           target: enrichedTarget,
@@ -72,16 +76,22 @@ type ResolutionContext = {
 function enrichReferenceTarget(
   target: ReferenceTarget,
   context: ResolutionContext,
+  arity: number | undefined,
 ): ReferenceTarget {
   const receiver = target.receiver?.name;
-  if (!receiver) return target;
-  const receiverType = context.receiverTypes.get(receiver);
+  if (!receiver)
+    return arity === undefined
+      ? target
+      : { ...target, hints: { ...target.hints, callArity: arity } };
+  const receiverType = context.receiverTypes.get(receiver) ??
+    context.receiverTypes.get(receiver.split(".").pop() ?? receiver);
   if (!receiverType) return target;
   const bounds = context.genericBounds.get(receiverType);
   return {
     ...target,
     hints: {
       receiverType,
+      ...(arity === undefined ? {} : { callArity: arity }),
       ...(bounds ? { genericBounds: [...bounds] } : {}),
       candidateTypes: bounds ? [receiverType, ...bounds] : [receiverType],
       ...(bounds && bounds.length > 0
@@ -91,6 +101,14 @@ function enrichReferenceTarget(
         : {}),
     },
   };
+}
+
+function callArity(node: TSNode): number | undefined {
+  const args = node.childForFieldName("arguments") ??
+    node.namedChildren.find((child) =>
+      ["arguments", "argument_list", "value_arguments"].includes(child.type),
+    );
+  return args ? args.namedChildren.length : undefined;
 }
 
 function dispatchForLanguage(
@@ -114,11 +132,27 @@ function collectResolutionContext(
     "parameter",
     "variadic_parameter_declaration",
   ]);
+  const declarationTypes = new Set([
+    "variable_declarator",
+    "variable_declaration",
+    "local_variable_declaration",
+    "lexical_declaration",
+    "let_declaration",
+    "field_declaration",
+    "property_declaration",
+    "public_field_definition",
+    "short_var_declaration",
+  ]);
   const visit = (current: TSNode): void => {
     if (parameterTypes.has(current.type)) {
       const binding = parameterBinding(current, language);
       if (binding) receiverTypes.set(binding.name, binding.type);
       return;
+    }
+    if (declarationTypes.has(current.type)) {
+      for (const binding of declarationBindings(current, language)) {
+        receiverTypes.set(binding.name, binding.type);
+      }
     }
     for (const child of current.namedChildren ?? []) visit(child);
   };
@@ -127,10 +161,53 @@ function collectResolutionContext(
     const binding = parameterBinding(receiver, language);
     if (binding) receiverTypes.set(binding.name, binding.type);
   }
-  for (const child of node.namedChildren ?? []) {
-    if (child !== node.childForFieldName("body")) visit(child);
+  for (const child of node.namedChildren ?? []) visit(child);
+  let parent = node.parent;
+  for (let depth = 0; parent && depth < 3; depth++, parent = parent.parent) {
+    if (/class|struct|impl/.test(parent.type)) {
+      const visitFields = (current: TSNode): void => {
+        if (current !== node && /method|function|constructor/.test(current.type))
+          return;
+        if (declarationTypes.has(current.type)) {
+          for (const binding of declarationBindings(current, language))
+            receiverTypes.set(binding.name, binding.type);
+        }
+        for (const child of current.namedChildren ?? []) visitFields(child);
+      };
+      visitFields(parent);
+      break;
+    }
   }
   return { receiverTypes, genericBounds, language };
+}
+
+function declarationBindings(
+  node: TSNode,
+  language?: string,
+): { name: string; type: string }[] {
+  const text = node.text.trim();
+  const results: { name: string; type: string }[] = [];
+  const explicit = text.match(
+    /(?:^|\b(?:const|let|var)\s+)([A-Za-z_]\w*)\s*:\s*([A-Za-z_][^\s=;,)]*)/,
+  );
+  if (explicit) results.push({ name: explicit[1]!, type: normalizeType(explicit[2]!) });
+  const cFamily = text.match(
+    /^\s*([A-Za-z_][^\s=;,)]*)\s+([A-Za-z_]\w*)\s*(?:[=;,)])?/,
+  );
+  if (cFamily && !/^(?:const|let|var|return|new)$/.test(cFamily[1]!)) {
+    results.push({ name: cFamily[2]!, type: normalizeType(cFamily[1]!) });
+  }
+  const constructed = text.match(
+    /([A-Za-z_]\w*)\s*(?::=|=)\s*(?:new\s+|&)?([A-Za-z_][\w.:]*)\s*(?:\{|\(|::new)/,
+  );
+  if (constructed) {
+    results.push({ name: constructed[1]!, type: normalizeType(constructed[2]!) });
+  }
+  if (language === "go") {
+    const go = text.match(/^\s*var\s+([A-Za-z_]\w*)\s+([A-Za-z_][\w.]*)/);
+    if (go) results.push({ name: go[1]!, type: normalizeType(go[2]!) });
+  }
+  return results;
 }
 
 function parameterBinding(

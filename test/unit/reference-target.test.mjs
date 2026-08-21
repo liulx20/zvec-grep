@@ -71,7 +71,7 @@ for (const fixture of [
     "a.helper",
     "qualified",
     "a",
-    { receiverType: "A", candidateTypes: ["A"] },
+    { receiverType: "A", callArity: 0, candidateTypes: ["A"] },
   ],
 ]) {
   test(`${fixture[0]} call target IR`, async () => {
@@ -88,6 +88,28 @@ for (const fixture of [
       receiver: { kind: fixture[4], name: fixture[5] },
       ...(fixture[6] ? { hints: fixture[6] } : {}),
     });
+  });
+}
+
+for (const fixture of [
+  {
+    name: "local variable type",
+    text: "function invoke() { const value: Runner = make(); value.run(); }",
+    raw: "value.run",
+  },
+  {
+    name: "field type",
+    text: "class Use { value: Runner; invoke() { this.value.run(); } }",
+    raw: "this.value.run",
+  },
+]) {
+  test(`TypeScript ${fixture.name} feeds receiver type hints`, async () => {
+    const calls = await collectFunctionCallSites(
+      source("typescript", "facts.ts", fixture.text),
+    );
+    const site = calls.flatMap((owner) => owner.sites).find((item) => item.name === fixture.raw);
+    assert.ok(site);
+    assert.equal(site.target.hints?.receiverType, "Runner");
   });
 }
 
@@ -111,6 +133,7 @@ for (const fixture of [
     raw: "value.Run",
     hints: {
       receiverType: "T",
+      callArity: 0,
       candidateTypes: ["T", "Runner"],
       genericBounds: ["Runner"],
       dispatch: "interface",
@@ -124,6 +147,7 @@ for (const fixture of [
     raw: "value.run",
     hints: {
       receiverType: "T",
+      callArity: 0,
       candidateTypes: ["T", "Runner"],
       genericBounds: ["Runner"],
       dispatch: "trait",
@@ -137,6 +161,7 @@ for (const fixture of [
     raw: "value.run",
     hints: {
       receiverType: "T",
+      callArity: 0,
       candidateTypes: ["T", "Runner"],
       genericBounds: ["Runner"],
       dispatch: "virtual",
@@ -150,6 +175,7 @@ for (const fixture of [
     raw: "value.run",
     hints: {
       receiverType: "Runner",
+      callArity: 0,
       candidateTypes: ["Runner"],
       dispatch: "virtual",
     },

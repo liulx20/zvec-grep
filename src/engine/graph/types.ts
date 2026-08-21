@@ -44,7 +44,7 @@ export type SymContext = {
 };
 
 export type GraphEdgeKind =
-  "CALLS" | "REFS" | "INHERITS" | "CONTAINS" | "DEFINES" | "IMPORTS";
+  "CALLS" | "REFS" | "INHERITS" | "CONTAINS" | "DEFINES" | "IMPORTS" | "INSTANTIATES";
 
 /** A persisted graph edge with its original relation metadata intact. */
 export type GraphEdge = {
@@ -65,6 +65,11 @@ export type DynamicBoundary = {
   target: ReferenceTarget;
   reason: "unknown_receiver_type" | "polymorphic_dispatch";
   candidates: string[];
+  candidateDetails: {
+    targetId: string;
+    reason: "hierarchy" | "generic_bound" | "method_set";
+    confidence: number;
+  }[];
 };
 
 export type InducedEdgesResult = {
@@ -95,6 +100,9 @@ export type SymNode = {
   is_exported: boolean;
   /** Resolve-only symbol name used by the graph name index. */
   name?: string;
+  signature?: string;
+  arity?: number;
+  returnType?: string;
 };
 
 export type LocalEdge = {
@@ -104,7 +112,7 @@ export type LocalEdge = {
   count: number;
   first_line: number;
   ref_name: string;
-  kind: "CALLS" | "REFS" | "INHERITS" | "CONTAINS";
+  kind: "CALLS" | "REFS" | "INHERITS" | "CONTAINS" | "INSTANTIATES";
 };
 
 type RawRefBase = {

@@ -8,6 +8,7 @@ export type ReferenceResolutionHints = {
   candidateTypes?: string[];
   genericBounds?: string[];
   dispatch?: "static" | "virtual" | "interface" | "trait" | "dynamic";
+  callArity?: number;
 };
 
 export type ReferenceTarget = {

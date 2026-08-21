@@ -302,7 +302,7 @@ export type SearchGraphRelation = {
   dstId: string;
   srcLabel: string;
   dstLabel: string;
-  kind: "CALLS" | "REFS" | "INHERITS" | "CONTAINS" | "IMPORTS";
+  kind: "CALLS" | "REFS" | "INHERITS" | "CONTAINS" | "IMPORTS" | "INSTANTIATES";
   scope: "symbol" | "file";
 };
 

@@ -105,6 +105,9 @@ erDiagram
   SYMBOL ||--o{ SYMBOL : INHERITS
   FILE ||--o{ FILE : IMPORTS
   FILE ||--o{ IMPORT_BINDING : DECLARES
+  SYMBOL ||--o{ SYMBOL : INSTANTIATES
+  SYMBOL ||--o{ DYNAMIC_CALL : OWNS
+  DYNAMIC_CALL ||--o{ DISPATCH_CANDIDATE : HAS
   FILE ||--o{ PENDING_REF : OWNS_IMPORT_REF
   SYMBOL ||--o{ PENDING_REF : OWNS_SYMBOL_REF
 
@@ -140,6 +143,19 @@ erDiagram
     text imported_name PK
     text spec
   }
+  DYNAMIC_CALL {
+    text id PK
+    text owner_id FK
+    text member_name
+    text resolution_hints
+    text reason
+  }
+  DISPATCH_CANDIDATE {
+    text call_id PK
+    text target_id PK
+    text reason
+    real confidence
+  }
 ```
 
 `pending_refs` 保存“已经发现、但暂时还不知道目标是谁”的引用。其中：
@@ -166,6 +182,9 @@ erDiagram
 | `symbol_edges` | `(src_id, dst_id, kind, rel)` | `CALLS`、`REFS`、`INHERITS` |
 | `file_imports` | `(src_file_id, dst_file_id, spec)` | 文件导入关系 |
 | `file_import_bindings` | `(src_file_id, local_name, dst_file_id, imported_name)` | import 名称、alias 与目标文件的绑定 |
+| `instantiates` | `(src_id, type_id)` | callable 对具体类型的实例化事实，用于轻量 RTA |
+| `dynamic_calls` | `id` | 已确认是多态分派、但没有唯一静态目标的调用点 |
+| `dispatch_candidates` | `(call_id, target_id)` | 动态调用的候选目标、依据和置信度 |
 
 几点说明：
 
@@ -178,9 +197,12 @@ erDiagram
 - `pending_refs.receiver_kind`、`receiver_name` 和 `member_name` 保存结构化调用目标；
   `resolution_hints` 以 JSON 保存语言分析器提供的 receiver type、泛型约束、候选类型和分派方式。
   `last_attempt` 用于控制失败引用的公平分批重试。
+- `symbols.signature`、`arity` 和 `return_type` 保存用于重载过滤与类型传播的签名事实。
+- 多态调用不再长期留在 `pending_refs`。候选数大于 1 时转入 `dynamic_calls` 和
+  `dispatch_candidates`；每次 finalize 会重新入队计算，以吸收增量索引新增或删除的实现。
 - schema 使用 `STRICT`、外键、组合主键和按 src/dst/name 建立的查询索引。
-- 当前 schema 版本为 1。版本不匹配时拒绝打开；同一版本内新增的兼容字段会在可写模式打开时通过
-  `ensureOptionalColumns()` 补齐，read-only 模式不会修改数据库。
+- 当前 schema 版本为 2。main 的 v1 可以在可写 index 流程中通过新增表、`ensureOptionalColumns()`
+  补列并升级到 v2；read-only 模式不会修改数据库，遇到 v1 会明确拒绝打开并要求先执行升级/重建。
 - 引入图索引后，workspace `CURRENT_INDEX_VERSION` 已提升为 2。旧 v1 workspace 不会把 unchanged
   文件直接沿用为“已有图数据”，而是要求执行 rebuild；rebuild 会同时重建 Zvec 主索引和完整图索引。
 - drop/rebuild 会删除 `<workspace>/.zvec-grep/code-graph`，不会把旧 `graph.sqlite`、节点或边带入新索引。
@@ -551,6 +573,10 @@ Go 支持方法 receiver、参数类型和类型参数 constraint；Rust 支持�
 还会在可见文件内按 method set 形成启发式候选。唯一候选可以生成带 provenance/confidence 的关系；
 多个候选保留为 `polymorphic_dispatch` boundary，不会伪造唯一调用边。
 
+候选选择同时使用方法 `arity` 过滤重载。字段、局部变量显式类型以及简单的 `new Type()` 赋值会补充
+receiver type；`INSTANTIATES` 记录实际构造过的类型。当 CHA 得到多个实现且其中只有部分类型被实例化时，
+RTA 优先保留这些实际类型；仓库没有实例化证据时仍保留完整 CHA 候选，避免把未覆盖测试路径误删。
+
 默认输出预算为最多 8 个 seeds、深度 3、200 个子图节点、8 个文件和 24,000 字符。
 `maxChars` 是最终源码文本的硬上限，首个符号超过预算时也会截断；roots 和调用路径节点在子图裁剪时
 优先保留，但无法完整保留的调用路径会被删除。
@@ -565,7 +591,8 @@ Go 支持方法 receiver、参数类型和类型参数 constraint；Rust 支持�
 - JS/TS named import alias 和 Python `from ... import ... as ...` 已通过 binding IR 解析；namespace、
   限定名、default import 和 re-export 链仍不完整。
 - 不理解 `tsconfig paths`、package exports、workspace package 等完整模块解析规则。
-- 当前只提取方法 receiver、函数参数和直接泛型约束，尚未进行赋值流、返回值、字段访问和跨函数类型传播；
+- 当前提取方法 receiver、函数参数、字段、局部变量显式类型、简单构造赋值和直接泛型约束；尚未进行
+  分支合流、复杂赋值、容器元素、返回值跨函数传播；
   这些来源的 `obj.method()` 仍只能在唯一可见成员候选时建立低置信度 heuristic edge，否则作为
   dynamic boundary 输出。
 - 重载、同名方法、嵌套作用域和跨文件多候选容易保持 `failed`。
@@ -585,7 +612,7 @@ occurrence 仍依赖提取遍历顺序，尚未使用 column 或稳定 source ra
 - RWR 仍在查询期局部内存子图上运行；这是有界计算，但极高出度节点仍可能产生较大的单层查询。
 - 主索引与图索引不是同一个事务；任一侧写入失败时仍需要明确的恢复/重建状态。
 - `openGraphStorage` 捕获所有打开异常并降级为 unavailable，缺少明确的错误日志和诊断信息。
-- schema 仅检查版本，尚无逐版本 migration 机制。
+- schema 目前只实现 main v1 → v2 的加法迁移，尚无通用的逐版本 migration 框架。
 
 ### 6.4 数据一致性与模型约束
 

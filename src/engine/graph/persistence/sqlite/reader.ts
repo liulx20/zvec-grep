@@ -60,6 +60,7 @@ const ALL_EDGE_KINDS: readonly GraphEdgeKind[] = [
   "CONTAINS",
   "DEFINES",
   "IMPORTS",
+  "INSTANTIATES",
 ];
 
 /** Indexed SQLite graph reader without a full-memory mirror. */
@@ -88,15 +89,62 @@ export class SqliteGraphReader {
     if (nodeIds.length === 0 || limit <= 0) return [];
     const ids = [...new Set(nodeIds)];
     const placeholders = ids.map(() => "?").join(",");
-    return this.all<RefRow>(
+    const persisted = this.all<{
+      id: string;
+      owner_id: string;
+      ref_name: string;
+      member_name: string;
+      receiver_kind: "owner" | "super" | "qualified" | null;
+      receiver_name: string | null;
+      resolution_hints: string | null;
+      reason: "polymorphic_dispatch";
+    }>(
+      `SELECT id,owner_id,ref_name,member_name,receiver_kind,receiver_name,
+              resolution_hints,reason
+       FROM dynamic_calls WHERE owner_id IN (${placeholders})
+       ORDER BY owner_id,line,id LIMIT ?`,
+      ...ids,
+      limit,
+    ).map((row): DynamicBoundary => {
+      const details = this.all<{
+        target_id: string;
+        reason: "hierarchy" | "generic_bound" | "method_set";
+        confidence: number;
+      }>(
+        `SELECT target_id,reason,confidence FROM dispatch_candidates
+         WHERE call_id=? ORDER BY confidence DESC,target_id LIMIT 64`,
+        row.id,
+      ).map((candidate) => ({
+        targetId: candidate.target_id,
+        reason: candidate.reason,
+        confidence: candidate.confidence,
+      }));
+      return {
+        sourceId: row.owner_id,
+        target: {
+          raw: row.ref_name,
+          member: row.member_name,
+          receiver: row.receiver_kind && row.receiver_name
+            ? { kind: row.receiver_kind, name: row.receiver_name }
+            : undefined,
+          ...resolutionHintsField(row.resolution_hints),
+        },
+        reason: row.reason,
+        candidates: details.map((candidate) => candidate.targetId),
+        candidateDetails: details,
+      };
+    });
+    const remaining = Math.max(0, limit - persisted.length);
+    if (remaining === 0) return persisted;
+    const unresolved = this.all<RefRow>(
       `SELECT id,owner_id,owner_is_file,ref_name,ref_kind,line,status,imported_name,local_name,source_language,receiver_kind,receiver_name,member_name,resolution_hints,last_attempt
        FROM pending_refs
        WHERE owner_is_file=0 AND status='failed' AND receiver_kind IS NOT NULL
          AND owner_id IN (${placeholders})
        ORDER BY owner_id,line,id LIMIT ?`,
       ...ids,
-      limit,
-    ).map((row) => {
+      remaining,
+    ).map((row): DynamicBoundary => {
       const hints = parseResolutionHints(row.resolution_hints);
       const target = {
         raw: row.ref_name,
@@ -111,6 +159,7 @@ export class SqliteGraphReader {
             hints.candidateTypes ?? [hints.receiverType],
             target.member,
             row.owner_id,
+            hints.callArity,
           )
         : [];
       return {
@@ -122,14 +171,23 @@ export class SqliteGraphReader {
             ? "polymorphic_dispatch"
             : "unknown_receiver_type",
         candidates,
+        candidateDetails: candidates.map((targetId) => ({
+          targetId,
+          reason: hints?.genericBounds?.length
+            ? "generic_bound" as const
+            : "hierarchy" as const,
+          confidence: 0.5,
+        })),
       };
     });
+    return [...persisted, ...unresolved];
   }
 
   private semanticBoundaryCandidates(
     typeNames: readonly string[],
     memberName: string,
     sourceId: string,
+    callArity?: number,
   ): string[] {
     return this.all<{ id: string }>(
       `WITH RECURSIVE visible(file_id) AS (
@@ -152,17 +210,26 @@ export class SqliteGraphReader {
          FROM contains owned JOIN symbols member ON member.id=owned.child_id
          WHERE member.name=? AND EXISTS(SELECT 1 FROM roots WHERE kind='interface')
            AND member.file_id IN (SELECT file_id FROM visible)
-       )
-       SELECT DISTINCT member.id
+       ), candidate_members(id,container_id) AS (
+         SELECT DISTINCT member.id,scope.id
        FROM candidate_containers scope
        JOIN contains owned ON owned.parent_id=scope.id
        JOIN symbols member ON member.id=owned.child_id
-       WHERE member.name=? ORDER BY member.id LIMIT 64`,
+       WHERE member.name=? AND (?<0 OR member.arity IS NULL OR member.arity=?)
+       )
+       SELECT id FROM candidate_members
+       WHERE NOT EXISTS(
+         SELECT 1 FROM candidate_members candidate
+         JOIN instantiates made ON made.type_id=candidate.container_id
+       ) OR container_id IN (SELECT type_id FROM instantiates)
+       ORDER BY id LIMIT 64`,
       sourceId,
       sourceId,
       JSON.stringify([...new Set(typeNames)]),
       memberName,
       memberName,
+      callArity ?? -1,
+      callArity ?? -1,
     ).map((row) => row.id);
   }
 
@@ -443,6 +510,17 @@ export class SqliteGraphReader {
       );
       params.push(ids, ids);
     }
+    if (edgeKinds.includes("INSTANTIATES")) {
+      selects.push(
+        `SELECT src_id AS src,type_id AS dst,'INSTANTIATES' AS kind,
+                'instantiates' AS rel,1 AS count,first_line,'' AS ref_name,
+                'static' AS provenance,1.0 AS confidence,NULL AS evidence
+         FROM instantiates
+         WHERE src_id IN(SELECT value FROM json_each(?))
+           AND type_id IN(SELECT value FROM json_each(?))`,
+      );
+      params.push(ids, ids);
+    }
     if (selects.length === 0) return { edges: [], truncated: false };
 
     const rows = this.all<{
@@ -617,6 +695,22 @@ export class SqliteGraphReader {
           ).map((r) =>
             structuralEdge(r.src_file_id, r.dst_file_id, "IMPORTS", r.spec),
           ),
+        );
+      }
+    }
+    if (kinds.includes("INSTANTIATES")) {
+      const side = direction === "outgoing" ? "src_id" : "type_id";
+      const remaining = limit - out.length;
+      if (remaining > 0) {
+        out.push(
+          ...this.all<{ src_id: string; type_id: string; first_line: number }>(
+            `SELECT * FROM instantiates WHERE ${side} IN(SELECT value FROM json_each(?)) ORDER BY ${side},src_id,type_id LIMIT ?`,
+            ids,
+            remaining,
+          ).map((row) => ({
+            ...structuralEdge(row.src_id, row.type_id, "INSTANTIATES", "instantiates"),
+            first_line: row.first_line,
+          })),
         );
       }
     }
