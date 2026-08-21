@@ -5,10 +5,6 @@ import type { EdgeRow } from "./reader.js";
 import type { SqliteGraphDatabase } from "./database.js";
 
 type IncomingImport = { src_file_id: string; spec: string };
-type IncomingImportBinding = IncomingImport & {
-  local_name: string;
-  imported_name: string;
-};
 
 /** File-scoped graph mutations and transaction handling. */
 export class SqliteGraphWriter {
@@ -67,9 +63,6 @@ export class SqliteGraphWriter {
       this.db
         .prepare("DELETE FROM file_imports WHERE src_file_id=?")
         .run(fileId);
-      this.db
-        .prepare("DELETE FROM file_import_bindings WHERE src_file_id=?")
-        .run(fileId);
       const insert = this.db.prepare(
         "INSERT INTO symbols(id,file_id,name,kind,is_exported,signature,arity,return_type) VALUES (?,?,?,?,?,?,?,?)",
       );
@@ -111,7 +104,6 @@ export class SqliteGraphWriter {
     ];
     const incoming = this.incomingSnapshots(fileId);
     const incomingImports = this.incomingImportSnapshots(fileId);
-    const incomingBindings = this.incomingBindingSnapshots(fileId);
     this.transaction(() => {
       this.invalidateSymbolProjections(incomingRefIds);
       this.deletePendingOwners(fileId, oldIds);
@@ -123,12 +115,6 @@ export class SqliteGraphWriter {
         }
       }
       for (const snapshot of incomingImports) {
-        this.insertRef(
-          this.importSnapshotRef(snapshot, occurrence++),
-          snapshot.src_file_id,
-        );
-      }
-      for (const snapshot of incomingBindings) {
         this.insertRef(
           this.importSnapshotRef(snapshot, occurrence++),
           snapshot.src_file_id,
@@ -357,26 +343,10 @@ export class SqliteGraphWriter {
     );
   }
 
-  private incomingBindingSnapshots(fileId: string): IncomingImportBinding[] {
-    return this.all<IncomingImportBinding>(
-      `SELECT b.src_file_id,b.spec,b.local_name,b.imported_name
-       FROM file_import_bindings b
-       WHERE b.dst_file_id=? AND NOT EXISTS(
-         SELECT 1 FROM reference_edges r
-         WHERE r.owner_id=b.src_file_id AND r.target_file_id=b.dst_file_id
-           AND r.ref_name=b.spec AND r.local_name=b.local_name
-           AND r.imported_name=b.imported_name
-           AND r.status='resolved'
-       ) ORDER BY b.src_file_id,b.spec,b.local_name,b.imported_name`,
-      fileId,
-    ).filter((row) => row.spec.length > 0);
-  }
-
   private importSnapshotRef(
-    snapshot: IncomingImport | IncomingImportBinding,
+    snapshot: IncomingImport,
     occurrence: number,
   ): RawRef {
-    const binding = "local_name" in snapshot ? snapshot : undefined;
     const base = {
       owner: snapshot.src_file_id,
       id: makeRefId(
@@ -390,15 +360,6 @@ export class SqliteGraphWriter {
       ref_kind: "import",
       line: 0,
     };
-    if (binding)
-      return {
-        ...base,
-        type: "import_binding",
-        ref_kind: "import",
-        imported_name: binding.imported_name,
-        local_name: binding.local_name,
-        source_language: "unknown",
-      };
     return { ...base, type: "import", ref_kind: "import" };
   }
 

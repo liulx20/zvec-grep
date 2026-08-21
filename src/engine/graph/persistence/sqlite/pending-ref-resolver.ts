@@ -147,9 +147,13 @@ export class SqlitePendingRefResolver {
       dst_file_id: string;
       local_name: string;
     }>(
-      `SELECT imported_name,dst_file_id,local_name FROM file_import_bindings
-       WHERE src_file_id=? AND local_name IN (?,?)
-       ORDER BY CASE WHEN local_name=? THEN 0 ELSE 1 END,dst_file_id,imported_name LIMIT 1`,
+      `SELECT imported_name,target_file_id AS dst_file_id,local_name
+       FROM reference_edges
+       WHERE owner_is_file=1 AND owner_id=? AND status='resolved'
+         AND target_file_id IS NOT NULL AND imported_name IS NOT NULL
+         AND local_name IN (?,?)
+       ORDER BY CASE WHEN local_name=? THEN 0 ELSE 1 END,
+                target_file_id,imported_name LIMIT 1`,
       owner.file_id,
       ref.ref_name,
       refReceiver(ref.ref_name),
@@ -353,19 +357,6 @@ export class SqlitePendingRefResolver {
         "INSERT OR IGNORE INTO file_imports(src_file_id,dst_file_id,spec) VALUES(?,?,?)",
       )
       .run(ref.owner_id, result.fileId, ref.ref_name);
-    if (ref.imported_name && ref.local_name) {
-      this.db
-        .prepare(
-          "INSERT OR REPLACE INTO file_import_bindings(src_file_id,dst_file_id,local_name,imported_name,spec) VALUES(?,?,?,?,?)",
-        )
-        .run(
-          ref.owner_id,
-          result.fileId,
-          ref.local_name,
-          ref.imported_name,
-          ref.ref_name,
-        );
-    }
     this.db.prepare(
       `UPDATE reference_edges
        SET status='resolved',target_file_id=?,target_symbol_id=NULL,

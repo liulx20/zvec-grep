@@ -46,12 +46,6 @@ CREATE TABLE IF NOT EXISTS file_imports (
  dst_file_id TEXT NOT NULL REFERENCES files(id) ON DELETE CASCADE,
  spec TEXT NOT NULL, PRIMARY KEY(src_file_id,dst_file_id,spec)
 ) STRICT, WITHOUT ROWID;
-CREATE TABLE IF NOT EXISTS file_import_bindings (
- src_file_id TEXT NOT NULL REFERENCES files(id) ON DELETE CASCADE,
- dst_file_id TEXT NOT NULL REFERENCES files(id) ON DELETE CASCADE,
- local_name TEXT NOT NULL, imported_name TEXT NOT NULL, spec TEXT NOT NULL DEFAULT '',
- PRIMARY KEY(src_file_id,local_name,dst_file_id,imported_name)
-) STRICT, WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS instantiates (
  src_id TEXT NOT NULL REFERENCES symbols(id) ON DELETE CASCADE,
  type_id TEXT NOT NULL REFERENCES symbols(id) ON DELETE CASCADE,
@@ -70,7 +64,6 @@ CREATE INDEX IF NOT EXISTS symbol_edges_src_kind_idx ON symbol_edges(src_id,kind
 CREATE INDEX IF NOT EXISTS symbol_edges_dst_kind_idx ON symbol_edges(dst_id,kind);
 CREATE INDEX IF NOT EXISTS contains_child_idx ON contains(child_id);
 CREATE INDEX IF NOT EXISTS file_imports_dst_idx ON file_imports(dst_file_id);
-CREATE INDEX IF NOT EXISTS file_import_bindings_local_idx ON file_import_bindings(src_file_id,local_name);
 CREATE INDEX IF NOT EXISTS reference_edges_name_idx ON reference_edges(ref_name,status);
 CREATE INDEX IF NOT EXISTS reference_edges_owner_idx ON reference_edges(owner_id,owner_is_file);
 CREATE INDEX IF NOT EXISTS reference_edges_retry_idx ON reference_edges(ref_name,status,last_attempt,id);

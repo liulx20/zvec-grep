@@ -104,7 +104,6 @@ erDiagram
   SYMBOL ||--o{ SYMBOL : REFS
   SYMBOL ||--o{ SYMBOL : INHERITS
   FILE ||--o{ FILE : IMPORTS
-  FILE ||--o{ IMPORT_BINDING : DECLARES
   SYMBOL ||--o{ SYMBOL : INSTANTIATES
   SYMBOL ||--o{ REFERENCE_EDGE : OWNS_SYMBOL_REF
   FILE ||--o{ REFERENCE_EDGE : OWNS_FILE_REF
@@ -142,13 +141,6 @@ erDiagram
     text provenance
     real confidence
   }
-  IMPORT_BINDING {
-    text src_file_id PK
-    text dst_file_id PK
-    text local_name PK
-    text imported_name PK
-    text spec
-  }
   EDGE_CANDIDATE {
     text edge_id PK
     text target_id PK
@@ -180,7 +172,6 @@ erDiagram
 | `contains` | `(parent_id, child_id)` | 容器与成员关系 |
 | `symbol_edges` | `(src_id, dst_id, kind, rel)` | `CALLS`、`REFS`、`INHERITS` |
 | `file_imports` | `(src_file_id, dst_file_id, spec)` | 文件导入关系 |
-| `file_import_bindings` | `(src_file_id, local_name, dst_file_id, imported_name)` | import 名称、alias 与目标文件的绑定 |
 | `instantiates` | `(src_id, type_id)` | callable 对具体类型的实例化事实，用于轻量 RTA |
 | `edge_candidates` | `(edge_id, target_id)` | 动态 occurrence 的候选目标、依据和置信度 |
 
@@ -251,7 +242,9 @@ erDiagram
 
 增量更新时，`upsertFileGraph(fileId, ...)` 会先替换该文件原有的节点和出边；删除文件时
 `deleteFileGraph(fileId)` 删除其内容。受更新影响、原本指向被替换符号的入边会重新变成
-pending ref，以便再次解析。删除目标文件前也会快照其他文件指向它的 `IMPORTS` 和 import bindings；
+pending occurrence，以便再次解析。import binding 的 `local_name`、`imported_name` 和目标文件直接保存在
+对应的 `reference_edges` 中，不再维护独立 binding 表。删除目标文件时，这些 occurrence 会随普通
+入向 import 一起失效并重新解析；
 目标文件重试成功后，即使 import 方没有变化，也能恢复文件关系和 alias 调用边。
 
 当前 SQLite backend 的具体工作方式是：
