@@ -4,6 +4,7 @@ import {
   type TextSource,
 } from "../extraction/index.js";
 import type { EntityFragment } from "../types.js";
+import type { ReferenceTarget } from "../reference-target.js";
 import { referenceResolutionPolicy } from "./reference-resolution-policy.js";
 import {
   fileGraphFromFragments,
@@ -19,6 +20,7 @@ type RelationOwner = {
   startLine: number;
   sites: readonly {
     name: string;
+    target?: ReferenceTarget;
     line: number;
     kind: string;
   }[];
@@ -176,7 +178,7 @@ function absorbRelationOwners(input: {
 
     for (const site of owner.sites) {
       const reference = referenceResolutionPolicy.analyzeReference(
-        site.name,
+        site.target ?? site.name,
         input.sourceLanguage,
       );
       const plan = referenceResolutionPolicy.localLookupPlan(
@@ -231,6 +233,7 @@ function absorbRelationOwners(input: {
           `${ownerId}\0${site.name}\0${site.kind}\0${site.line}`,
         ),
         sourceLanguage: input.sourceLanguage,
+        target: site.target,
       });
       if (!input.seenRefIds.has(ref.id)) {
         input.seenRefIds.add(ref.id);

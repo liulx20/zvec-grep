@@ -1,4 +1,5 @@
 import { bareName, isExternalRefName } from "./builtins.js";
+import type { ReferenceTarget } from "../reference-target.js";
 
 const OWNER_RECEIVERS = new Set(["this", "self", "cls"]);
 
@@ -45,20 +46,31 @@ export type LocalReferenceLookupPlan = Pick<
 
 /** Owns reference receiver, binding and scope semantics for every resolver. */
 export class ReferenceResolutionPolicy {
-  analyzeReference(refName: string, language?: string): AnalyzedReference {
-    const receiverName = qualifiedReceiver(refName);
-    const receiver: ReferenceReceiver = !receiverName
+  analyzeReference(
+    input: string | ReferenceTarget,
+    language?: string,
+  ): AnalyzedReference {
+    const target =
+      typeof input === "string"
+        ? {
+            raw: input,
+            member: bareName(input.replace(/->/g, ".")),
+            receiver: legacyReceiver(input),
+          }
+        : input;
+    const receiverName = target.receiver?.name;
+    const receiver: ReferenceReceiver = !target.receiver
       ? { kind: "none" }
-      : OWNER_RECEIVERS.has(receiverName) || receiverName === "super"
+      : target.receiver.kind === "owner" || target.receiver.kind === "super"
         ? {
             kind: "owner",
-            name: receiverName,
-            includeOwner: receiverName !== "super",
+            name: receiverName!,
+            includeOwner: target.receiver.kind !== "super",
           }
-        : { kind: "qualified", name: receiverName };
+        : { kind: "qualified", name: receiverName! };
     return {
-      name: refName,
-      bareName: bareName(refName.replace(/->/g, ".")),
+      name: target.raw,
+      bareName: target.member,
       language,
       receiver,
     };
@@ -159,7 +171,7 @@ export class ReferenceResolutionPolicy {
   }
 }
 
-function qualifiedReceiver(refName: string): string | undefined {
+function legacyReceiver(refName: string): ReferenceTarget["receiver"] {
   if (
     !refName.includes(".") &&
     !refName.includes("/") &&
@@ -167,7 +179,16 @@ function qualifiedReceiver(refName: string): string | undefined {
   )
     return undefined;
   const receiver = refName.split(/->|[./]/, 1)[0]?.replace(/\(\)$/, "");
-  return receiver || undefined;
+  if (!receiver) return undefined;
+  return {
+    kind:
+      receiver === "super"
+        ? "super"
+        : OWNER_RECEIVERS.has(receiver)
+          ? "owner"
+          : "qualified",
+    name: receiver,
+  };
 }
 
 export const referenceResolutionPolicy = new ReferenceResolutionPolicy();

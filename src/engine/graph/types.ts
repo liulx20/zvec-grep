@@ -1,4 +1,5 @@
 import type { FileInfo } from "../types.js";
+import type { ReferenceTarget } from "../reference-target.js";
 
 /** Graph layer types. SymRef here is a symbol handle, not the Ref node table. */
 
@@ -107,6 +108,7 @@ type RawRefBase = {
 export type SymbolRawRef = RawRefBase & {
   type: "symbol";
   source_language?: string;
+  target: ReferenceTarget;
 };
 
 export type ImportRawRef = RawRefBase & {
@@ -133,6 +135,7 @@ export type PendingRef = {
   line: number;
   status: "pending" | "failed";
   source_language?: string;
+  target?: ReferenceTarget;
 };
 
 export type RefResolveResult =

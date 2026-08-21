@@ -2,6 +2,7 @@ import { FilePathIndex } from "../../imports/path-index.js";
 import { resolveImportPath } from "../../imports/resolve-path.js";
 import { NameIndex } from "../../name-index.js";
 import { referenceResolutionPolicy } from "../../reference-resolution-policy.js";
+import { referenceTargetFromRaw } from "../../../reference-target.js";
 import { resolveRef } from "../../resolve.js";
 import type { PendingRef, ResolvePendingOptions } from "../../types.js";
 import { type RefRow, type SymbolRow } from "./reader.js";
@@ -112,9 +113,17 @@ export class SqlitePendingRefResolver {
       line: ref.line,
       status: ref.status,
       source_language: ref.source_language ?? undefined,
+      target: {
+        raw: ref.ref_name,
+        member: ref.member_name ?? referenceTargetFromRaw(ref.ref_name).member,
+        receiver:
+          ref.receiver_kind && ref.receiver_name
+            ? { kind: ref.receiver_kind, name: ref.receiver_name }
+            : undefined,
+      },
     };
     const reference = referenceResolutionPolicy.analyzeReference(
-      ref.ref_name,
+      pending.target ?? ref.ref_name,
       ref.source_language ?? undefined,
     );
     const preferred = this.all<{ dst_file_id: string }>(
@@ -211,7 +220,7 @@ export class SqlitePendingRefResolver {
 
   private retryableRefs(attemptWatermark: number): RefRow[] {
     return this.all<RefRow>(
-      `SELECT id,owner_id,owner_is_file,ref_name,ref_kind,line,status,imported_name,local_name,source_language,last_attempt
+      `SELECT id,owner_id,owner_is_file,ref_name,ref_kind,line,status,imported_name,local_name,source_language,receiver_kind,receiver_name,member_name,last_attempt
        FROM (
          SELECT pending_refs.*,
                 row_number() OVER (PARTITION BY ref_name ORDER BY last_attempt,id) AS retry_rank
@@ -220,7 +229,7 @@ export class SqlitePendingRefResolver {
        )
        WHERE retry_rank<=?
        UNION ALL
-       SELECT id,owner_id,owner_is_file,ref_name,ref_kind,line,status,imported_name,local_name,source_language,last_attempt
+       SELECT id,owner_id,owner_is_file,ref_name,ref_kind,line,status,imported_name,local_name,source_language,receiver_kind,receiver_name,member_name,last_attempt
        FROM pending_refs
        WHERE status='pending' AND last_attempt<?
        ORDER BY ref_name,id`,

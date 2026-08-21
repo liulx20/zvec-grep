@@ -1,4 +1,5 @@
 import { makeRefId } from "../../ref-id.js";
+import { referenceTargetFromRaw } from "../../../reference-target.js";
 import type { LocalEdge, RawRef, SymNode } from "../../types.js";
 import type { EdgeRow } from "./reader.js";
 import type { SqliteGraphDatabase } from "./database.js";
@@ -116,7 +117,7 @@ export class SqliteGraphWriter {
   protected insertRef(ref: RawRef, fallbackOwner: string): void {
     this.db
       .prepare(
-        "INSERT OR REPLACE INTO pending_refs(id,owner_id,owner_is_file,ref_name,ref_kind,line,imported_name,local_name,source_language,status,last_attempt) VALUES(?,?,?,?,?,?,?,?,?,'pending',0)",
+        "INSERT OR REPLACE INTO pending_refs(id,owner_id,owner_is_file,ref_name,ref_kind,line,imported_name,local_name,source_language,receiver_kind,receiver_name,member_name,status,last_attempt) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'pending',0)",
       )
       .run(
         ref.id,
@@ -130,6 +131,9 @@ export class SqliteGraphWriter {
         ref.type === "symbol" || ref.type === "import_binding"
           ? (ref.source_language ?? null)
           : null,
+        ref.type === "symbol" ? (ref.target.receiver?.kind ?? null) : null,
+        ref.type === "symbol" ? (ref.target.receiver?.name ?? null) : null,
+        ref.type === "symbol" ? ref.target.member : null,
       );
   }
 
@@ -171,6 +175,7 @@ export class SqliteGraphWriter {
       ref_name: snapshot.ref_name,
       ref_kind: snapshot.rel,
       line: snapshot.first_line,
+      target: referenceTargetFromRaw(snapshot.ref_name),
     };
   }
 

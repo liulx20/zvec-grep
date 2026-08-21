@@ -1,4 +1,8 @@
 import type { EntityFragment } from "../types.js";
+import {
+  referenceTargetFromRaw,
+  type ReferenceTarget,
+} from "../reference-target.js";
 import { makeRefId } from "./ref-id.js";
 import type { LocalEdge, RawRef, SymNode } from "./types.js";
 
@@ -100,6 +104,7 @@ export function rawRef(
         line: number;
         occurrence?: number;
         sourceLanguage?: string;
+        target?: ReferenceTarget;
       }
     | {
         type: "import";
@@ -147,7 +152,12 @@ export function rawRef(
     };
   if (input.type === "import")
     return { ...base, type: "import", ref_kind: "import" };
-  return { ...base, type: "symbol", source_language: input.sourceLanguage };
+  return {
+    ...base,
+    type: "symbol",
+    source_language: input.sourceLanguage,
+    target: input.target ?? referenceTargetFromRaw(input.refName),
+  };
 }
 
 function uniquePublicCodeFragments(

@@ -24,6 +24,8 @@ export type {
   TraverseOpts,
   UsageRef,
   ResolvePendingOptions,
+  ReferenceReceiverTarget,
+  ReferenceTarget,
 } from "./public-types.js";
 
 export { makeRefId } from "./ref-id.js";

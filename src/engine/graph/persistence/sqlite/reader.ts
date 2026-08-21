@@ -34,6 +34,9 @@ export type RefRow = {
   imported_name: string | null;
   local_name: string | null;
   source_language: string | null;
+  receiver_kind: "owner" | "super" | "qualified" | null;
+  receiver_name: string | null;
+  member_name: string | null;
   last_attempt: number;
 };
 export type SymbolRow = {

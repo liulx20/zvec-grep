@@ -130,6 +130,12 @@ function ensureOptionalColumns(db: NodeDatabaseSync): void {
     db.exec("ALTER TABLE pending_refs ADD COLUMN local_name TEXT");
   if (!columns.has("source_language"))
     db.exec("ALTER TABLE pending_refs ADD COLUMN source_language TEXT");
+  if (!columns.has("receiver_kind"))
+    db.exec("ALTER TABLE pending_refs ADD COLUMN receiver_kind TEXT");
+  if (!columns.has("receiver_name"))
+    db.exec("ALTER TABLE pending_refs ADD COLUMN receiver_name TEXT");
+  if (!columns.has("member_name"))
+    db.exec("ALTER TABLE pending_refs ADD COLUMN member_name TEXT");
   if (!columns.has("last_attempt"))
     db.exec(
       "ALTER TABLE pending_refs ADD COLUMN last_attempt INTEGER NOT NULL DEFAULT 0",

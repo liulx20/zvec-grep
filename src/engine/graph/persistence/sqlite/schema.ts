@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS pending_refs (
  ref_name TEXT NOT NULL, ref_kind TEXT NOT NULL, line INTEGER NOT NULL,
  imported_name TEXT, local_name TEXT,
  source_language TEXT,
+ receiver_kind TEXT, receiver_name TEXT, member_name TEXT,
  last_attempt INTEGER NOT NULL DEFAULT 0,
  status TEXT NOT NULL CHECK (status IN ('pending','failed'))
 ) STRICT;

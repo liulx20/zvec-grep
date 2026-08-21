@@ -25,3 +25,7 @@ export type {
 
 export type { FileGraphInput } from "./from-fragments.js";
 export type { GraphBackend, OpenGraphOptions } from "./open.js";
+export type {
+  ReferenceReceiverTarget,
+  ReferenceTarget,
+} from "../reference-target.js";

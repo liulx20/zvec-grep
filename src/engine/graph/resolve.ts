@@ -19,7 +19,7 @@ export function resolveRef(
   const reference =
     analyzedReference ??
     referenceResolutionPolicy.analyzeReference(
-      ref.ref_name,
+      ref.target ?? ref.ref_name,
       ref.source_language,
     );
   const context = referenceResolutionPolicy.createContext(reference, {

@@ -1,9 +1,15 @@
 import type { LanguageAdapter } from "./adapter.js";
+import {
+  memberReferenceTarget,
+  referenceTargetFromRaw,
+  type ReferenceTarget,
+} from "../../reference-target.js";
 import type { TSNode } from "./tree-sitter/nodes.js";
 
 export type CallSite = {
   /** Callee text as written, e.g. "formatDate" or "utils.formatDate". */
   name: string;
+  target: ReferenceTarget;
   /** 1-based source line of the call. */
   line: number;
   kind: "call" | "new";
@@ -35,10 +41,11 @@ export function collectCallSites(
     }
 
     if (isCallNode(current)) {
-      const name = extractCallName(current);
-      if (name) {
+      const target = extractCallTarget(current);
+      if (target) {
         sites.push({
-          name,
+          name: target.raw,
+          target,
           line: current.startPosition.row + 1,
           kind: isNewExpression(current) ? "new" : "call",
         });
@@ -72,14 +79,23 @@ function isNewExpression(node: TSNode): boolean {
 }
 
 export function extractCallName(node: TSNode): string | undefined {
+  return extractCallTarget(node)?.raw;
+}
+
+export function extractCallTarget(node: TSNode): ReferenceTarget | undefined {
   if (node.type === "method_invocation") {
     const name = node.childForFieldName("name");
     const receiver =
       node.childForFieldName("object") ?? node.childForFieldName("receiver");
     if (name) {
-      return normalizeCallName(
+      const raw = normalizeCallName(
         receiver ? `${receiver.text}.${name.text}` : name.text,
       );
+      return raw
+        ? receiver
+          ? memberReferenceTarget(raw, receiver.text, name.text)
+          : referenceTargetFromRaw(raw)
+        : undefined;
     }
   }
   const target =
@@ -93,7 +109,8 @@ export function extractCallName(node: TSNode): string | undefined {
     return undefined;
   }
 
-  return normalizeCallName(target.text);
+  const raw = normalizeCallName(target.text);
+  return raw ? referenceTargetFromRaw(raw) : undefined;
 }
 
 const MAX_CALL_NAME_CHARS = 180;
