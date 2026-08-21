@@ -19,6 +19,10 @@ export type FileGraphInput = {
 export function fileGraphFromFragments(
   _fileId: string,
   fragments: readonly EntityFragment[],
+  ownership: readonly {
+    parentStartOffset: number;
+    childStartOffset: number;
+  }[] = [],
 ): FileGraphInput {
   const publicFragments = uniquePublicCodeFragments(fragments);
   const nodes: SymNode[] = publicFragments.map((fragment) => {
@@ -65,14 +69,30 @@ export function fileGraphFromFragments(
   }
 
   const edges: LocalEdge[] = [];
+  const idByStartOffset = new Map<number, string>();
+  for (const fragment of publicFragments) {
+    if (fragment.range.kind === "text")
+      idByStartOffset.set(fragment.range.startOffset, publicEntityId(fragment));
+  }
+  const explicitParentByChild = new Map<string, string>();
+  for (const relation of ownership) {
+    const parentId = idByStartOffset.get(relation.parentStartOffset);
+    const childId = idByStartOffset.get(relation.childStartOffset);
+    if (parentId && childId && parentId !== childId)
+      explicitParentByChild.set(childId, parentId);
+  }
   for (const fragment of publicFragments) {
     if (fragment.metadata?.kind !== "code") {
       continue;
     }
-    const scope = fragment.metadata.scope?.trim();
-    if (!scope) {
+    const childId = publicEntityId(fragment);
+    const explicitOwnerId = explicitParentByChild.get(childId);
+    if (explicitOwnerId && explicitOwnerId !== childId) {
+      edges.push(containsEdge(explicitOwnerId, childId, fragment));
       continue;
     }
+    const scope = fragment.metadata.scope?.trim();
+    if (!scope) continue;
     // scope breadcrumb is "Outer::Inner"; take the nearest container name.
     const parts = scope.split("::").filter(Boolean);
     const parentName = parts[parts.length - 1];
@@ -102,22 +122,31 @@ export function fileGraphFromFragments(
     if (!parentId) {
       continue;
     }
-    const childId = publicEntityId(fragment);
     if (parentId === childId) {
       continue;
     }
-    edges.push({
-      src: parentId,
-      dst: childId,
-      rel: "contains",
-      count: 1,
-      first_line: 0,
-      ref_name: fragment.metadata.symbolName ?? childId,
-      kind: "CONTAINS",
-    });
+    edges.push(containsEdge(parentId, childId, fragment));
   }
 
   return { nodes, edges, refs: [] };
+}
+
+function containsEdge(
+  parentId: string,
+  childId: string,
+  fragment: EntityFragment,
+): LocalEdge {
+  return {
+    src: parentId,
+    dst: childId,
+    rel: "contains",
+    count: 1,
+    first_line: 0,
+    ref_name: fragment.metadata?.kind === "code"
+      ? (fragment.metadata.symbolName ?? childId)
+      : childId,
+    kind: "CONTAINS",
+  };
 }
 
 function signatureReturnType(signature: string): string | undefined {

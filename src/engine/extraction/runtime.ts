@@ -1,6 +1,7 @@
 import type { Content, EntityFragment } from "../types.js";
 import { CodeExtractor } from "./code/extractor.js";
 import type {
+  EntityOwnership,
   FunctionCallSites,
   SymbolRefSites,
   TypeInheritanceSites,
@@ -63,6 +64,7 @@ export type PreparedCodeAnalysis = {
   calls: readonly FunctionCallSites[];
   refs: readonly SymbolRefSites[];
   inheritance: readonly TypeInheritanceSites[];
+  ownership: readonly EntityOwnership[];
 };
 
 export async function analyzeForIndexing(
@@ -76,6 +78,7 @@ export async function analyzeForIndexing(
       calls: [],
       refs: [],
       inheritance: [],
+      ownership: [],
     };
   }
   const analysis = await extractors.code.analyzeForIndexing(source, options);

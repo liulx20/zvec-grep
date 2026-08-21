@@ -91,7 +91,7 @@ export class CodeExtractor {
       source.file.format,
       (tree) => {
         const collected: CodeEntity[] = [];
-        walkCodeNode(tree.rootNode, adapter, [], collected);
+        walkCodeNode(tree.rootNode, adapter, [], undefined, collected);
 
         const output: PreparedCodeFragment[] = [];
         let entityIdIndex = 0;
@@ -107,7 +107,6 @@ export class CodeExtractor {
             fragments[0]?.group === ""
               ? makeEntityId(source.file.id, entityIdIndex)
               : null;
-
           for (const item of fragments) {
             const id = makeEntityId(source.file.id, entityIdIndex);
             const { embeddingText, ...fragment } = item;
@@ -136,6 +135,7 @@ export class CodeExtractor {
           calls: callsFromEntities(collected, adapter),
           refs: refsFromEntities(collected, adapter, source.file.format),
           inheritance: inheritanceFromEntities(collected, source.file.format),
+          ownership: ownershipFromEntities(collected),
         };
       },
     );
@@ -232,6 +232,7 @@ function resolveCodeChunkOptions(
 
 type CodeEntity = {
   node: TSNode;
+  ownerStartOffset?: number;
   name?: string;
   symbolType: CodeSymbolType;
   breadcrumb: readonly string[];
@@ -262,10 +263,18 @@ export type PreparedCodeAnalysis = {
   calls: readonly FunctionCallSites[];
   refs: readonly SymbolRefSites[];
   inheritance: readonly TypeInheritanceSites[];
+  ownership: readonly EntityOwnership[];
+};
+
+export type EntityOwnership = {
+  parentStartOffset: number;
+  childStartOffset: number;
 };
 
 function emptyPreparedCodeAnalysis(): PreparedCodeAnalysis {
-  return { fragments: [], imports: [], calls: [], refs: [], inheritance: [] };
+  return {
+    fragments: [], imports: [], calls: [], refs: [], inheritance: [], ownership: [],
+  };
 }
 
 function callsFromEntities(
@@ -345,6 +354,7 @@ function walkCodeNode(
   node: TSNode,
   adapter: LanguageAdapter,
   breadcrumb: readonly string[],
+  ownerStartOffset: number | undefined,
   out: CodeEntity[],
 ): void {
   for (const child of node.children) {
@@ -370,6 +380,7 @@ function walkCodeNode(
 
         out.push({
           node: entity,
+          ...(ownerStartOffset === undefined ? {} : { ownerStartOffset }),
           name,
           symbolType,
           breadcrumb: entityBreadcrumb,
@@ -384,19 +395,34 @@ function walkCodeNode(
     if (isScope) {
       const name = adapter.extractName(child);
       const scopeNode = adapter.enterScopeNode?.(child) ?? child;
+      const indexedScope = isEntity
+        ? (adapter.resolveEntities?.(child) ?? [
+            adapter.resolveEntity ? adapter.resolveEntity(child) : child,
+          ]).find((entity) => sameNode(entity, scopeNode))
+        : undefined;
       walkCodeNode(
         scopeNode,
         adapter,
         name ? [...breadcrumb, name] : breadcrumb,
+        indexedScope?.startIndex ?? ownerStartOffset,
         out,
       );
       continue;
     }
 
     if (!isEntity) {
-      walkCodeNode(child, adapter, breadcrumb, out);
+      walkCodeNode(child, adapter, breadcrumb, ownerStartOffset, out);
     }
   }
+}
+
+function ownershipFromEntities(entities: readonly CodeEntity[]): EntityOwnership[] {
+  return entities.flatMap((entity) => entity.ownerStartOffset === undefined
+    ? []
+    : [{
+        parentStartOffset: entity.ownerStartOffset,
+        childStartOffset: entity.node.startIndex,
+      }]);
 }
 
 function codeEntityToSearchFragments(
@@ -968,7 +994,7 @@ export async function collectFunctionCallSites(
     source.file.format,
     (tree) => {
       const entities: CodeEntity[] = [];
-      walkCodeNode(tree.rootNode, adapter, [], entities);
+      walkCodeNode(tree.rootNode, adapter, [], undefined, entities);
       const out: FunctionCallSites[] = [];
       for (const entity of entities) {
         if (entity.symbolType !== "function") {
@@ -1010,7 +1036,7 @@ export async function collectTypeInheritanceSites(
   const language = source.file.format;
   const collected = await withParser(source.text, language, (tree) => {
     const entities: CodeEntity[] = [];
-    walkCodeNode(tree.rootNode, adapter, [], entities);
+    walkCodeNode(tree.rootNode, adapter, [], undefined, entities);
     const out: TypeInheritanceSites[] = [];
     for (const entity of entities) {
       if (entity.symbolType !== "class" && entity.symbolType !== "interface") {
@@ -1071,7 +1097,7 @@ export async function collectSymbolRefSites(
   const language = source.file.format;
   const collected = await withParser(source.text, language, (tree) => {
     const entities: CodeEntity[] = [];
-    walkCodeNode(tree.rootNode, adapter, [], entities);
+    walkCodeNode(tree.rootNode, adapter, [], undefined, entities);
     const out: SymbolRefSites[] = [];
     for (const entity of entities) {
       if (

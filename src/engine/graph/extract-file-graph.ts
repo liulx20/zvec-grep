@@ -36,14 +36,21 @@ export async function extractFileGraph(
   fragments: readonly EntityFragment[],
   preparedAnalysis?: Pick<
     PreparedCodeAnalysis,
-    "imports" | "calls" | "refs" | "inheritance"
+    "imports" | "calls" | "refs" | "inheritance" | "ownership"
   >,
 ): Promise<FileGraphInput> {
-  const base = fileGraphFromFragments(source.file.id, fragments);
+  const analysis = preparedAnalysis ?? (source.kind === "text" && source.file.kind === "code"
+    ? await analyzeForIndexing(source)
+    : undefined);
+  const base = fileGraphFromFragments(
+    source.file.id,
+    fragments,
+    analysis?.ownership,
+  );
   if (source.kind !== "text" || source.file.kind !== "code") {
     return base;
   }
-  const analysis = preparedAnalysis ?? (await analyzeForIndexing(source));
+  if (!analysis) return base;
 
   const refs = [...base.refs];
   const seenRefIds = new Set(refs.map((r) => r.id));
