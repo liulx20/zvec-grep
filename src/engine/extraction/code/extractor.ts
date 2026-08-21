@@ -236,6 +236,7 @@ type CodeEntity = {
   symbolType: CodeSymbolType;
   breadcrumb: readonly string[];
   signature?: string;
+  arity?: number;
   doc?: string;
   modifiers: readonly CodeEntityModifier[];
 };
@@ -373,6 +374,7 @@ function walkCodeNode(
           symbolType,
           breadcrumb: entityBreadcrumb,
           signature: adapter.extractSignature?.(entity),
+          arity: adapter.extractArity?.(entity),
           doc: adapter.extractDoc?.(entity),
           modifiers: adapter.extractModifiers?.(entity) ?? [],
         });
@@ -1131,6 +1133,7 @@ function codeEntityMetadata(entity: CodeEntity): CodeEntityMetadata {
     scope: entity.breadcrumb.length > 0 ? entity.breadcrumb.join("::") : null,
     nodeType: entity.node.type,
     signature: entity.signature ?? null,
+    arity: entity.arity ?? null,
     doc: entity.doc ?? null,
     modifiers: entity.modifiers,
   };

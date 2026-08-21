@@ -225,12 +225,15 @@ erDiagram
 - `pending_refs.receiver_kind`、`receiver_name` 和 `member_name` 保存结构化调用目标；
   `resolution_hints` 以 JSON 保存语言分析器提供的 receiver type、泛型约束、候选类型和分派方式。
   `last_attempt` 用于控制失败引用的公平分批重试。
-- `symbols.signature`、`arity` 和 `return_type` 保存用于重载过滤与类型传播的签名事实。
+- `symbols.signature`、`arity` 和 `return_type` 保存用于重载过滤与类型传播的签名事实。`arity`
+  直接从各语言的参数 AST 提取，不再按 signature 文本中的逗号推导；Rust 的 `self` 参数和 Python
+  的首个 `self` / `cls` 参数不计入调用 arity，泛型类型内部的逗号也不会被误算为参数分隔符。
 - `source_refs` 保存 symbol、inheritance、import 和 import binding 的 AST 源事实；`pending_refs` 只承担
   pending / failed / external 解析状态与重试队列职责。symbol 投影登记到 `resolved_source_refs`，import
   投影登记到 `resolved_import_refs`；候选数大于 1 时，
-  结果写入 `dynamic_calls` 和 `dispatch_candidates`。每次 finalize 先撤销上一次物化结果，再从
-  `source_refs` 重新投影动态引用，因此后续新增或删除 subclass/implementation 不会留下过期 heuristic 边。
+  结果写入 `dynamic_calls` 和 `dispatch_candidates`。`resolvePending()` 不会全量 replay receiver facts；
+  writer 根据本次 changed member/type/ref names、`INHERITS`、`INSTANTIATES`、已有 projection 和动态候选
+  计算受影响的 `ref_id`，只撤销并重新投影这部分引用。无图变化时再次 resolve 不会执行稳定 receiver ref。
 - 目标文件删除或重建时，writer 根据两个 projection 表定位受影响的 `ref_id`，撤销旧投影并把原始
   `source_refs` 重新放入解析队列。新增同名 symbol 也会使已解析的普通名称引用失效重算，因此无需从
   聚合边的 `ref_name` 反推源码语义；只有没有 source fact 的 legacy/direct 边才走 incoming snapshot 兜底。
@@ -605,8 +608,9 @@ type ExploreEdge = {
 结构化 target 的 `receiverType`、`candidateTypes`、`genericBounds` 和 `dispatch` 由语言 AST 提取：
 Go 支持方法 receiver、参数类型和类型参数 constraint；Rust 支持参数类型和 trait bound；Java 支持参数
 类型；C++ 支持参数类型和 constrained template 参数。resolver 先按 receiver type 查找容器，再沿
-`INHERITS` 的 extends/implements/trait 方向收集实现成员。Go interface 和 Rust trait 没有显式继承边时，
-还会在可见文件内按 method set 形成启发式候选。唯一候选可以生成带 provenance/confidence 的关系；
+`INHERITS` 的 extends/implements/trait 方向收集实现成员。只有 Go interface 在没有显式继承边时，
+会按语言的结构化 typing 规则在可见文件内使用 method set 候选；Java interface 和 Rust trait 必须来自
+显式 `implements` / trait impl 关系，不能用无关类的同名方法补候选。唯一候选可以生成带 provenance/confidence 的关系；
 多个候选保留为 `polymorphic_dispatch` boundary，不会伪造唯一调用边。
 
 候选选择同时使用方法 `arity` 过滤重载。字段、局部变量显式类型以及简单的 `new Type()` 赋值会补充
@@ -619,6 +623,10 @@ resolver projection 与 reader 的 dynamic-boundary 查询共用 `SemanticCandid
 
 类型事实收集会在进入嵌套 method/function/constructor entity 前停止，节点边界按 type 和 source range
 判断，不依赖 Tree-sitter wrapper 对象身份，因此匿名内部类或嵌套函数的参数不会污染外层 receiver map。
+类型环境由语言 adapter 按源码顺序和 AST 位置预先生成 `CallResolutionFact`，`call-sites` 只负责收集调用
+并合并对应位置的 fact。adapter 进入词法 block 时压入 scope，声明只影响其后的节点，离开 block 时弹出
+scope；同名局部变量在兄弟 block 中不会互相覆盖，函数参数和容器字段位于外层环境。语言专属的参数、
+声明和类型推导规则可以在 adapter 边界内演进，不再扩张通用调用收集器。
 成员语法统一识别 `.`, `->` 和 `::`；例如 C++ / Rust 的 `Base::helper()` 会保留原始文本，同时形成
 `receiver=Base`、`member=helper` 的结构化 target。
 

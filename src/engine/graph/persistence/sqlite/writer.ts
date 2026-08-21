@@ -51,12 +51,15 @@ export class SqliteGraphWriter {
     this.assertWritable();
     const oldIds = this.symbolIdsForFile(fileId);
     const incomingRefIds = this.incomingSymbolRefIds(fileId);
-    const nameAffectedRefIds = this.nameAffectedRefIds(fileId, nodes);
+    const receiverAffectedRefIds = this.receiverAffectedRefIds(
+      fileId,
+      this.changedSemanticNames(nodes, refs),
+    );
     const incoming = this.incomingSnapshots(fileId);
     this.transaction(() => {
       this.invalidateSymbolProjections([
         ...incomingRefIds,
-        ...nameAffectedRefIds,
+        ...receiverAffectedRefIds,
       ]);
       this.deletePendingOwners(fileId, oldIds);
       this.db.prepare("INSERT OR IGNORE INTO files(id) VALUES (?)").run(fileId);
@@ -90,16 +93,21 @@ export class SqliteGraphWriter {
           this.insertRef(this.snapshotRef(snap, occurrence++), fileId);
         }
       }
-      this.requeueSourceRefs([...incomingRefIds, ...nameAffectedRefIds]);
+      this.requeueSourceRefs([...incomingRefIds, ...receiverAffectedRefIds]);
     });
   }
 
   deleteFileGraph(fileId: string): void {
     this.assertWritable();
     const oldIds = this.symbolIdsForFile(fileId);
+    const receiverAffectedRefIds = this.receiverAffectedRefIds(
+      fileId,
+      this.symbolNamesForFile(fileId),
+    );
     const incomingRefIds = [
       ...this.incomingSymbolRefIds(fileId),
       ...this.incomingImportRefIds(fileId),
+      ...receiverAffectedRefIds,
     ];
     const incoming = this.incomingSnapshots(fileId);
     const incomingImports = this.incomingImportSnapshots(fileId);
@@ -271,25 +279,90 @@ export class SqliteGraphWriter {
     ).map((row) => row.ref_id);
   }
 
-  private nameAffectedRefIds(
+  private receiverAffectedRefIds(
     fileId: string,
-    nodes: readonly SymNode[],
+    names: readonly string[],
   ): string[] {
-    const names = [...new Set(nodes.flatMap((node) => node.name ? [node.name] : []))];
-    if (names.length === 0) return [];
+    const encodedNames = JSON.stringify([...new Set(names)]);
     return this.all<{ ref_id: string }>(
-      `SELECT DISTINCT projection.ref_id
-       FROM resolved_source_refs projection
-       JOIN source_refs fact ON fact.id=projection.ref_id
-       JOIN symbols source ON source.id=projection.src_id
-       WHERE source.file_id<>? AND fact.receiver_kind IS NULL
-         AND (fact.ref_name IN (SELECT value FROM json_each(?))
-              OR fact.member_name IN (SELECT value FROM json_each(?)))
-       ORDER BY projection.ref_id`,
+      `WITH RECURSIVE changed_types(id) AS (
+         SELECT id FROM symbols
+         WHERE name IN (SELECT value FROM json_each(?))
+       ), related_types(id) AS (
+         SELECT id FROM changed_types
+         UNION
+         SELECT edge.dst_id FROM symbol_edges edge
+         JOIN related_types changed ON changed.id=edge.src_id
+         WHERE edge.kind='INHERITS'
+           AND edge.rel IN ('extends','implements','trait')
+       )
+       SELECT DISTINCT fact.id AS ref_id
+       FROM source_refs fact
+       JOIN symbols source ON source.id=fact.owner_id
+       WHERE fact.owner_is_file=0
+         AND source.file_id<>?
+         AND (
+           fact.id IN (
+             SELECT call.id FROM dynamic_calls call
+             JOIN dispatch_candidates candidate ON candidate.call_id=call.id
+             JOIN symbols target ON target.id=candidate.target_id
+             WHERE target.file_id=?
+           )
+           OR (?<>'[]' AND (
+             fact.member_name IN (SELECT value FROM json_each(?))
+             OR fact.ref_name IN (SELECT value FROM json_each(?))
+             OR json_extract(fact.resolution_hints,'$.receiverType')
+                  IN (SELECT value FROM json_each(?))
+             OR EXISTS(
+               SELECT 1 FROM json_each(
+                 COALESCE(json_extract(fact.resolution_hints,'$.candidateTypes'),'[]')
+               ) candidate_type
+               WHERE candidate_type.value IN (SELECT value FROM json_each(?))
+             )
+             OR json_extract(fact.resolution_hints,'$.receiverType') IN (
+               SELECT name FROM symbols
+               WHERE id IN (SELECT id FROM related_types) AND name IS NOT NULL
+             )
+             OR fact.id IN (
+               SELECT call.id FROM dynamic_calls call
+               JOIN dispatch_candidates candidate ON candidate.call_id=call.id
+               JOIN contains ownership ON ownership.child_id=candidate.target_id
+               JOIN symbols container ON container.id=ownership.parent_id
+               WHERE container.name IN (SELECT value FROM json_each(?))
+             )
+           ))
+         )
+       ORDER BY fact.id`,
+      encodedNames,
       fileId,
-      JSON.stringify(names),
-      JSON.stringify(names),
+      fileId,
+      encodedNames,
+      encodedNames,
+      encodedNames,
+      encodedNames,
+      encodedNames,
+      encodedNames,
     ).map((row) => row.ref_id);
+  }
+
+  private changedSemanticNames(
+    nodes: readonly SymNode[],
+    refs: readonly RawRef[],
+  ): string[] {
+    return [...new Set([
+      ...nodes.flatMap((node) => node.name ? [node.name] : []),
+      ...refs.flatMap((ref) =>
+        ref.type === "symbol" && [
+          "new",
+          "extends",
+          "implements",
+          "overrides",
+          "type",
+        ].includes(ref.ref_kind)
+          ? [ref.ref_name, ref.target.member]
+          : []
+      ),
+    ])];
   }
 
   private incomingImportSnapshots(fileId: string): IncomingImport[] {
@@ -353,6 +426,13 @@ export class SqliteGraphWriter {
       "SELECT id FROM symbols WHERE file_id=?",
       fileId,
     ).map((row) => row.id);
+  }
+
+  private symbolNamesForFile(fileId: string): string[] {
+    return this.all<{ name: string }>(
+      "SELECT DISTINCT name FROM symbols WHERE file_id=? AND name IS NOT NULL",
+      fileId,
+    ).map((row) => row.name);
   }
 
   private requeueSourceRefs(refIds: readonly string[]): void {

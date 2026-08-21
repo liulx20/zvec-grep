@@ -45,7 +45,9 @@ export function fileGraphFromFragments(
       ...(metadata?.kind === "code" && metadata.signature
         ? {
             signature: metadata.signature,
-            arity: signatureArity(metadata.signature),
+            ...(metadata.arity === null || metadata.arity === undefined
+              ? {}
+              : { arity: metadata.arity }),
             returnType: signatureReturnType(metadata.signature),
           }
         : {}),
@@ -98,13 +100,6 @@ export function fileGraphFromFragments(
   }
 
   return { nodes, edges, refs: [] };
-}
-
-function signatureArity(signature: string): number | undefined {
-  const matches = [...signature.matchAll(/\(([^()]*)\)/g)];
-  const parameters = matches.at(-1)?.[1]?.trim();
-  if (parameters === undefined) return undefined;
-  return parameters ? parameters.split(",").length : 0;
 }
 
 function signatureReturnType(signature: string): string | undefined {

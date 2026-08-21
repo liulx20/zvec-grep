@@ -160,6 +160,7 @@ export type CodeEntityMetadata = {
   scope: string | null;
   nodeType: string | null;
   signature: string | null;
+  arity?: number | null;
   doc: string | null;
   modifiers: readonly CodeEntityModifier[];
 };

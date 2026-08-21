@@ -221,6 +221,48 @@ test("resolved references retain durable source facts", async () => {
   graph.close();
 });
 
+test("unchanged resolve does not replay stable receiver facts", async () => {
+  const graph = new SqliteGraphStorage("", { inMemory: true });
+  const callers = Array.from({ length: 1_000 }, (_, index) => ({
+    id: `receiver-caller-${index}`,
+    kind: "function",
+    is_exported: false,
+    name: `caller${index}`,
+  }));
+  graph.upsertFileGraph(
+    "stable-receivers",
+    [
+      ...callers,
+      { id: "receiver-type", kind: "class", is_exported: false, name: "Receiver" },
+      { id: "receiver-helper", kind: "method", is_exported: false, name: "helper" },
+    ],
+    [edge("receiver-type", "receiver-helper", "CONTAINS", "contains")],
+    callers.map((caller, occurrence) =>
+      rawRef({
+        owner: caller.id,
+        refName: "value.helper",
+        line: 1,
+        occurrence,
+        sourceLanguage: "typescript",
+      }),
+    ),
+  );
+  await graph.resolvePending();
+
+  let resolutions = 0;
+  const resolver = graph.resolver;
+  const original = resolver.resolveSymbol.bind(resolver);
+  resolver.resolveSymbol = (...args) => {
+    resolutions += 1;
+    return original(...args);
+  };
+  await graph.resolvePending();
+
+  assert.equal(resolutions, 0);
+  assert.equal(graph.stats().callsCount, 1_000);
+  graph.close();
+});
+
 test("new same-name symbols invalidate ordinary resolved projections", async () => {
   const graph = new SqliteGraphStorage("", { inMemory: true });
   graph.upsertFileGraph(

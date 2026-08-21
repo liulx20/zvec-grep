@@ -719,6 +719,78 @@ func (worker Worker) run() { worker.helper() }
   );
 });
 
+test("Rust AST arity excludes self and preserves generic parameter grouping", async () => {
+  const file = { ...codeFile("arity.rs"), format: "rust" };
+  const source = {
+    kind: "text",
+    file,
+    text: `use std::collections::HashMap;
+struct Value;
+impl Value {
+  fn run(&self, values: HashMap<String, i32>) {}
+}
+`,
+  };
+  const input = await extractFileGraph(
+    source,
+    await new CodeExtractor().extract(source),
+  );
+  const run = input.nodes.find((node) => node.name === "run");
+  assert.ok(run);
+  assert.equal(run.arity, 1);
+});
+
+test("Python AST arity excludes self and preserves generic parameter grouping", async () => {
+  const file = { ...codeFile("arity.py"), format: "python" };
+  const source = {
+    kind: "text",
+    file,
+    text: `class Value:
+  def run(self, values: dict[str, int]):
+    pass
+`,
+  };
+  const input = await extractFileGraph(
+    source,
+    await new CodeExtractor().extract(source),
+  );
+  const run = input.nodes.find((node) => node.name === "run");
+  assert.ok(run);
+  assert.equal(run.arity, 1);
+});
+
+test("Rust trait dispatch does not fall back because self inflated arity", async () => {
+  const file = { ...codeFile("dispatch.rs"), format: "rust" };
+  const source = {
+    kind: "text",
+    file,
+    text: `trait Runner { fn run(&self); }
+struct Alpha;
+impl Runner for Alpha { fn run(&self) {} }
+fn invoke(value: &dyn Runner) { value.run(); }
+`,
+  };
+  const input = await extractFileGraph(
+    source,
+    await new CodeExtractor().extract(source),
+  );
+  const invoke = input.nodes.find((node) => node.name === "invoke");
+  const runMethods = input.nodes.filter((node) => node.name === "run");
+  assert.ok(invoke);
+  assert.equal(runMethods.length, 2);
+  assert.deepEqual(runMethods.map((node) => node.arity), [0, 0]);
+
+  const graph = new SqliteGraphStorage("", { inMemory: true });
+  graph.upsertFileGraph(file.id, input.nodes, input.edges, input.refs);
+  await graph.resolvePending();
+  const callees = graph.callees(invoke.id, 1, 10);
+  assert.equal(callees.length, 1);
+  const edge = graph.edges([invoke.id, callees[0].id], ["CALLS"], 10).edges[0];
+  assert.ok(edge);
+  assert.notEqual(edge.confidence, 0.35);
+  graph.close();
+});
+
 test("Java interface receiver keeps virtual implementations as candidates", async () => {
   const file = { ...codeFile("Dispatch.java"), format: "java" };
   const source = {
@@ -794,6 +866,91 @@ class Use {
   const edge = graph.edges([invoke.id, alphaRun.id], ["CALLS"], 10).edges[0];
   assert.equal(edge?.provenance, "heuristic");
   assert.equal(edge?.evidence, "receiver_type_member");
+  graph.close();
+});
+
+test("incremental instantiation invalidates only dependent dispatch facts", async () => {
+  const typesFile = { ...codeFile("IncrementalTypes.java"), id: "types", format: "java" };
+  const makerFile = { ...codeFile("Maker.java"), id: "maker", format: "java" };
+  const prepare = async (file, text) => {
+    const source = { kind: "text", file, text };
+    return extractFileGraph(source, await new CodeExtractor().extract(source));
+  };
+  const types = await prepare(
+    typesFile,
+    `interface Runner { void run(); }
+class Alpha implements Runner { public void run() {} }
+class Beta implements Runner { public void run() {} }
+class Use { void invoke(Runner value) { value.run(); } }`,
+  );
+  const invoke = types.nodes.find((node) => node.name === "invoke");
+  const alphaRun = types.nodes.find((node) => {
+    if (node.name !== "run") return false;
+    const parent = types.edges.find(
+      (edge) => edge.kind === "CONTAINS" && edge.dst === node.id,
+    )?.src;
+    return types.nodes.find((candidate) => candidate.id === parent)?.name === "Alpha";
+  });
+  assert.ok(invoke && alphaRun);
+  const graph = new SqliteGraphStorage("", { inMemory: true });
+  graph.upsertFileGraph(typesFile.id, types.nodes, types.edges, types.refs);
+  await graph.resolvePending();
+  assert.ok(graph.dynamicBoundaries([invoke.id], 10)[0]);
+
+  const maker = await prepare(
+    makerFile,
+    "class Maker { void make() { new Alpha(); } }",
+  );
+  graph.upsertFileGraph(makerFile.id, maker.nodes, maker.edges, maker.refs);
+  await graph.resolvePending();
+
+  assert.equal(graph.dynamicBoundaries([invoke.id], 10).length, 0);
+  assert.deepEqual(
+    graph.callees(invoke.id, 1, 10).map((candidate) => candidate.id),
+    [alphaRun.id],
+  );
+  graph.close();
+});
+
+test("Java RTA never promotes instantiated unrelated same-name methods", async () => {
+  const file = { ...codeFile("NominalRta.java"), format: "java" };
+  const source = {
+    kind: "text",
+    file,
+    text: `interface Runner { void run(); void stop(); }
+class Alpha implements Runner { public void run() {} public void stop() {} }
+class Unrelated { public void run() {} }
+class Use {
+  void invoke(Runner value) { value.run(); }
+  void make() { new Unrelated(); }
+}
+`,
+  };
+  const input = await extractFileGraph(
+    source,
+    await new CodeExtractor().extract(source),
+  );
+  const invoke = input.nodes.find((node) => node.name === "invoke");
+  const unrelatedRun = input.nodes.find((node) => {
+    if (node.name !== "run") return false;
+    const parent = input.edges.find(
+      (edge) => edge.kind === "CONTAINS" && edge.dst === node.id,
+    )?.src;
+    return input.nodes.find((candidate) => candidate.id === parent)?.name === "Unrelated";
+  });
+  assert.ok(invoke && unrelatedRun);
+
+  const graph = new SqliteGraphStorage("", { inMemory: true });
+  graph.upsertFileGraph(file.id, input.nodes, input.edges, input.refs);
+  await graph.resolvePending();
+
+  assert.equal(
+    graph.callees(invoke.id, 1, 10).some((candidate) => candidate.id === unrelatedRun.id),
+    false,
+  );
+  const boundary = graph.dynamicBoundaries([invoke.id], 10)[0];
+  assert.ok(boundary);
+  assert.equal(boundary.candidates.includes(unrelatedRun.id), false);
   graph.close();
 });
 

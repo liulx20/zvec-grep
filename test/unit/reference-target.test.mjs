@@ -126,6 +126,32 @@ test("nested entity parameters do not overwrite outer receiver types", async () 
   assert.equal(site.target.hints?.receiverType, "Runner");
 });
 
+test("receiver type hints follow block scope and call position", async () => {
+  const calls = await collectFunctionCallSites(
+    source(
+      "typescript",
+      "Scopes.ts",
+      `function invoke() {
+        {
+          const value: Runner = makeRunner();
+          value.run();
+        }
+        {
+          const value: Other = makeOther();
+          value.run();
+        }
+      }`,
+    ),
+  );
+  const runSites = calls.flatMap((owner) => owner.sites)
+    .filter((site) => site.name === "value.run");
+  assert.equal(runSites.length, 2);
+  assert.deepEqual(
+    runSites.map((site) => site.target.hints?.receiverType),
+    ["Runner", "Other"],
+  );
+});
+
 for (const fixture of [
   {
     name: "local variable type",

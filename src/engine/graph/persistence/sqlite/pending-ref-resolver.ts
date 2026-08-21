@@ -45,7 +45,6 @@ export class SqlitePendingRefResolver {
   }
   async resolvePending(options: ResolvePendingOptions = {}): Promise<void> {
     this.assertWritable();
-    this.refreshDispatchFacts();
     const names = new NameIndex();
     names.load(
       this.all<
@@ -278,78 +277,6 @@ export class SqlitePendingRefResolver {
       : "hierarchy";
     for (const candidate of candidates) insert.run(ref.id, candidate, reason, 0.65);
     this.deleteRef(ref.id);
-  }
-
-  private refreshDispatchFacts(): void {
-    this.transaction(() => {
-      this.db.exec(
-        `INSERT OR IGNORE INTO source_refs(
-           id,owner_id,owner_is_file,ref_name,ref_kind,member_name,line,
-           source_language,receiver_kind,receiver_name,resolution_hints
-         )
-         SELECT id,owner_id,0,ref_name,ref_kind,member_name,line,source_language,
-                receiver_kind,receiver_name,resolution_hints
-         FROM dynamic_calls;`,
-      );
-      const resolved = this.all<{
-        ref_id: string;
-        src_id: string;
-        dst_id: string;
-        kind: string;
-        rel: string;
-      }>(
-        `SELECT r.ref_id,r.src_id,r.dst_id,r.kind,r.rel
-         FROM resolved_source_refs r
-         JOIN source_refs f ON f.id=r.ref_id
-         WHERE f.receiver_kind IS NOT NULL`,
-      );
-      const remove = this.db.prepare(
-        `DELETE FROM symbol_edges
-         WHERE src_id=? AND dst_id=? AND kind=? AND rel=?`,
-      );
-      const decrement = this.db.prepare(
-        `UPDATE symbol_edges SET count=count-1
-         WHERE src_id=? AND dst_id=? AND kind=? AND rel=?`,
-      );
-      const count = this.db.prepare(
-        `SELECT count FROM symbol_edges
-         WHERE src_id=? AND dst_id=? AND kind=? AND rel=?`,
-      );
-      for (const item of resolved) {
-        const row = count.get(
-          item.src_id,
-          item.dst_id,
-          item.kind,
-          item.rel,
-        ) as { count: number } | undefined;
-        if (!row) continue;
-        const statement = row.count <= 1 ? remove : decrement;
-        statement.run(item.src_id, item.dst_id, item.kind, item.rel);
-        if (item.rel === "new") {
-          this.db.prepare(
-            "DELETE FROM instantiates WHERE src_id=? AND type_id=?",
-          ).run(item.src_id, item.dst_id);
-        }
-      }
-      this.db.exec(
-        `DELETE FROM resolved_source_refs
-         WHERE ref_id IN (SELECT id FROM source_refs WHERE receiver_kind IS NOT NULL);
-         DELETE FROM dynamic_calls;
-         DELETE FROM pending_refs
-         WHERE status<>'external' AND id IN (
-           SELECT id FROM source_refs WHERE receiver_kind IS NOT NULL
-         );
-         INSERT OR REPLACE INTO pending_refs(
-           id,owner_id,owner_is_file,ref_name,ref_kind,line,source_language,
-           receiver_kind,receiver_name,member_name,resolution_hints,status,last_attempt
-         )
-         SELECT id,owner_id,0,ref_name,ref_kind,line,source_language,
-                receiver_kind,receiver_name,member_name,resolution_hints,'pending',0
-         FROM source_refs
-         WHERE owner_is_file=0 AND receiver_kind IS NOT NULL
-           AND id NOT IN (SELECT id FROM pending_refs WHERE status='external');`,
-      );
-    });
   }
 
   private insertSymbolEdge(

@@ -77,12 +77,12 @@ function candidatePolicy(language?: string): {
   if (language === "rust")
     return {
       inheritanceRelations: ["trait", "implements"],
-      structuralRootKinds: ["trait", "interface"],
+      structuralRootKinds: [],
     };
   if (language === "java")
     return {
       inheritanceRelations: ["extends", "implements"],
-      structuralRootKinds: ["interface"],
+      structuralRootKinds: [],
     };
   return {
     inheritanceRelations: ["extends", "implements", "trait"],
