@@ -109,9 +109,13 @@ export class SqliteGraphReader {
     }>(
       `SELECT id,owner_id,ref_name,member_name,receiver_kind,receiver_name,
               resolution_hints,dynamic_reason AS reason
-       FROM unresolved_refs
-       WHERE status='dynamic' AND owner_id IN (${placeholders})
-       ORDER BY owner_id,line,id LIMIT ?`,
+       FROM unresolved_refs unresolved
+       WHERE status='dynamic' AND ref_kind='call'
+         AND owner_id IN (${placeholders})
+       ORDER BY EXISTS(
+         SELECT 1 FROM edge_candidates candidate
+         WHERE candidate.edge_id=unresolved.id
+       ) DESC,owner_id,line,id LIMIT ?`,
       ...ids,
       limit,
     ).map((row): DynamicBoundary => {
@@ -151,7 +155,8 @@ export class SqliteGraphReader {
     const unresolved = this.all<RefRow>(
       `SELECT id,owner_id,owner_is_file,ref_name,ref_kind,line,status,imported_name,local_name,source_language,receiver_kind,receiver_name,member_name,resolution_hints,last_attempt
        FROM unresolved_refs
-       WHERE owner_is_file=0 AND status='failed' AND receiver_kind IS NOT NULL
+       WHERE owner_is_file=0 AND status='failed' AND ref_kind='call'
+         AND receiver_kind IS NOT NULL
          AND owner_id IN (${placeholders})
        ORDER BY owner_id,line,id LIMIT ?`,
       ...ids,

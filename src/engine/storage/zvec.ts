@@ -1141,6 +1141,7 @@ function readCodeModifiers(value: string | null): CodeEntityModifier[] {
       (item): item is CodeEntityModifier =>
         item === "exported" ||
         item === "async" ||
+        item === "abstract" ||
         item === "static" ||
         item === "public" ||
         item === "private" ||

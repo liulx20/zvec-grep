@@ -103,9 +103,15 @@ test("explore reports truncated dynamic boundary output", () => {
         sourceId: "root",
         target: { raw: `value.run${index}`, member: `run${index}` },
         reason: "polymorphic_dispatch",
-        candidates: [],
+        candidates: [`candidate-${index}`],
         candidatesTruncated: false,
-        candidateDetails: [],
+        candidateDetails: [
+          {
+            targetId: `candidate-${index}`,
+            reason: "hierarchy",
+            confidence: 0.5,
+          },
+        ],
       }));
     }
   }
@@ -124,6 +130,60 @@ test("explore reports truncated dynamic boundary output", () => {
   });
 
   assert.equal(result.dynamicBoundaries.length, 16);
+  assert.equal(result.dynamicBoundariesTruncated, true);
+  graph.close();
+});
+
+test("explore gives unknown receiver boundaries a smaller output budget", () => {
+  class BoundaryGraph extends SqliteGraphStorage {
+    dynamicBoundaries(_ids, limit) {
+      return Array.from({ length: limit }, (_, index) => ({
+        sourceId: "root",
+        target: { raw: `value.run${index}`, member: `run${index}` },
+        reason:
+          index === limit - 1
+            ? "polymorphic_dispatch"
+            : "unknown_receiver_type",
+        candidates: index === limit - 1 ? ["implementation"] : [],
+        candidatesTruncated: false,
+        candidateDetails:
+          index === limit - 1
+            ? [
+                {
+                  targetId: "implementation",
+                  reason: "hierarchy",
+                  confidence: 0.5,
+                },
+              ]
+            : [],
+      }));
+    }
+  }
+  const graph = new BoundaryGraph("", { inMemory: true });
+  graph.upsertFileGraph(
+    "root-file",
+    [{ id: "root", kind: "function", is_exported: true, name: "root" }],
+    [],
+    [],
+  );
+  const result = exploreGraph(
+    graph,
+    storageFrom([entity("root", "root", "root.ts")]),
+    { query: "root", maxNodes: 16 },
+  );
+
+  assert.equal(
+    result.dynamicBoundaries.filter(
+      (boundary) => boundary.reason === "unknown_receiver_type",
+    ).length,
+    4,
+  );
+  assert.equal(
+    result.dynamicBoundaries.some(
+      (boundary) => boundary.reason === "polymorphic_dispatch",
+    ),
+    true,
+  );
   assert.equal(result.dynamicBoundariesTruncated, true);
   graph.close();
 });

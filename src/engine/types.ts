@@ -147,6 +147,7 @@ export type CodeSymbolType =
 export type CodeEntityModifier =
   | "exported"
   | "async"
+  | "abstract"
   | "static"
   | "public"
   | "private"

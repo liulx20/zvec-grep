@@ -197,6 +197,28 @@ test("external refs are dropped without creating edges", async () => {
   graph.close();
 });
 
+test("failed member references are not reported as dynamic call boundaries", async () => {
+  const graph = new SqliteGraphStorage("", { inMemory: true });
+  graph.upsertFileGraph(
+    "member-file",
+    [{ id: "member-owner", kind: "function", is_exported: true, name: "read" }],
+    [],
+    [
+      rawRef({
+        owner: "member-owner",
+        refName: "value.length",
+        refKind: "member",
+        line: 1,
+      }),
+    ],
+  );
+  await graph.resolvePending();
+
+  assert.equal(graph.stats().failedRefCount, 1);
+  assert.deepEqual(graph.dynamicBoundaries(["member-owner"], 10), []);
+  graph.close();
+});
+
 test("resolved references move their durable source facts onto edges", async () => {
   class InspectableGraph extends SqliteGraphStorage {
     resolvedOccurrenceCount() {
@@ -468,6 +490,49 @@ test("new symbols in an imported file invalidate preferred-file projections", as
   graph.close();
 });
 
+test("preferred-file invalidation ignores unrelated names in another import", () => {
+  const graph = new SqliteGraphStorage("", { inMemory: true });
+  graph.upsertFileGraph(
+    "caller-file",
+    [{ id: "caller", kind: "function", is_exported: true, name: "caller" }],
+    [],
+    [],
+  );
+  graph.upsertFileGraph(
+    "file-a",
+    [{ id: "foo", kind: "function", is_exported: true, name: "foo" }],
+    [],
+    [],
+  );
+  graph.upsertFileGraph(
+    "file-b",
+    [{ id: "bar", kind: "function", is_exported: true, name: "bar" }],
+    [],
+    [],
+  );
+  const insert = graph.database.db.prepare(
+    `INSERT INTO edges(
+       id,src_id,dst_id,src_is_file,dst_is_file,kind,rel,count,first_line,
+       ref_name,member_name,provenance,confidence,evidence
+     ) VALUES(?,?,?,0,0,'CALLS','call',1,1,?,?,'static',1,'preferred_file')`,
+  );
+  insert.run("call-foo", "caller", "foo", "foo", "foo");
+  insert.run("call-bar", "caller", "bar", "bar", "bar");
+  const insertImport = graph.database.db.prepare(
+    `INSERT INTO edges(
+       id,src_id,dst_id,src_is_file,dst_is_file,kind,rel,count,first_line,
+       ref_name,provenance,confidence
+     ) VALUES(?,?,?,1,1,'IMPORTS','import',1,1,'*','static',1)`,
+  );
+  insertImport.run("import-a", "caller-file", "file-a");
+  insertImport.run("import-b", "caller-file", "file-b");
+
+  const affected = graph.writer.affectedResolvedEdgeIds("file-b", ["baz"]);
+  assert.equal(affected.includes("call-foo"), false);
+  assert.equal(affected.includes("call-bar"), true);
+  graph.close();
+});
+
 test("renaming a receiver type invalidates existing dynamic candidates", async () => {
   const graph = new SqliteGraphStorage("", { inMemory: true });
   graph.upsertFileGraph(
@@ -555,6 +620,60 @@ test("renaming a receiver type invalidates existing dynamic candidates", async (
 
   assert.equal(graph.dynamicBoundaries(["caller"], 10).length, 0);
   assert.ok(graph.stats().pendingRefCount >= 1);
+  graph.close();
+});
+
+test("new implementations invalidate dynamic boundaries with no candidates", () => {
+  const graph = new SqliteGraphStorage("", { inMemory: true });
+  graph.upsertFileGraph(
+    "contract-file",
+    [
+      { id: "runner", kind: "interface", is_exported: true, name: "Runner" },
+      { id: "invoke", kind: "function", is_exported: true, name: "invoke" },
+    ],
+    [],
+    [],
+  );
+  graph.upsertFileGraph("implementation-file", [], [], []);
+  graph.database.db
+    .prepare(
+      `INSERT INTO unresolved_refs(
+       id,owner_id,owner_is_file,ref_name,ref_kind,line,source_language,
+       receiver_kind,receiver_name,member_name,resolution_hints,status,
+       last_attempt,dynamic_reason
+     ) VALUES('empty-boundary','invoke',0,'value.run','call',1,'java',
+       'qualified','value','run',?,'dynamic',0,'polymorphic_dispatch')`,
+    )
+    .run(
+      JSON.stringify({
+        receiverType: "Runner",
+        candidateTypes: ["Runner"],
+        dispatch: "virtual",
+      }),
+    );
+
+  graph.upsertFileGraph(
+    "implementation-file",
+    [
+      { id: "worker", kind: "class", is_exported: true, name: "Worker" },
+      { id: "worker-run", kind: "method", is_exported: true, name: "run" },
+    ],
+    [
+      edge("worker", "worker-run", "CONTAINS", "contains"),
+      {
+        ...edge("worker", "runner", "INHERITS", "implements"),
+        ref_name: "Runner",
+      },
+    ],
+    [],
+  );
+
+  assert.equal(
+    graph.database.db
+      .prepare("SELECT status FROM unresolved_refs WHERE id='empty-boundary'")
+      .get().status,
+    "pending",
+  );
   graph.close();
 });
 

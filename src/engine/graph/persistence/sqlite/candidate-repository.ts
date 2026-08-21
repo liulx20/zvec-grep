@@ -89,14 +89,23 @@ export class SemanticCandidateRepository {
          SELECT e.src_id FROM edges e JOIN containers c ON c.id=e.dst_id
          WHERE e.kind='INHERITS'
            AND e.rel IN (SELECT value FROM json_each(?))
-       ), provider_closure(container_id,provider_id) AS (
-         SELECT id,id FROM symbols
+       ), provider_roots(id) AS (
+         SELECT id FROM containers
          UNION
-         SELECT provider.container_id,inheritance.dst_id
+         SELECT id FROM symbols
+         WHERE file_id IN (SELECT file_id FROM visible)
+           AND kind IN ('class','interface','trait','abstract_class')
+       ), provider_closure(container_id,provider_id,depth,path) AS (
+         SELECT id,id,0,',' || id || ',' FROM provider_roots
+         UNION ALL
+         SELECT provider.container_id,inheritance.dst_id,provider.depth+1,
+                provider.path || inheritance.dst_id || ','
          FROM provider_closure provider
          JOIN edges inheritance ON inheritance.src_id=provider.provider_id
          WHERE inheritance.kind='INHERITS'
            AND inheritance.rel IN (SELECT value FROM json_each(?))
+           AND provider.depth<32
+           AND instr(provider.path,',' || inheritance.dst_id || ',')=0
        ), candidate_containers(id) AS (
          SELECT id FROM containers
          UNION
@@ -129,12 +138,16 @@ export class SemanticCandidateRepository {
          FROM candidate_containers scope
          JOIN symbols scope_symbol ON scope_symbol.id=scope.id
          JOIN provider_closure provider ON provider.container_id=scope.id
+         JOIN symbols provider_symbol ON provider_symbol.id=provider.provider_id
          JOIN contains owned ON owned.parent_id=provider.provider_id
          JOIN symbols member ON member.id=owned.child_id
          WHERE member.name=? AND (?<0 OR member.arity IS NULL OR member.arity=?)
+           AND NOT(provider_symbol.kind='abstract_class'
+             AND scope_symbol.kind<>'abstract_class')
        )
        SELECT id,container_kind,
-         EXISTS(SELECT 1 FROM roots WHERE kind IN ('interface','trait'))
+         EXISTS(SELECT 1 FROM roots
+           WHERE kind IN ('interface','trait','abstract_class'))
            AS abstract_dispatch,
          EXISTS(
            SELECT 1 FROM candidate_members candidate
@@ -174,7 +187,7 @@ export class SemanticCandidateRepository {
 }
 
 function isAbstractContainerKind(kind: string): boolean {
-  return kind === "interface" || kind === "trait";
+  return kind === "interface" || kind === "trait" || kind === "abstract_class";
 }
 
 function candidatePolicy(language?: string): {
@@ -198,7 +211,7 @@ function candidatePolicy(language?: string): {
     return {
       inheritanceRelations: ["extends", "implements"],
       structuralRootKinds: [],
-      providerRelations: [],
+      providerRelations: ["extends"],
     };
   return {
     inheritanceRelations: ["extends", "implements", "trait"],

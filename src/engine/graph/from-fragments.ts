@@ -27,10 +27,17 @@ export function fileGraphFromFragments(
   const publicFragments = uniquePublicCodeFragments(fragments);
   const nodes: SymNode[] = publicFragments.map((fragment) => {
     const metadata = fragment.metadata;
-    const kind =
+    const baseKind =
       metadata?.kind === "code"
         ? metadata.symbolType
         : (metadata?.kind ?? "unknown");
+    const kind =
+      metadata?.kind === "code" &&
+      baseKind === "class" &&
+      (metadata.nodeType === "abstract_class_declaration" ||
+        metadata.modifiers.includes("abstract"))
+        ? "abstract_class"
+        : baseKind;
     const name =
       metadata?.kind === "code"
         ? metadata.symbolName

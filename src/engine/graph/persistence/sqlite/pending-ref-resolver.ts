@@ -228,9 +228,9 @@ export class SqlitePendingRefResolver {
       return;
     }
     if (
-      (semanticResolution.abstractDispatch && !semanticResolution.rtaActive) ||
-      semanticCandidates.length > 1 ||
-      (semanticCandidates.length === 0 && target.hints?.dispatch)
+      ref.ref_kind === "call" &&
+      ((semanticResolution.abstractDispatch && !semanticResolution.rtaActive) ||
+        semanticCandidates.length > 1)
     ) {
       this.persistDynamicCall(ref, target, semanticCandidates);
       return;

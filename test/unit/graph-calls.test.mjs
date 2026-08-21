@@ -1093,6 +1093,86 @@ class Use { void invoke(Runner value) { value.run(); } }
   graph.close();
 });
 
+test("Java RTA retains methods inherited by instantiated subclasses", async () => {
+  const file = { ...codeFile("InheritedRta.java"), format: "java" };
+  const source = {
+    kind: "text",
+    file,
+    text: `interface Runner { void run(); }
+class Base implements Runner { public void run() {} }
+class Child extends Base {}
+class Other implements Runner { public void run() {} }
+class Use {
+  void invoke(Runner value) { value.run(); }
+  void create() { new Child(); new Other(); }
+}
+`,
+  };
+  const input = await extractFileGraph(
+    source,
+    await new CodeExtractor().extract(source),
+  );
+  const invoke = input.nodes.find((node) => node.name === "invoke");
+  const parentByChild = new Map(
+    input.edges
+      .filter((edge) => edge.kind === "CONTAINS")
+      .map((edge) => [edge.dst, edge.src]),
+  );
+  const nameById = new Map(input.nodes.map((node) => [node.id, node.name]));
+  const method = (containerName) =>
+    input.nodes.find(
+      (node) =>
+        node.name === "run" &&
+        nameById.get(parentByChild.get(node.id)) === containerName,
+    );
+  const baseRun = method("Base");
+  const otherRun = method("Other");
+  assert.ok(invoke && baseRun && otherRun);
+
+  const graph = new SqliteGraphStorage("", { inMemory: true });
+  graph.upsertFileGraph(file.id, input.nodes, input.edges, input.refs);
+  await graph.resolvePending();
+
+  assert.deepEqual(graph.callees(invoke.id, 1, 10), []);
+  const boundary = graph.dynamicBoundaries([invoke.id], 10)[0];
+  assert.ok(boundary);
+  assert.deepEqual(
+    new Set(boundary.candidates),
+    new Set([baseRun.id, otherRun.id]),
+  );
+  graph.close();
+});
+
+test("Java abstract class methods remain dynamic targets", async () => {
+  const file = { ...codeFile("AbstractClass.java"), format: "java" };
+  const source = {
+    kind: "text",
+    file,
+    text: `abstract class Runner { abstract void run(); }
+class Use { void invoke(Runner value) { value.run(); } }
+`,
+  };
+  const input = await extractFileGraph(
+    source,
+    await new CodeExtractor().extract(source),
+  );
+  const runner = input.nodes.find((node) => node.name === "Runner");
+  const invoke = input.nodes.find((node) => node.name === "invoke");
+  assert.ok(runner && invoke);
+  assert.equal(runner.kind, "abstract_class");
+
+  const graph = new SqliteGraphStorage("", { inMemory: true });
+  graph.upsertFileGraph(file.id, input.nodes, input.edges, input.refs);
+  await graph.resolvePending();
+
+  assert.deepEqual(graph.callees(invoke.id, 1, 10), []);
+  const boundary = graph.dynamicBoundaries([invoke.id], 10)[0];
+  assert.ok(boundary);
+  assert.equal(boundary.reason, "polymorphic_dispatch");
+  assert.deepEqual(boundary.candidates, []);
+  graph.close();
+});
+
 test("RTA narrows virtual candidates to instantiated implementations", async () => {
   const file = { ...codeFile("Rta.java"), format: "java" };
   const source = {

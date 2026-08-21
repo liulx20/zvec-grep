@@ -1,5 +1,10 @@
 import type { GraphQueryStorage } from "../ports.js";
-import type { GraphEdgeKind, GraphReader, SymRef } from "../types.js";
+import type {
+  DynamicBoundary,
+  GraphEdgeKind,
+  GraphReader,
+  SymRef,
+} from "../types.js";
 import { personalizedPageRank } from "../application/ranking.js";
 import { collectCallPaths } from "./paths.js";
 import { assembleExploreFiles } from "./assembly.js";
@@ -99,9 +104,12 @@ export function exploreGraph(
       nodes.map((node) => node.id),
       dynamicBoundaryLimit + 1,
     ) ?? [];
-  const dynamicBoundaries = dynamicBoundaryRows.slice(0, dynamicBoundaryLimit);
+  const dynamicBoundaries = selectDynamicBoundaries(
+    dynamicBoundaryRows,
+    dynamicBoundaryLimit,
+  );
   const dynamicBoundariesTruncated =
-    dynamicBoundaryRows.length > dynamicBoundaryLimit;
+    dynamicBoundaryRows.length > dynamicBoundaries.length;
   const blastRadius = collectBlastRadius(
     graph,
     storage,
@@ -171,6 +179,25 @@ export function exploreGraph(
     dynamicBoundariesTruncated,
     files,
   };
+}
+
+/** Keep candidate-less receiver calls visible without letting them dominate context. */
+function selectDynamicBoundaries(
+  boundaries: readonly DynamicBoundary[],
+  limit: number,
+): DynamicBoundary[] {
+  const uncertainLimit = Math.min(12, Math.max(1, Math.floor(limit / 4)));
+  const selected: DynamicBoundary[] = [];
+  let uncertainCount = 0;
+  for (const boundary of boundaries) {
+    if (boundary.candidateDetails.length === 0) {
+      if (uncertainCount >= uncertainLimit) continue;
+      uncertainCount++;
+    }
+    selected.push(boundary);
+    if (selected.length >= limit) break;
+  }
+  return selected;
 }
 
 /**

@@ -588,6 +588,9 @@ type ExploreEdge = {
 无法确定接收者类型的 `obj.method()`，让 Agent 知道静态图在这里断开，而不是把“没有边”误读成
 "没有调用"。每个 boundary 同时返回预算内的 `candidates`；单条 boundary 的
 `candidatesTruncated` 和结果级 `dynamicBoundariesTruncated` 会明确指出候选或边界列表是否被预算截断。
+只有 `call` 引用会进入 dynamic boundary；字段/member 引用不会混入。带实际候选的多态边界优先保留，
+没有候选的未知 receiver 调用最多使用 dynamic-boundary 预算的四分之一（且不超过 12 条），避免容器方法
+和第三方 API 调用淹没 Explore context。
 
 结构化 target 的 `receiverType`、`candidateTypes`、`genericBounds` 和 `dispatch` 由语言 AST 提取：
 Go 支持方法 receiver、参数类型和类型参数 constraint；Rust 支持参数类型和 trait bound；Java 支持参数
@@ -602,6 +605,12 @@ Go method set 校验会沿嵌入 interface/type 的 `INHERITS` provider closure 
 候选选择同时使用方法 `arity` 过滤重载。字段、局部变量显式类型以及简单的 `new Type()` 赋值会补充
 receiver type；`INSTANTIATES` 记录实际构造过的类型。当 CHA 得到多个实现且其中只有部分类型被实例化时，
 RTA 优先保留这些实际类型；仓库没有实例化证据时仍保留完整 CHA 候选，避免把未覆盖测试路径误删。
+RTA 会把已实例化子类继承的方法映射到实际 provider，例如实例化 `Child extends Base` 时，
+`Base.run` 仍作为 `Child` 的活跃实现参与候选。`abstract class` 以 `abstract_class` symbol kind 保留，
+其抽象方法不会被投影成确定的 `CALLS`。
+
+增量更新实现类型或 `INHERITS` 关系时，resolver 会同时失效已有候选和空候选 dynamic boundary；
+因此“最初没有实现、后来新增实现”的调用也会重新投影，不依赖 `edge_candidates` 中预先存在记录。
 
 resolver projection 与 reader 的 dynamic-boundary 查询共用 `SemanticCandidateRepository`，不再维护两份
 递归候选 SQL。repository 统一处理可见文件、arity、RTA、排序和预算；Java、Go、Rust 策略分别决定

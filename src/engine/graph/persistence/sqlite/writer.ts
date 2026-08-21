@@ -67,7 +67,7 @@ export class SqliteGraphWriter {
     );
     const affected = this.affectedResolvedEdgeIds(fileId, [
       ...oldNames,
-      ...this.changedSemanticNames(nodes, refs),
+      ...this.changedSemanticNames(nodes, edges, refs),
     ]);
     affected.push(
       ...this.affectedInstantiationProjectionIds(affectedDispatchTypes),
@@ -216,7 +216,10 @@ export class SqliteGraphWriter {
              edge.member_name IN (SELECT value FROM json_each(?))
              OR edge.ref_name IN (SELECT value FROM json_each(?))
            ))
-           OR (edge.evidence='preferred_file' AND EXISTS(
+           OR (edge.evidence='preferred_file' AND (
+             edge.member_name IN (SELECT value FROM json_each(?))
+             OR edge.ref_name IN (SELECT value FROM json_each(?))
+           ) AND EXISTS(
              SELECT 1 FROM edges imported_file
              WHERE imported_file.kind='IMPORTS'
                AND imported_file.src_is_file=1
@@ -237,8 +240,8 @@ export class SqliteGraphWriter {
        )
        UNION
        SELECT DISTINCT unresolved.id FROM unresolved_refs unresolved
-       JOIN edge_candidates candidate ON candidate.edge_id=unresolved.id
-       JOIN symbols target ON target.id=candidate.target_id
+       LEFT JOIN edge_candidates candidate ON candidate.edge_id=unresolved.id
+       LEFT JOIN symbols target ON target.id=candidate.target_id
        LEFT JOIN contains ownership ON ownership.child_id=candidate.target_id
        LEFT JOIN symbols container ON container.id=ownership.parent_id
        WHERE target.file_id=? OR (?<>'[]' AND (
@@ -259,6 +262,8 @@ export class SqliteGraphWriter {
       fileId,
       fileId,
       fileId,
+      names,
+      names,
       names,
       names,
       names,
@@ -517,11 +522,15 @@ export class SqliteGraphWriter {
 
   private changedSemanticNames(
     nodes: readonly SymNode[],
+    edges: readonly LocalEdge[],
     refs: readonly RawRef[],
   ): string[] {
     return [
       ...new Set([
         ...nodes.flatMap((node) => (node.name ? [node.name] : [])),
+        ...edges.flatMap((edge) =>
+          edge.kind === "INHERITS" ? [edge.ref_name] : [],
+        ),
         ...refs.flatMap((ref) =>
           ref.type === "symbol" &&
           ["extends", "implements", "overrides", "type"].includes(ref.ref_kind)
