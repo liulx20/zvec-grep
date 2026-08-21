@@ -104,7 +104,7 @@ export class SqliteGraphReader {
     }>(
       `SELECT id,owner_id,ref_name,member_name,receiver_kind,receiver_name,
               resolution_hints,dynamic_reason AS reason
-       FROM reference_edges
+       FROM unresolved_refs
        WHERE status='dynamic' AND owner_id IN (${placeholders})
        ORDER BY owner_id,line,id LIMIT ?`,
       ...ids,
@@ -142,7 +142,7 @@ export class SqliteGraphReader {
     if (remaining === 0) return persisted;
     const unresolved = this.all<RefRow>(
       `SELECT id,owner_id,owner_is_file,ref_name,ref_kind,line,status,imported_name,local_name,source_language,receiver_kind,receiver_name,member_name,resolution_hints,last_attempt
-       FROM reference_edges
+       FROM unresolved_refs
        WHERE owner_is_file=0 AND status='failed' AND receiver_kind IS NOT NULL
          AND owner_id IN (${placeholders})
        ORDER BY owner_id,line,id LIMIT ?`,
@@ -268,7 +268,12 @@ export class SqliteGraphReader {
   callees(id: string, depth: number, limit: number): SymRef[] {
     if (depth <= 1)
       return this.all<EdgeRow>(
-        "SELECT * FROM symbol_edges WHERE src_id=? AND kind='CALLS' ORDER BY count DESC LIMIT ?",
+        `SELECT src_id,dst_id,kind,rel,SUM(count) AS count,
+                MIN(first_line) AS first_line,MIN(ref_name) AS ref_name,
+                CASE WHEN MAX(provenance)='static' THEN 'static' ELSE 'heuristic' END AS provenance,
+                MAX(confidence) AS confidence,MIN(evidence) AS evidence
+         FROM edges WHERE src_id=? AND src_is_file=0 AND kind='CALLS'
+         GROUP BY src_id,dst_id,kind,rel ORDER BY count DESC,dst_id LIMIT ?`,
         id,
         limit,
       ).map((e) => ({
@@ -283,7 +288,12 @@ export class SqliteGraphReader {
   }
   usages(id: string, limit: number): UsageRef[] {
     return this.all<EdgeRow>(
-      "SELECT * FROM symbol_edges WHERE dst_id=? ORDER BY first_line LIMIT ?",
+      `SELECT src_id,dst_id,kind,rel,SUM(count) AS count,
+              MIN(first_line) AS first_line,MIN(ref_name) AS ref_name,
+              CASE WHEN MAX(provenance)='static' THEN 'static' ELSE 'heuristic' END AS provenance,
+              MAX(confidence) AS confidence,MIN(evidence) AS evidence
+       FROM edges WHERE dst_id=? AND dst_is_file=0
+       GROUP BY src_id,dst_id,kind,rel ORDER BY first_line LIMIT ?`,
       id,
       limit,
     ).map((e) => ({
@@ -351,7 +361,7 @@ export class SqliteGraphReader {
   }
   deadCode(limit: number): SymRef[] {
     return this.all<{ id: string; kind: string }>(
-      `SELECT s.id,s.kind FROM symbols s WHERE s.is_exported=0 AND s.kind IN ('function','method') AND NOT EXISTS(SELECT 1 FROM symbol_edges e WHERE e.dst_id=s.id AND e.kind='CALLS') LIMIT ?`,
+      `SELECT s.id,s.kind FROM symbols s WHERE s.is_exported=0 AND s.kind IN ('function','method') AND NOT EXISTS(SELECT 1 FROM edges e WHERE e.dst_id=s.id AND e.dst_is_file=0 AND e.kind='CALLS') LIMIT ?`,
       limit,
     );
   }
@@ -369,7 +379,7 @@ export class SqliteGraphReader {
       current = p.parent_id;
     }
     const outgoing = this.all<EdgeRow>(
-      "SELECT * FROM symbol_edges WHERE src_id=? LIMIT 100",
+      "SELECT * FROM edges WHERE src_id=? AND src_is_file=0 LIMIT 100",
       id,
     ).map((e) => ({ id: e.dst_id, rel: e.rel }));
     return {
@@ -426,7 +436,7 @@ export class SqliteGraphReader {
       const p = rel.map(() => "?").join(",");
       selects.push(
         `SELECT src_id AS src,dst_id AS dst,kind,rel,count,first_line,ref_name,provenance,confidence,evidence
-         FROM symbol_edges
+         FROM edges
          WHERE src_id IN(SELECT value FROM json_each(?))
            AND dst_id IN(SELECT value FROM json_each(?)) AND kind IN(${p})`,
       );
@@ -456,23 +466,22 @@ export class SqliteGraphReader {
     }
     if (edgeKinds.includes("IMPORTS")) {
       selects.push(
-        `SELECT src_file_id AS src,dst_file_id AS dst,'IMPORTS' AS kind,
-                spec AS rel,1 AS count,0 AS first_line,'' AS ref_name,
-                'static' AS provenance,1.0 AS confidence,NULL AS evidence
-         FROM file_imports
-         WHERE src_file_id IN(SELECT value FROM json_each(?))
-           AND dst_file_id IN(SELECT value FROM json_each(?))`,
+        `SELECT src_id AS src,dst_id AS dst,kind,rel,count,first_line,ref_name,
+                provenance,confidence,evidence
+         FROM edges
+         WHERE kind='IMPORTS' AND src_is_file=1 AND dst_is_file=1
+           AND src_id IN(SELECT value FROM json_each(?))
+           AND dst_id IN(SELECT value FROM json_each(?))`,
       );
       params.push(ids, ids);
     }
     if (edgeKinds.includes("INSTANTIATES")) {
       selects.push(
-        `SELECT src_id AS src,type_id AS dst,'INSTANTIATES' AS kind,
-                'instantiates' AS rel,1 AS count,first_line,'' AS ref_name,
-                'static' AS provenance,1.0 AS confidence,NULL AS evidence
-         FROM instantiates
-         WHERE src_id IN(SELECT value FROM json_each(?))
-           AND type_id IN(SELECT value FROM json_each(?))`,
+        `SELECT src_id AS src,dst_id AS dst,kind,rel,count,first_line,ref_name,
+                provenance,confidence,evidence FROM edges
+         WHERE kind='INSTANTIATES' AND src_is_file=0 AND dst_is_file=0
+           AND src_id IN(SELECT value FROM json_each(?))
+           AND dst_id IN(SELECT value FROM json_each(?))`,
       );
       params.push(ids, ids);
     }
@@ -512,11 +521,11 @@ export class SqliteGraphReader {
       symCount: count("symbols"),
       fileCount: count("files"),
       refCount: this.one<{ count: number }>(
-        "SELECT COUNT(*) AS count FROM reference_edges WHERE status IN ('pending','failed')",
+        "SELECT COUNT(*) AS count FROM unresolved_refs WHERE status IN ('pending','failed')",
       )?.count ?? 0,
-      callsCount: count("symbol_edges", "WHERE kind='CALLS'"),
-      refsCount: count("symbol_edges", "WHERE kind='REFS'"),
-      inheritsCount: count("symbol_edges", "WHERE kind='INHERITS'"),
+      callsCount: count("edges", "WHERE kind='CALLS'"),
+      refsCount: count("edges", "WHERE kind='REFS'"),
+      inheritsCount: count("edges", "WHERE kind='INHERITS'"),
     };
   }
 
@@ -597,7 +606,7 @@ export class SqliteGraphReader {
         if (remaining <= 0) break;
         out.push(
           ...this.all<EdgeRow>(
-            `SELECT * FROM symbol_edges WHERE ${side} IN(SELECT value FROM json_each(?)) AND kind IN(${p}) ORDER BY ${side},kind,src_id,dst_id,rel LIMIT ?`,
+            `SELECT * FROM edges WHERE ${side} IN(SELECT value FROM json_each(?)) AND src_is_file=0 AND dst_is_file=0 AND kind IN(${p}) ORDER BY ${side},kind,src_id,dst_id,rel LIMIT ?`,
             ids,
             ...rel,
             remaining,
@@ -636,36 +645,32 @@ export class SqliteGraphReader {
       }
     }
     if (kinds.includes("IMPORTS")) {
-      const sides = [direction === "outgoing" ? "src_file_id" : "dst_file_id"];
+      const sides = [direction === "outgoing" ? "src_id" : "dst_id"];
       for (const side of sides) {
         const remaining = limit - out.length;
         if (remaining <= 0) break;
         out.push(
-          ...this.all<{
-            src_file_id: string;
-            dst_file_id: string;
-            spec: string;
-          }>(
-            `SELECT * FROM file_imports WHERE ${side} IN(SELECT value FROM json_each(?)) ORDER BY ${side},src_file_id,dst_file_id,spec LIMIT ?`,
+          ...this.all<EdgeRow>(
+            `SELECT * FROM edges WHERE kind='IMPORTS' AND src_is_file=1 AND dst_is_file=1 AND ${side} IN(SELECT value FROM json_each(?)) ORDER BY ${side},src_id,dst_id,rel LIMIT ?`,
             ids,
             remaining,
           ).map((r) =>
-            structuralEdge(r.src_file_id, r.dst_file_id, "IMPORTS", r.spec),
+            structuralEdge(r.src_id, r.dst_id, "IMPORTS", r.rel),
           ),
         );
       }
     }
     if (kinds.includes("INSTANTIATES")) {
-      const side = direction === "outgoing" ? "src_id" : "type_id";
+      const side = direction === "outgoing" ? "src_id" : "dst_id";
       const remaining = limit - out.length;
       if (remaining > 0) {
         out.push(
-          ...this.all<{ src_id: string; type_id: string; first_line: number }>(
-            `SELECT * FROM instantiates WHERE ${side} IN(SELECT value FROM json_each(?)) ORDER BY ${side},src_id,type_id LIMIT ?`,
+          ...this.all<EdgeRow>(
+            `SELECT * FROM edges WHERE kind='INSTANTIATES' AND src_is_file=0 AND dst_is_file=0 AND ${side} IN(SELECT value FROM json_each(?)) ORDER BY ${side},src_id,dst_id LIMIT ?`,
             ids,
             remaining,
           ).map((row) => ({
-            ...structuralEdge(row.src_id, row.type_id, "INSTANTIATES", "instantiates"),
+            ...structuralEdge(row.src_id, row.dst_id, "INSTANTIATES", row.rel),
             first_line: row.first_line,
           })),
         );

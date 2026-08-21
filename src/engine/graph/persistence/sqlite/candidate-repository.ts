@@ -18,8 +18,10 @@ export class SemanticCandidateRepository {
     return this.database.all<{ id: string }>(
       `WITH RECURSIVE visible(file_id) AS (
          SELECT file_id FROM symbols WHERE id=?
-         UNION SELECT imports.dst_file_id FROM file_imports imports
-         JOIN symbols source ON source.file_id=imports.src_file_id WHERE source.id=?
+         UNION SELECT imports.dst_id FROM edges imports
+         JOIN symbols source ON source.file_id=imports.src_id
+         WHERE source.id=? AND imports.kind='IMPORTS'
+           AND imports.src_is_file=1 AND imports.dst_is_file=1
        ), roots(id,kind) AS (
          SELECT id,kind FROM symbols
          WHERE name IN (SELECT value FROM json_each(?))
@@ -27,7 +29,7 @@ export class SemanticCandidateRepository {
        ), containers(id) AS (
          SELECT id FROM roots
          UNION
-         SELECT e.src_id FROM symbol_edges e JOIN containers c ON c.id=e.dst_id
+         SELECT e.src_id FROM edges e JOIN containers c ON c.id=e.dst_id
          WHERE e.kind='INHERITS'
            AND e.rel IN (SELECT value FROM json_each(?))
        ), candidate_containers(id) AS (
@@ -51,8 +53,11 @@ export class SemanticCandidateRepository {
        SELECT id FROM candidate_members
        WHERE NOT EXISTS(
          SELECT 1 FROM candidate_members candidate
-         JOIN instantiates made ON made.type_id=candidate.container_id
-       ) OR container_id IN (SELECT type_id FROM instantiates)
+         JOIN edges made ON made.dst_id=candidate.container_id
+         WHERE made.kind='INSTANTIATES' AND made.dst_is_file=0
+       ) OR container_id IN (
+         SELECT dst_id FROM edges WHERE kind='INSTANTIATES' AND dst_is_file=0
+       )
        ORDER BY id LIMIT ?`,
       query.sourceId,
       query.sourceId,

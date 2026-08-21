@@ -195,19 +195,19 @@ test("external refs are dropped without creating edges", async () => {
   graph.close();
 });
 
-test("resolved references retain durable source facts", async () => {
+test("resolved references move their durable source facts onto edges", async () => {
   class InspectableGraph extends SqliteGraphStorage {
     resolvedOccurrenceCount() {
       return this.database.db
         .prepare(
-          "SELECT COUNT(*) AS count FROM reference_edges WHERE status='resolved'",
+          "SELECT COUNT(*) AS count FROM edges WHERE kind='CALLS'",
         )
         .get().count;
     }
-    referenceTableNames() {
+    graphTableNames() {
       return this.database.db
         .prepare(
-          "SELECT name FROM sqlite_master WHERE type='table' AND (name LIKE '%ref%' OR name LIKE '%dynamic%' OR name LIKE '%candidate%') ORDER BY name",
+          "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
         )
         .all()
         .map((row) => row.name);
@@ -228,9 +228,14 @@ test("resolved references retain durable source facts", async () => {
   assert.equal(graph.stats().callsCount, 1);
   assert.equal(graph.stats().refCount, 0);
   assert.equal(graph.resolvedOccurrenceCount(), 1);
-  assert.deepEqual(graph.referenceTableNames(), [
+  assert.deepEqual(graph.graphTableNames(), [
+    "contains",
     "edge_candidates",
-    "reference_edges",
+    "edges",
+    "files",
+    "graph_meta",
+    "symbols",
+    "unresolved_refs",
   ]);
   graph.close();
 });
@@ -469,7 +474,7 @@ test("retry batches process unrelated names only once per invocation", async () 
     pendingAttempts() {
       return this.database.db
         .prepare(
-          "SELECT ref_name,last_attempt,COUNT(*) AS count FROM reference_edges WHERE status='failed' GROUP BY ref_name,last_attempt ORDER BY ref_name,last_attempt",
+          "SELECT ref_name,last_attempt,COUNT(*) AS count FROM unresolved_refs WHERE status='failed' GROUP BY ref_name,last_attempt ORDER BY ref_name,last_attempt",
         )
         .all()
         .map((row) => ({ ...row }));

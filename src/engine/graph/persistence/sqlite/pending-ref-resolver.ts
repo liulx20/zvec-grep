@@ -139,7 +139,7 @@ export class SqlitePendingRefResolver {
       ref.source_language ?? undefined,
     );
     const preferred = this.all<{ dst_file_id: string }>(
-      "SELECT dst_file_id FROM file_imports WHERE src_file_id=?",
+      "SELECT DISTINCT dst_id AS dst_file_id FROM edges WHERE src_id=? AND src_is_file=1 AND dst_is_file=1 AND kind='IMPORTS'",
       owner.file_id,
     ).map((row) => row.dst_file_id);
     const binding = this.one<{
@@ -147,13 +147,13 @@ export class SqlitePendingRefResolver {
       dst_file_id: string;
       local_name: string;
     }>(
-      `SELECT imported_name,target_file_id AS dst_file_id,local_name
-       FROM reference_edges
-       WHERE owner_is_file=1 AND owner_id=? AND status='resolved'
-         AND target_file_id IS NOT NULL AND imported_name IS NOT NULL
+      `SELECT imported_name,dst_id AS dst_file_id,local_name
+       FROM edges
+       WHERE src_is_file=1 AND src_id=? AND kind='IMPORTS'
+         AND imported_name IS NOT NULL
          AND local_name IN (?,?)
        ORDER BY CASE WHEN local_name=? THEN 0 ELSE 1 END,
-                target_file_id,imported_name LIMIT 1`,
+                dst_id,imported_name LIMIT 1`,
       owner.file_id,
       ref.ref_name,
       refReceiver(ref.ref_name),
@@ -210,7 +210,7 @@ export class SqlitePendingRefResolver {
       reference,
     );
     if (result.status === "external") {
-      this.db.prepare("UPDATE reference_edges SET status='external' WHERE id=?").run(
+      this.db.prepare("UPDATE unresolved_refs SET status='external' WHERE id=?").run(
         ref.id,
       );
       return;
@@ -255,9 +255,8 @@ export class SqlitePendingRefResolver {
     candidates: readonly string[],
   ): void {
     this.db.prepare(
-      `UPDATE reference_edges
+      `UPDATE unresolved_refs
        SET status='dynamic',dynamic_reason='polymorphic_dispatch',
-           target_symbol_id=NULL,target_file_id=NULL,edge_kind=NULL,edge_rel=NULL,
            member_name=?,receiver_kind=?,receiver_name=?,resolution_hints=?
        WHERE id=?`,
     ).run(
@@ -289,47 +288,42 @@ export class SqlitePendingRefResolver {
   ): void {
     if (ref.ref_kind === "new") {
       this.db.prepare(
-        "INSERT OR REPLACE INTO instantiates(src_id,type_id,first_line) VALUES(?,?,?)",
-      ).run(ref.owner_id, dst, ref.line);
+        `INSERT OR REPLACE INTO edges(
+           id,src_id,dst_id,src_is_file,dst_is_file,kind,rel,count,first_line,
+           ref_name,source_language,provenance,confidence
+         ) VALUES(?,?,?,0,0,'INSTANTIATES','new',1,?,?,?,'static',1)`,
+      ).run(`${ref.id}:instantiates`, ref.owner_id, dst, ref.line, ref.ref_name,
+        ref.source_language);
     }
     this.db
       .prepare(
-        `INSERT INTO symbol_edges(src_id,dst_id,kind,rel,count,first_line,ref_name,provenance,confidence,evidence)
-         VALUES(?,?,?,?,1,?,?,?,?,?)
-         ON CONFLICT(src_id,dst_id,kind,rel) DO UPDATE SET
-           count=count+1,
-           first_line=min(first_line,excluded.first_line),
-           provenance=CASE WHEN symbol_edges.provenance='static' THEN 'static' ELSE excluded.provenance END,
-           confidence=max(symbol_edges.confidence,excluded.confidence),
-           evidence=CASE WHEN symbol_edges.provenance='static' THEN symbol_edges.evidence ELSE excluded.evidence END`,
+        `INSERT OR REPLACE INTO edges(
+           id,src_id,dst_id,src_is_file,dst_is_file,kind,rel,count,first_line,
+           ref_name,source_language,imported_name,local_name,receiver_kind,
+           receiver_name,member_name,resolution_hints,provenance,confidence,evidence
+         ) VALUES(?,?,?,0,0,?,?,1,?,?,?,?,?,?,?,?,?,?,?,?)`,
       )
       .run(
+        ref.id,
         ref.owner_id,
         dst,
         edgeKind,
         ref.ref_kind,
         ref.line,
         ref.ref_name,
+        ref.source_language,
+        ref.imported_name,
+        ref.local_name,
+        ref.receiver_kind,
+        ref.receiver_name,
+        ref.member_name,
+        ref.resolution_hints,
         metadata.provenance,
         metadata.confidence,
         metadata.evidence ?? null,
       );
-    this.db.prepare(
-      `UPDATE reference_edges
-       SET status='resolved',target_symbol_id=?,target_file_id=NULL,
-           edge_kind=?,edge_rel=?,dynamic_reason=NULL,
-           provenance=?,confidence=?,evidence=?
-       WHERE id=?`,
-    ).run(
-      dst,
-      edgeKind,
-      ref.ref_kind,
-      metadata.provenance,
-      metadata.confidence,
-      metadata.evidence ?? null,
-      ref.id,
-    );
     this.db.prepare("DELETE FROM edge_candidates WHERE edge_id=?").run(ref.id);
+    this.db.prepare("DELETE FROM unresolved_refs WHERE id=?").run(ref.id);
   }
 
   private resolveImport(
@@ -346,23 +340,33 @@ export class SqlitePendingRefResolver {
       paths,
     );
     if (result.status === "external") {
-      this.db.prepare("UPDATE reference_edges SET status='external' WHERE id=?").run(
+      this.db.prepare("UPDATE unresolved_refs SET status='external' WHERE id=?").run(
         ref.id,
       );
       return;
     }
     if (result.status !== "resolved") return this.failRef(ref.id, attempt);
-    this.db
-      .prepare(
-        "INSERT OR IGNORE INTO file_imports(src_file_id,dst_file_id,spec) VALUES(?,?,?)",
-      )
-      .run(ref.owner_id, result.fileId, ref.ref_name);
     this.db.prepare(
-      `UPDATE reference_edges
-       SET status='resolved',target_file_id=?,target_symbol_id=NULL,
-           edge_kind='IMPORTS',edge_rel='import',dynamic_reason=NULL
-       WHERE id=?`,
-    ).run(result.fileId, ref.id);
+      `INSERT OR REPLACE INTO edges(
+         id,src_id,dst_id,src_is_file,dst_is_file,kind,rel,count,first_line,
+         ref_name,source_language,imported_name,local_name,receiver_kind,
+         receiver_name,member_name,resolution_hints,provenance,confidence,evidence
+       ) VALUES(?,?,?,1,1,'IMPORTS','import',1,?,?,?,?,?,?,?,?,?,'static',1,NULL)`,
+    ).run(
+      ref.id,
+      ref.owner_id,
+      result.fileId,
+      ref.line,
+      ref.ref_name,
+      ref.source_language,
+      ref.imported_name,
+      ref.local_name,
+      ref.receiver_kind,
+      ref.receiver_name,
+      ref.member_name,
+      ref.resolution_hints,
+    );
+    this.db.prepare("DELETE FROM unresolved_refs WHERE id=?").run(ref.id);
   }
 
   private retryableRefs(
@@ -373,15 +377,15 @@ export class SqlitePendingRefResolver {
     return this.all<RefRow>(
       `SELECT id,owner_id,owner_is_file,ref_name,ref_kind,line,status,imported_name,local_name,source_language,receiver_kind,receiver_name,member_name,resolution_hints,last_attempt
        FROM (
-         SELECT reference_edges.*,
+         SELECT unresolved_refs.*,
                 row_number() OVER (PARTITION BY ref_name ORDER BY last_attempt,id) AS retry_rank
-         FROM reference_edges
+         FROM unresolved_refs
          WHERE status='failed' AND last_attempt<? AND ${phaseCondition}
        )
        WHERE retry_rank<=?
        UNION ALL
        SELECT id,owner_id,owner_is_file,ref_name,ref_kind,line,status,imported_name,local_name,source_language,receiver_kind,receiver_name,member_name,resolution_hints,last_attempt
-       FROM reference_edges
+       FROM unresolved_refs
        WHERE status='pending' AND last_attempt<? AND ${phaseCondition}
        ORDER BY ref_name,id`,
       attemptWatermark,
@@ -399,7 +403,7 @@ export class SqlitePendingRefResolver {
          SELECT ?,0
          UNION
          SELECT e.dst_id,h.depth+1
-         FROM symbol_edges e JOIN hierarchy h ON e.src_id=h.id
+         FROM edges e JOIN hierarchy h ON e.src_id=h.id
          WHERE e.kind='INHERITS'
            AND e.rel IN ('extends','implements')
            AND h.depth<32
@@ -430,7 +434,7 @@ export class SqlitePendingRefResolver {
     const phaseCondition = resolvePhaseCondition(phase);
     const row = this.one<{ max_count: number }>(
       `SELECT COALESCE(MAX(ref_count),0) AS max_count FROM (
-         SELECT COUNT(*) AS ref_count FROM reference_edges
+         SELECT COUNT(*) AS ref_count FROM unresolved_refs
          WHERE status='failed' AND last_attempt<? AND ${phaseCondition}
          GROUP BY ref_name
        )`,
@@ -442,7 +446,7 @@ export class SqlitePendingRefResolver {
   private failRef(id: string, attempt: number): void {
     this.db
       .prepare(
-        "UPDATE reference_edges SET status='failed',last_attempt=? WHERE id=?",
+        "UPDATE unresolved_refs SET status='failed',last_attempt=? WHERE id=?",
       )
       .run(attempt, id);
   }

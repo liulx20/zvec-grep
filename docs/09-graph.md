@@ -45,9 +45,9 @@
 | `IMPORTS` | 文件导入另一个文件 | import/include 提取和路径解析 |
 
 同文件内能够唯一确定的引用会直接生成关系边；无法在本文件唯一确定的引用先进入
-`reference_edges` 的 pending occurrence，等所有文件写入后统一解析。同一 owner、名称、关系类型和行号下的多个引用会用
-采集顺序中的 occurrence 区分 Ref ID，因此 `target(); target();` 不会在 pending 阶段被误去重；
-解析到同一目标后再聚合到关系边的 `count`。
+`unresolved_refs`，等所有文件写入后统一解析。同一 owner、名称、关系类型和行号下的多个引用会用
+采集顺序中的 occurrence 区分 Ref ID，因此 `target(); target();` 不会在解析前被误去重。解析成功后，
+该 occurrence 会迁移到 `edges`，并从 `unresolved_refs` 删除。
 
 ### 2.2 引用解析
 
@@ -105,9 +105,11 @@ erDiagram
   SYMBOL ||--o{ SYMBOL : INHERITS
   FILE ||--o{ FILE : IMPORTS
   SYMBOL ||--o{ SYMBOL : INSTANTIATES
-  SYMBOL ||--o{ REFERENCE_EDGE : OWNS_SYMBOL_REF
-  FILE ||--o{ REFERENCE_EDGE : OWNS_FILE_REF
-  REFERENCE_EDGE ||--o{ EDGE_CANDIDATE : HAS
+  SYMBOL ||--o{ EDGE : SOURCE_SYMBOL
+  FILE ||--o{ EDGE : SOURCE_FILE
+  SYMBOL ||--o{ UNRESOLVED_REF : OWNS_SYMBOL_REF
+  FILE ||--o{ UNRESOLVED_REF : OWNS_FILE_REF
+  UNRESOLVED_REF ||--o{ EDGE_CANDIDATE : HAS
 
   FILE {
     text id PK
@@ -119,27 +121,35 @@ erDiagram
     text kind
     boolean is_exported
   }
-  REFERENCE_EDGE {
+  EDGE {
     text id PK
-    text owner_id
-    boolean owner_is_file
+    text src_id
+    text dst_id
+    boolean src_is_file
+    boolean dst_is_file
+    text kind
+    text rel
     text ref_name
-    text ref_kind
     integer line
     text source_language
     text receiver_kind
     text receiver_name
     text member_name
     text resolution_hints
-    text target_symbol_id FK
-    text target_file_id FK
-    text edge_kind
-    text edge_rel
+    text provenance
+    real confidence
+  }
+  UNRESOLVED_REF {
+    text id PK
+    text owner_id
+    boolean owner_is_file
+    text ref_name
+    text ref_kind
+    integer line
+    text resolution_hints
     integer last_attempt
     text status
     text dynamic_reason
-    text provenance
-    real confidence
   }
   EDGE_CANDIDATE {
     text edge_id PK
@@ -149,7 +159,13 @@ erDiagram
   }
 ```
 
-`reference_edges` 是逐源码 occurrence 的单一事实表，同时保存原始引用、解析状态和当前目标。其中：
+引用 occurrence 在两个互斥状态之间迁移：
+
+- `unresolved_refs` 保存尚未成功投影的源码事实，状态为 `pending`、`failed`、`external` 或 `dynamic`。
+- `edges` 保存已经解析成功的关系，同时携带原引用的语言、receiver、member、binding、hint、来源和置信度。
+- 解析成功时插入 `edges` 并删除对应的 `unresolved_refs`；目标或类型关系变化时，writer 可用边上的来源信息把它恢复成 unresolved ref，再重新解析。
+
+其中：
 
 - `owner_id` 表示这条引用由谁产生，也就是未来关系边的起点。
 - `owner_is_file = false` 时，`owner_id` 是 `symbols.id`。例如 `login()` 中调用了尚未解析的
@@ -168,34 +184,32 @@ erDiagram
 | `graph_meta` | `key` | 保存 `schema_version` |
 | `files` | `id` | 图中存在的文件 |
 | `symbols` | `id` | 符号及其所属文件、名称、种类、导出状态 |
-| `reference_edges` | `id` | 逐调用/引用 occurrence 的原始事实、状态和当前解析目标 |
 | `contains` | `(parent_id, child_id)` | 容器与成员关系 |
-| `symbol_edges` | `(src_id, dst_id, kind, rel)` | `CALLS`、`REFS`、`INHERITS` |
-| `file_imports` | `(src_file_id, dst_file_id, spec)` | 文件导入关系 |
-| `instantiates` | `(src_id, type_id)` | callable 对具体类型的实例化事实，用于轻量 RTA |
+| `edges` | `id` | 已解析的 `CALLS`、`REFS`、`INHERITS`、`IMPORTS`、`INSTANTIATES` occurrence |
+| `unresolved_refs` | `id` | 尚未解析、外部或动态的源码引用 occurrence |
 | `edge_candidates` | `(edge_id, target_id)` | 动态 occurrence 的候选目标、依据和置信度 |
 
 几点说明：
 
 - `DEFINES` 没有单独建表，由 `symbols.file_id` 推导。
-- `symbol_edges.kind` 表示大类，`rel` 保存更细的语义，例如 `call`、`new`、
+- `edges.kind` 表示大类，`rel` 保存更细的语义，例如 `call`、`new`、
   `extends`、`type`、`member`。
-- `count` 聚合同一关系出现次数，`first_line` 保存首次出现行号，`ref_name` 保存提取时名称。
-- `symbol_edges.provenance` 区分 `static` 和 `heuristic`；`confidence` 保存关系置信度，`evidence`
+- `edges` 以源码 occurrence 为主；文件内直接解析阶段可以用 `count` 保存已分组的相同关系次数。
+  `first_line` 保存首次出现行号，`ref_name` 保存提取时名称。
+- `edges.provenance` 区分 `static` 和 `heuristic`；`confidence` 保存关系置信度，`evidence`
   保存启发式规则，例如 `unique_member_in_visible_files`。静态边的默认置信度为 1。
-- `reference_edges.receiver_kind`、`receiver_name` 和 `member_name` 保存结构化调用目标；
+- `unresolved_refs` 与 `edges` 都保留 receiver、member 和 resolution hints；成功解析不会丢失重新投影所需的信息。
   `resolution_hints` 以 JSON 保存语言分析器提供的 receiver type、泛型约束、候选类型和分派方式。
   `last_attempt` 用于控制失败引用的公平分批重试。
 - `symbols.signature`、`arity` 和 `return_type` 保存用于重载过滤与类型传播的签名事实。`arity`
   直接从各语言的参数 AST 提取，不再按 signature 文本中的逗号推导；Rust 的 `self` 参数和 Python
   的首个 `self` / `cls` 参数不计入调用 arity，泛型类型内部的逗号也不会被误算为参数分隔符。
-- `reference_edges.status` 在 `pending / failed / external / resolved / dynamic` 之间迁移；解析成功时直接
-  填入 `target_symbol_id` 或 `target_file_id`，多目标调用则保持空 target 并写入 `edge_candidates`。
+- `unresolved_refs.status` 只包含 `pending / failed / external / dynamic`；不存在 `resolved` 状态。
+  多目标调用保持 `dynamic` 并写入 `edge_candidates`。
   `resolvePending()` 不会全量 replay receiver facts；writer 根据 changed member/type/ref names、
   `INHERITS`、`INSTANTIATES`、当前 target 和动态候选计算受影响 occurrence，只撤销并重投影这部分引用。
-- 目标文件删除或重建时，writer 通过 `reference_edges.target_*` 定位受影响 occurrence，递减聚合读模型，
-  清空 target 并改回 `pending`。新增同名 symbol 也会使已解析普通名称引用失效重算；只有没有 occurrence
-  fact 的 direct/legacy 聚合边才走 incoming snapshot 兜底。
+- 目标文件删除或重建时，writer 通过 `edges.dst_id`、名称和 hints 定位受影响 occurrence，把边恢复为
+  `unresolved_refs` 的 `pending` 记录。新增同名 symbol 也会使可能受影响的已解析引用重新投影。
 - schema 使用 `STRICT`、外键、组合主键和按 src/dst/name 建立的查询索引。
 - 当前 schema 版本为 1，作为相对 main 新增图存储的首个正式 schema。不兼容分支中间提交生成的实验数据库；
   read-only 模式遇到旧版本会明确拒绝打开，可写索引要求 rebuild。
@@ -211,7 +225,7 @@ erDiagram
 <owner>#sha1(ref_name, ref_kind, line, occurrence)[0:16]
 ```
 
-它用于 `reference_edges` 主键、去重以及文件重建时的稳定标识，不参与符号目标解析。
+它用于 unresolved ref 与解析后 edge 的稳定 ID、去重以及文件重建时的恢复，不参与符号目标解析。
 
 ## 4. 索引与持久化链路
 
@@ -227,14 +241,14 @@ erDiagram
    不查询其他文件。
 
 3. **区分直接边和待解析引用。** 如果一个 site 在当前文件中能够唯一匹配目标，立即生成
-   `CALLS`、`REFS` 或 `INHERITS` 边；否则生成带 occurrence 的 Ref，以 pending 状态写入 `reference_edges`。
+   `CALLS`、`REFS` 或 `INHERITS` 边；否则生成带 occurrence 的 Ref，以 pending 状态写入 `unresolved_refs`。
    import 也先作为文件级 pending Ref 保存，等待完整文件列表可用后解析路径。
 
 4. **写入并统一解析。** `upsertFileGraph()` 在 SQLite 事务中写入当前文件的 Symbol、直接边和
    pending Ref。所有文件处理完成后执行 `resolvePending()`。解析器按依赖顺序完整 drain 三个阶段：
    先解析 import，再分批建立完整的 `INHERITS` 关系，最后解析普通 `CALLS` / `REFS`；继承阶段
    完成后才创建 hierarchy cache，避免调用解析读到或缓存不完整的继承图。成功的引用转换成
-   `CALLS`、`REFS`、`INHERITS` 或 `IMPORTS`，重复引用聚合到边的 `count`；无法唯一解析的引用
+   `CALLS`、`REFS`、`INHERITS` 或 `IMPORTS`，并删除相应 unresolved row；无法唯一解析的引用
    保留为 `failed`，等待后续索引重新尝试。
 
 5. **提交增量数据。** `upsertFileGraph()` 和 `resolvePending()` 已经在 SQLite 事务中直接修改当前
@@ -243,7 +257,7 @@ erDiagram
 增量更新时，`upsertFileGraph(fileId, ...)` 会先替换该文件原有的节点和出边；删除文件时
 `deleteFileGraph(fileId)` 删除其内容。受更新影响、原本指向被替换符号的入边会重新变成
 pending occurrence，以便再次解析。import binding 的 `local_name`、`imported_name` 和目标文件直接保存在
-对应的 `reference_edges` 中，不再维护独立 binding 表。删除目标文件时，这些 occurrence 会随普通
+未解析的 import ref 或已解析的 `IMPORTS` edge 中，不再维护独立 binding 表。删除目标文件时，这些 occurrence 会随普通
 入向 import 一起失效并重新解析；
 目标文件重试成功后，即使 import 方没有变化，也能恢复文件关系和 alias 调用边。
 
@@ -625,16 +639,20 @@ occurrence 仍依赖提取遍历顺序，尚未使用 column 或稳定 source ra
   checkpoint 时全表重写。
 - RWR 仍在查询期局部内存子图上运行；这是有界计算，但极高出度节点仍可能产生较大的单层查询。
 - 主索引与图索引不是同一个事务；任一侧写入失败时仍需要明确的恢复/重建状态。
-- `openGraphStorage` 捕获所有打开异常并降级为 unavailable，缺少明确的错误日志和诊断信息。
-- schema 目前只实现 main v1 → v2 的加法迁移，尚无通用的逐版本 migration 框架。
+- read-only 打开失败会保留 unavailable reason 并进入 diagnostics；write mode 的意外打开失败会直接报错。
+- 图 schema 作为相对 main 的首版实现，不兼容开发分支中间提交产生的实验数据库，也没有通用逐版本
+  migration 框架。
 
 ### 6.4 数据一致性与模型约束
 
-- `reference_edges.owner_id` 是多态外键，SQLite 无法直接保证它一定指向有效 File/Symbol。
+- `unresolved_refs.owner_id` 以及 `edges.src_id/dst_id` 是多态引用，SQLite 无法直接保证它们一定指向
+  有效 File 或 Symbol；完整性由 writer 和 resolver 维护。
 - `DEFINES` 只由 `symbols.file_id` 推导，接口层仍把它作为边类型，物理模型与逻辑模型不完全一致。
-- 图边只记录首次行号和聚合次数，无法枚举每一个调用/引用位置。
+- 跨文件解析边按 occurrence 保存；同文件直接解析阶段仍可能把相同关系折叠到 `count`，因此不能保证
+  所有关系都能逐位置枚举。
 - Ref 的 `failed` 没有失败原因、候选列表和重试次数，排障信息不足。
-- failed 重试按同名数量设置上限，是防止病态开销的启发式规则，不是确定性的增量依赖机制。
+- failed 引用使用分批 drain 和 attempt watermark 避免饿死与同轮重复，但失效集合仍是静态分析近似，
+  不是编译器级依赖闭包。
 
 ### 6.5 查询与排序
 
