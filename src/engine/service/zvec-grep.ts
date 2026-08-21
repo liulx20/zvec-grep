@@ -1093,6 +1093,29 @@ async function exploreOpenWorkspaceIndex(
       ...item,
       entity: mapGraphEntity(item.entity)!,
     })),
+    dynamicBoundaries: result.dynamicBoundaries.map((boundary) => ({
+      sourceId: boundary.sourceId,
+      target: {
+        raw: boundary.target.raw,
+        member: boundary.target.member,
+        receiver: boundary.target.receiver
+          ? { ...boundary.target.receiver }
+          : undefined,
+        hints: boundary.target.hints
+          ? {
+              ...boundary.target.hints,
+              candidateTypes: boundary.target.hints.candidateTypes
+                ? [...boundary.target.hints.candidateTypes]
+                : undefined,
+              genericBounds: boundary.target.hints.genericBounds
+                ? [...boundary.target.hints.genericBounds]
+                : undefined,
+            }
+          : undefined,
+      },
+      reason: boundary.reason,
+      candidates: [...boundary.candidates],
+    })),
     files: result.files.map((bundle) => ({
       file: mapGraphFile(bundle.file),
       score: bundle.score,

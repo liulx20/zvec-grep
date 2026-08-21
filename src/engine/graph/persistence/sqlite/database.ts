@@ -136,6 +136,8 @@ function ensureOptionalColumns(db: NodeDatabaseSync): void {
     db.exec("ALTER TABLE pending_refs ADD COLUMN receiver_name TEXT");
   if (!columns.has("member_name"))
     db.exec("ALTER TABLE pending_refs ADD COLUMN member_name TEXT");
+  if (!columns.has("resolution_hints"))
+    db.exec("ALTER TABLE pending_refs ADD COLUMN resolution_hints TEXT");
   if (!columns.has("last_attempt"))
     db.exec(
       "ALTER TABLE pending_refs ADD COLUMN last_attempt INTEGER NOT NULL DEFAULT 0",
@@ -150,6 +152,14 @@ function ensureOptionalColumns(db: NodeDatabaseSync): void {
       "ALTER TABLE file_import_bindings ADD COLUMN spec TEXT NOT NULL DEFAULT ''",
     );
   }
+
+  const edgeColumns = tableColumns(db, "symbol_edges");
+  if (!edgeColumns.has("provenance"))
+    db.exec("ALTER TABLE symbol_edges ADD COLUMN provenance TEXT NOT NULL DEFAULT 'static'");
+  if (!edgeColumns.has("confidence"))
+    db.exec("ALTER TABLE symbol_edges ADD COLUMN confidence REAL NOT NULL DEFAULT 1.0");
+  if (!edgeColumns.has("evidence"))
+    db.exec("ALTER TABLE symbol_edges ADD COLUMN evidence TEXT");
 }
 
 function tableColumns(db: NodeDatabaseSync, table: string): Set<string> {

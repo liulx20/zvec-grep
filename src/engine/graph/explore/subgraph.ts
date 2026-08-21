@@ -93,6 +93,10 @@ export function exploreGraph(
     includeCallPaths: true,
   });
   const { nodes, edges, edgesTruncated, callPaths } = subgraph;
+  const dynamicBoundaries = graph.dynamicBoundaries?.(
+    nodes.map((node) => node.id),
+    Math.min(100, maxNodes),
+  ) ?? [];
   const blastRadius = collectBlastRadius(
     graph,
     storage,
@@ -141,6 +145,7 @@ export function exploreGraph(
       callPaths,
       blastRadius,
       changeSurface,
+      dynamicBoundaries,
       files: [],
       emptyReason: "no_context",
     };
@@ -156,6 +161,7 @@ export function exploreGraph(
     callPaths,
     blastRadius,
     changeSurface,
+    dynamicBoundaries,
     files,
   };
 }
@@ -427,6 +433,9 @@ function collectExploreEdges(
       count: edge.count,
       firstLine: edge.first_line,
       refName: edge.ref_name,
+      provenance: edge.provenance ?? "static",
+      confidence: edge.confidence ?? 1,
+      evidence: edge.evidence,
     })),
     truncated: result.truncated,
   };
@@ -519,7 +528,7 @@ function rankNodesWithRwr(
     if (!adj.has(edge.src) || !adj.has(edge.dst)) {
       continue;
     }
-    const weight = RWR_EDGE_WEIGHTS[edge.kind];
+    const weight = RWR_EDGE_WEIGHTS[edge.kind] * (edge.confidence ?? 1);
     addWeightedNeighbor(adj.get(edge.src)!, edge.dst, weight);
     addWeightedNeighbor(adj.get(edge.dst)!, edge.src, weight);
   }
@@ -579,6 +588,7 @@ function emptyResult(
     callPaths: [],
     blastRadius: [],
     changeSurface: [],
+    dynamicBoundaries: [],
     files: [],
     emptyReason,
   };

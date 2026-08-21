@@ -167,6 +167,9 @@ export type ZvecGrepGraphEdge = {
   count: number;
   firstLine: number;
   refName: string;
+  provenance: "static" | "heuristic";
+  confidence: number;
+  evidence?: string;
 };
 
 export type ZvecGrepGraphSeed = {
@@ -217,6 +220,22 @@ export type ZvecGrepExploreResult = {
     rel: "type" | "return";
     entity: ZvecGrepGraphEntity;
     rescued: boolean;
+  }[];
+  dynamicBoundaries: {
+    sourceId: string;
+    target: {
+      raw: string;
+      member: string;
+      receiver?: { kind: "owner" | "super" | "qualified"; name: string };
+      hints?: {
+        receiverType?: string;
+        candidateTypes?: string[];
+        genericBounds?: string[];
+        dispatch?: "static" | "virtual" | "interface" | "trait" | "dynamic";
+      };
+    };
+    reason: "unknown_receiver_type" | "polymorphic_dispatch";
+    candidates: string[];
   }[];
   files: ZvecGrepExploreFileBundle[];
   emptyReason?: "graph_unavailable" | "no_seeds" | "no_context";

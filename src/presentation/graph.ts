@@ -69,6 +69,15 @@ function exploreLines(result: ExploreOutput): string[] {
     }
   }
 
+  if ((result.dynamicBoundaries?.length ?? 0) > 0) {
+    lines.push("", "dynamic boundaries:");
+    for (const boundary of result.dynamicBoundaries ?? []) {
+      lines.push(
+        `- ${shortName(result, boundary.sourceId)} -> ${boundary.target.raw} (${boundary.reason}${boundary.candidates.length > 0 ? `; candidates=${boundary.candidates.map((id) => shortName(result, id)).join(",")}` : ""})`,
+      );
+    }
+  }
+
   for (const file of result.files) {
     lines.push("");
     const tag = file.isCentral
@@ -179,22 +188,28 @@ function relationNotes(result: ExploreOutput, fileId: string): string[] {
     }
     if (srcIn && dstIn) {
       notes.push(
-        `${shortName(result, edge.src)} -${edge.kind}-> ${shortName(result, edge.dst)}`,
+        relationNote(result, edge),
       );
     } else if (srcIn) {
-      notes.push(
-        `${shortName(result, edge.src)} -${edge.kind}-> ${shortName(result, edge.dst)}`,
-      );
+      notes.push(relationNote(result, edge));
     } else {
-      notes.push(
-        `${shortName(result, edge.src)} -${edge.kind}-> ${shortName(result, edge.dst)}`,
-      );
+      notes.push(relationNote(result, edge));
     }
     if (notes.length >= 8) {
       break;
     }
   }
   return notes;
+}
+
+function relationNote(
+  result: ExploreOutput,
+  edge: ExploreOutput["edges"][number],
+): string {
+  const certainty = edge.provenance === "heuristic"
+    ? `? confidence=${edge.confidence.toFixed(2)}`
+    : "";
+  return `${shortName(result, edge.src)} -${edge.kind}${certainty}-> ${shortName(result, edge.dst)}`;
 }
 
 function shortName(result: ExploreOutput, id: string): string {

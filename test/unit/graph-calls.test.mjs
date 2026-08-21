@@ -647,3 +647,98 @@ export class Foo {
   const contains = graphInput.edges.filter((e) => e.kind === "CONTAINS");
   assert.equal(contains.length, 1);
 });
+
+test("Go interface dispatch exposes implementation candidates as a dynamic boundary", async () => {
+  const file = { ...codeFile("dispatch.go"), format: "go" };
+  const source = {
+    kind: "text",
+    file,
+    text: `package p
+type Runner interface { Run() }
+type Alpha struct{}
+func (Alpha) Run() {}
+type Beta struct{}
+func (Beta) Run() {}
+func invoke[T Runner](value T) { value.Run() }
+`,
+  };
+  const input = await extractFileGraph(
+    source,
+    await new CodeExtractor().extract(source),
+  );
+  const invoke = input.nodes.find((node) => node.name === "invoke");
+  assert.ok(invoke);
+
+  const graph = new SqliteGraphStorage("", { inMemory: true });
+  graph.upsertFileGraph(file.id, input.nodes, input.edges, input.refs);
+  await graph.resolvePending();
+
+  const boundaries = graph.dynamicBoundaries([invoke.id], 10);
+  assert.equal(boundaries.length, 1);
+  assert.equal(boundaries[0].reason, "polymorphic_dispatch");
+  assert.deepEqual(boundaries[0].target.hints, {
+    receiverType: "T",
+    candidateTypes: ["T", "Runner"],
+    genericBounds: ["Runner"],
+    dispatch: "interface",
+  });
+  const candidateNames = boundaries[0].candidates
+    .map((id) => input.nodes.find((node) => node.id === id)?.name)
+    .filter(Boolean);
+  assert.deepEqual(candidateNames, ["Run", "Run", "Run"]);
+  graph.close();
+});
+
+test("Go concrete receiver type resolves a method call in its container", async () => {
+  const file = { ...codeFile("receiver.go"), format: "go" };
+  const source = {
+    kind: "text",
+    file,
+    text: `package p
+type Worker struct{}
+func (worker Worker) helper() {}
+func (worker Worker) run() { worker.helper() }
+`,
+  };
+  const input = await extractFileGraph(
+    source,
+    await new CodeExtractor().extract(source),
+  );
+  const run = input.nodes.find((node) => node.name === "run");
+  const helper = input.nodes.find((node) => node.name === "helper");
+  assert.ok(run && helper);
+  assert.ok(
+    input.edges.some(
+      (edge) => edge.kind === "CALLS" && edge.src === run.id && edge.dst === helper.id,
+    ),
+  );
+});
+
+test("Java interface receiver keeps virtual implementations as candidates", async () => {
+  const file = { ...codeFile("Dispatch.java"), format: "java" };
+  const source = {
+    kind: "text",
+    file,
+    text: `interface Runner { void run(); }
+class Alpha implements Runner { public void run() {} }
+class Use { void invoke(Runner value) { value.run(); } }
+`,
+  };
+  const input = await extractFileGraph(
+    source,
+    await new CodeExtractor().extract(source),
+  );
+  const invoke = input.nodes.find((node) => node.name === "invoke");
+  assert.ok(invoke);
+  const graph = new SqliteGraphStorage("", { inMemory: true });
+  graph.upsertFileGraph(file.id, input.nodes, input.edges, input.refs);
+  await graph.resolvePending();
+
+  const boundary = graph.dynamicBoundaries([invoke.id], 10)[0];
+  assert.ok(boundary);
+  assert.equal(boundary.reason, "polymorphic_dispatch");
+  assert.equal(boundary.target.hints?.receiverType, "Runner");
+  assert.equal(boundary.target.hints?.dispatch, "virtual");
+  assert.equal(boundary.candidates.length, 2);
+  graph.close();
+});

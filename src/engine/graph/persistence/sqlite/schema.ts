@@ -14,7 +14,7 @@ CREATE TABLE IF NOT EXISTS pending_refs (
  ref_name TEXT NOT NULL, ref_kind TEXT NOT NULL, line INTEGER NOT NULL,
  imported_name TEXT, local_name TEXT,
  source_language TEXT,
- receiver_kind TEXT, receiver_name TEXT, member_name TEXT,
+ receiver_kind TEXT, receiver_name TEXT, member_name TEXT, resolution_hints TEXT,
  last_attempt INTEGER NOT NULL DEFAULT 0,
  status TEXT NOT NULL CHECK (status IN ('pending','failed'))
 ) STRICT;
@@ -29,6 +29,9 @@ CREATE TABLE IF NOT EXISTS symbol_edges (
  kind TEXT NOT NULL CHECK (kind IN ('CALLS','REFS','INHERITS')),
  rel TEXT NOT NULL, count INTEGER NOT NULL DEFAULT 1,
  first_line INTEGER NOT NULL DEFAULT 0, ref_name TEXT NOT NULL DEFAULT '',
+ provenance TEXT NOT NULL DEFAULT 'static' CHECK (provenance IN ('static','heuristic')),
+ confidence REAL NOT NULL DEFAULT 1.0,
+ evidence TEXT,
  PRIMARY KEY(src_id,dst_id,kind,rel)
 ) STRICT, WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS file_imports (

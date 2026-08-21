@@ -117,7 +117,7 @@ export class SqliteGraphWriter {
   protected insertRef(ref: RawRef, fallbackOwner: string): void {
     this.db
       .prepare(
-        "INSERT OR REPLACE INTO pending_refs(id,owner_id,owner_is_file,ref_name,ref_kind,line,imported_name,local_name,source_language,receiver_kind,receiver_name,member_name,status,last_attempt) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'pending',0)",
+        "INSERT OR REPLACE INTO pending_refs(id,owner_id,owner_is_file,ref_name,ref_kind,line,imported_name,local_name,source_language,receiver_kind,receiver_name,member_name,resolution_hints,status,last_attempt) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',0)",
       )
       .run(
         ref.id,
@@ -134,6 +134,9 @@ export class SqliteGraphWriter {
         ref.type === "symbol" ? (ref.target.receiver?.kind ?? null) : null,
         ref.type === "symbol" ? (ref.target.receiver?.name ?? null) : null,
         ref.type === "symbol" ? ref.target.member : null,
+        ref.type === "symbol" && ref.target.hints
+          ? JSON.stringify(ref.target.hints)
+          : null,
       );
   }
 

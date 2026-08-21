@@ -3,6 +3,7 @@ import { resolveImportPath } from "../../imports/resolve-path.js";
 import { NameIndex } from "../../name-index.js";
 import { referenceResolutionPolicy } from "../../reference-resolution-policy.js";
 import { referenceTargetFromRaw } from "../../../reference-target.js";
+import type { ReferenceResolutionHints } from "../../../reference-target.js";
 import { resolveRef } from "../../resolve.js";
 import type { PendingRef, ResolvePendingOptions } from "../../types.js";
 import { type RefRow, type SymbolRow } from "./reader.js";
@@ -120,6 +121,7 @@ export class SqlitePendingRefResolver {
           ref.receiver_kind && ref.receiver_name
             ? { kind: ref.receiver_kind, name: ref.receiver_name }
             : undefined,
+        hints: parseResolutionHints(ref.resolution_hints),
       },
     };
     const reference = referenceResolutionPolicy.analyzeReference(
@@ -143,6 +145,28 @@ export class SqlitePendingRefResolver {
       refReceiver(ref.ref_name),
       ref.ref_name,
     );
+    const target = pending.target!;
+    const semanticCandidates = target.hints?.receiverType
+      ? this.semanticMemberCandidates(
+          target.hints.candidateTypes ?? [target.hints.receiverType],
+          target.member,
+          [owner.file_id, ...preferred],
+        )
+      : [];
+    if (semanticCandidates.length === 1) {
+      this.insertSymbolEdge(
+        ref,
+        semanticCandidates[0]!,
+        refKindToEdgeKind(ref.ref_kind),
+        {
+          provenance: "heuristic",
+          confidence: 0.75,
+          evidence: "receiver_type_member",
+        },
+      );
+      return this.deleteRef(ref.id);
+    }
+    if (semanticCandidates.length > 1) return this.failRef(ref.id, attempt);
     const result = resolveRef(
       pending,
       names,
@@ -166,20 +190,114 @@ export class SqlitePendingRefResolver {
       reference,
     );
     if (result.status === "external") return this.deleteRef(ref.id);
-    if (result.status !== "resolved") return this.failRef(ref.id, attempt);
+    if (result.status !== "resolved") {
+      const heuristic = this.heuristicCandidate(
+        ref,
+        names,
+        owner.file_id,
+        binding ? [binding.dst_file_id] : preferred,
+      );
+      if (!heuristic) return this.failRef(ref.id, attempt);
+      this.insertSymbolEdge(ref, heuristic, refKindToEdgeKind(ref.ref_kind), {
+        provenance: "heuristic",
+        confidence: 0.35,
+        evidence: "unique_member_in_visible_files",
+      });
+      return this.deleteRef(ref.id);
+    }
+    this.insertSymbolEdge(ref, result.dst, result.edgeKind);
+    this.deleteRef(ref.id);
+  }
+
+  private heuristicCandidate(
+    ref: RefRow,
+    names: NameIndex,
+    sourceFileId: string,
+    preferredFileIds: readonly string[],
+  ): string | null {
+    if (ref.receiver_kind !== "qualified" || !ref.member_name) return null;
+    const candidates = names.candidates(ref.member_name, [
+      sourceFileId,
+      ...preferredFileIds,
+    ]).filter(
+      (entry) => entry.id !== ref.owner_id && entry.containerId !== undefined,
+    );
+    return candidates.length === 1 ? candidates[0]!.id : null;
+  }
+
+  private semanticMemberCandidates(
+    typeNames: readonly string[],
+    memberName: string,
+    visibleFileIds: readonly string[],
+  ): string[] {
+    const names = JSON.stringify([...new Set(typeNames)]);
+    const files = JSON.stringify([...new Set(visibleFileIds)]);
+    return this.all<{ id: string }>(
+      `WITH RECURSIVE roots(id,kind) AS (
+         SELECT id,kind FROM symbols
+         WHERE name IN (SELECT value FROM json_each(?))
+           AND file_id IN (SELECT value FROM json_each(?))
+       ), containers(id) AS (
+         SELECT id FROM roots
+         UNION
+         SELECT e.src_id FROM symbol_edges e
+         JOIN containers c ON c.id=e.dst_id
+         WHERE e.kind='INHERITS'
+           AND e.rel IN ('extends','implements','trait')
+       ), candidate_containers(id) AS (
+         SELECT id FROM containers
+         UNION
+         SELECT DISTINCT owned.parent_id
+         FROM contains owned JOIN symbols member ON member.id=owned.child_id
+         WHERE member.name=? AND EXISTS(SELECT 1 FROM roots WHERE kind='interface')
+           AND member.file_id IN (SELECT value FROM json_each(?))
+       )
+       SELECT DISTINCT member.id
+       FROM candidate_containers scope
+       JOIN contains owned ON owned.parent_id=scope.id
+       JOIN symbols member ON member.id=owned.child_id
+       WHERE member.name=?
+       ORDER BY member.id LIMIT 65`,
+      names,
+      files,
+      memberName,
+      files,
+      memberName,
+    ).map((row) => row.id);
+  }
+
+  private insertSymbolEdge(
+    ref: RefRow,
+    dst: string,
+    edgeKind: "CALLS" | "REFS" | "INHERITS",
+    metadata: {
+      provenance: "static" | "heuristic";
+      confidence: number;
+      evidence?: string;
+    } = { provenance: "static", confidence: 1 },
+  ): void {
     this.db
       .prepare(
-        "INSERT INTO symbol_edges(src_id,dst_id,kind,rel,count,first_line,ref_name) VALUES(?,?,?,?,1,?,?) ON CONFLICT(src_id,dst_id,kind,rel) DO UPDATE SET count=count+1,first_line=min(first_line,excluded.first_line)",
+        `INSERT INTO symbol_edges(src_id,dst_id,kind,rel,count,first_line,ref_name,provenance,confidence,evidence)
+         VALUES(?,?,?,?,1,?,?,?,?,?)
+         ON CONFLICT(src_id,dst_id,kind,rel) DO UPDATE SET
+           count=count+1,
+           first_line=min(first_line,excluded.first_line),
+           provenance=CASE WHEN symbol_edges.provenance='static' THEN 'static' ELSE excluded.provenance END,
+           confidence=max(symbol_edges.confidence,excluded.confidence),
+           evidence=CASE WHEN symbol_edges.provenance='static' THEN symbol_edges.evidence ELSE excluded.evidence END`,
       )
       .run(
         ref.owner_id,
-        result.dst,
-        result.edgeKind,
+        dst,
+        edgeKind,
         ref.ref_kind,
         ref.line,
         ref.ref_name,
+        metadata.provenance,
+        metadata.confidence,
+        metadata.evidence ?? null,
       );
-    this.deleteRef(ref.id);
   }
 
   private resolveImport(
@@ -220,7 +338,7 @@ export class SqlitePendingRefResolver {
 
   private retryableRefs(attemptWatermark: number): RefRow[] {
     return this.all<RefRow>(
-      `SELECT id,owner_id,owner_is_file,ref_name,ref_kind,line,status,imported_name,local_name,source_language,receiver_kind,receiver_name,member_name,last_attempt
+      `SELECT id,owner_id,owner_is_file,ref_name,ref_kind,line,status,imported_name,local_name,source_language,receiver_kind,receiver_name,member_name,resolution_hints,last_attempt
        FROM (
          SELECT pending_refs.*,
                 row_number() OVER (PARTITION BY ref_name ORDER BY last_attempt,id) AS retry_rank
@@ -229,7 +347,7 @@ export class SqlitePendingRefResolver {
        )
        WHERE retry_rank<=?
        UNION ALL
-       SELECT id,owner_id,owner_is_file,ref_name,ref_kind,line,status,imported_name,local_name,source_language,receiver_kind,receiver_name,member_name,last_attempt
+       SELECT id,owner_id,owner_is_file,ref_name,ref_kind,line,status,imported_name,local_name,source_language,receiver_kind,receiver_name,member_name,resolution_hints,last_attempt
        FROM pending_refs
        WHERE status='pending' AND last_attempt<?
        ORDER BY ref_name,id`,
@@ -317,4 +435,22 @@ function isInheritanceRef(ref: RefRow): boolean {
     ref.ref_kind === "implements" ||
     ref.ref_kind === "overrides"
   );
+}
+
+function refKindToEdgeKind(kind: string): "CALLS" | "REFS" | "INHERITS" {
+  if (kind === "call") return "CALLS";
+  if (kind === "extends" || kind === "implements" || kind === "overrides")
+    return "INHERITS";
+  return "REFS";
+}
+
+function parseResolutionHints(
+  value: string | null,
+): ReferenceResolutionHints | undefined {
+  if (!value) return undefined;
+  try {
+    return JSON.parse(value) as ReferenceResolutionHints;
+  } catch {
+    return undefined;
+  }
 }

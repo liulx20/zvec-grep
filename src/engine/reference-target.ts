@@ -3,10 +3,19 @@ export type ReferenceReceiverTarget = {
   name: string;
 };
 
+export type ReferenceResolutionHints = {
+  receiverType?: string;
+  candidateTypes?: string[];
+  genericBounds?: string[];
+  dispatch?: "static" | "virtual" | "interface" | "trait" | "dynamic";
+};
+
 export type ReferenceTarget = {
   raw: string;
   member: string;
   receiver?: ReferenceReceiverTarget;
+  /** Optional semantic facts supplied by language-specific analysis. */
+  hints?: ReferenceResolutionHints;
 };
 
 const OWNER_RECEIVERS = new Set(["this", "self", "cls"]);

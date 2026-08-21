@@ -1,5 +1,6 @@
 export type {
   ContainerNeighbor,
+  DynamicBoundary,
   FileGraphInput,
   FileNeighbor,
   GraphBackend,
@@ -25,6 +26,7 @@ export type {
   UsageRef,
   ResolvePendingOptions,
   ReferenceReceiverTarget,
+  ReferenceResolutionHints,
   ReferenceTarget,
 } from "./public-types.js";
 

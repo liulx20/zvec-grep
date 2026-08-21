@@ -55,6 +55,16 @@ export type GraphEdge = {
   count: number;
   first_line: number;
   ref_name: string;
+  provenance: "static" | "heuristic";
+  confidence: number;
+  evidence?: string;
+};
+
+export type DynamicBoundary = {
+  sourceId: string;
+  target: ReferenceTarget;
+  reason: "unknown_receiver_type" | "polymorphic_dispatch";
+  candidates: string[];
 };
 
 export type InducedEdgesResult = {
@@ -201,6 +211,7 @@ export interface GraphReader {
     edgeKinds: readonly GraphEdgeKind[],
     limit: number,
   ): InducedEdgesResult;
+  dynamicBoundaries(nodeIds: readonly string[], limit: number): DynamicBoundary[];
 
   stats(): GraphStats;
 }

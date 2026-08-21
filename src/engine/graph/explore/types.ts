@@ -1,7 +1,7 @@
 import type { StoredEntity } from "../../storage/index.js";
 import type { FileInfo, Range } from "../../types.js";
 import type { GraphQueryStorage } from "../ports.js";
-import type { GraphEdgeKind } from "../types.js";
+import type { DynamicBoundary, GraphEdgeKind } from "../types.js";
 
 export type ExploreOptions = {
   query: string;
@@ -38,6 +38,9 @@ export type ExploreEdge = {
   count: number;
   firstLine: number;
   refName: string;
+  provenance: "static" | "heuristic";
+  confidence: number;
+  evidence?: string;
 };
 
 export type ExploreCallPath = {
@@ -93,6 +96,7 @@ export type ExploreResult = {
   callPaths: ExploreCallPath[];
   blastRadius: ExploreBlastRadius[];
   changeSurface: ExploreChangeSurfaceRef[];
+  dynamicBoundaries: DynamicBoundary[];
   files: ExploreFileBundle[];
   emptyReason?: "graph_unavailable" | "no_seeds" | "no_context";
 };

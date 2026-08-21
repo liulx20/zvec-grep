@@ -94,6 +94,16 @@ export class NameIndex {
     return null;
   }
 
+  candidates(
+    name: string,
+    fileIds: readonly string[],
+  ): NameEntry[] {
+    const allowed = new Set(fileIds);
+    return [...(this.byName.get(name) ?? [])]
+      .filter((entry) => allowed.has(entry.fileId))
+      .sort((a, b) => a.id.localeCompare(b.id));
+  }
+
   snapshot(): NameEntry[] {
     return [...this.byId.values()];
   }

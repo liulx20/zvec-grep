@@ -26,6 +26,7 @@ export function collectCallSites(
 ): CallSite[] {
   const sites: CallSite[] = [];
   const entityTypes = adapter?.entityTypes;
+  const resolutionContext = collectResolutionContext(node, adapter?.format);
 
   const visit = (current: TSNode | null, skipSelfEntity: boolean): void => {
     if (!current) {
@@ -43,9 +44,10 @@ export function collectCallSites(
     if (isCallNode(current)) {
       const target = extractCallTarget(current);
       if (target) {
+        const enrichedTarget = enrichReferenceTarget(target, resolutionContext);
         sites.push({
-          name: target.raw,
-          target,
+          name: enrichedTarget.raw,
+          target: enrichedTarget,
           line: current.startPosition.row + 1,
           kind: isNewExpression(current) ? "new" : "call",
         });
@@ -59,6 +61,163 @@ export function collectCallSites(
 
   visit(node, true);
   return sites;
+}
+
+type ResolutionContext = {
+  receiverTypes: ReadonlyMap<string, string>;
+  genericBounds: ReadonlyMap<string, readonly string[]>;
+  language?: string;
+};
+
+function enrichReferenceTarget(
+  target: ReferenceTarget,
+  context: ResolutionContext,
+): ReferenceTarget {
+  const receiver = target.receiver?.name;
+  if (!receiver) return target;
+  const receiverType = context.receiverTypes.get(receiver);
+  if (!receiverType) return target;
+  const bounds = context.genericBounds.get(receiverType);
+  return {
+    ...target,
+    hints: {
+      receiverType,
+      ...(bounds ? { genericBounds: [...bounds] } : {}),
+      candidateTypes: bounds ? [receiverType, ...bounds] : [receiverType],
+      ...(bounds && bounds.length > 0
+        ? { dispatch: dispatchForLanguage(context.language) }
+        : context.language === "java" || context.language === "cpp"
+          ? { dispatch: "virtual" as const }
+        : {}),
+    },
+  };
+}
+
+function dispatchForLanguage(
+  language?: string,
+): "interface" | "trait" | "virtual" {
+  if (language === "rust") return "trait";
+  if (language === "go" || language === "java") return "interface";
+  return "virtual";
+}
+
+function collectResolutionContext(
+  node: TSNode,
+  language?: string,
+): ResolutionContext {
+  const receiverTypes = new Map<string, string>();
+  const genericBounds = collectGenericBounds(node, language);
+  const parameterTypes = new Set([
+    "parameter_declaration",
+    "formal_parameter",
+    "receiver_parameter",
+    "parameter",
+    "variadic_parameter_declaration",
+  ]);
+  const visit = (current: TSNode): void => {
+    if (parameterTypes.has(current.type)) {
+      const binding = parameterBinding(current, language);
+      if (binding) receiverTypes.set(binding.name, binding.type);
+      return;
+    }
+    for (const child of current.namedChildren ?? []) visit(child);
+  };
+  const receiver = node.childForFieldName("receiver");
+  if (receiver) {
+    const binding = parameterBinding(receiver, language);
+    if (binding) receiverTypes.set(binding.name, binding.type);
+  }
+  for (const child of node.namedChildren ?? []) {
+    if (child !== node.childForFieldName("body")) visit(child);
+  }
+  return { receiverTypes, genericBounds, language };
+}
+
+function parameterBinding(
+  node: TSNode,
+  language?: string,
+): { name: string; type: string } | undefined {
+  const name = node.childForFieldName("name")?.text;
+  const type = node.childForFieldName("type")?.text;
+  if (name && type) return { name, type: normalizeType(type) };
+  const text = node.text.trim().replace(/^\(|\)$/g, "");
+  const match = language === "go"
+    ? text.match(/^([A-Za-z_]\w*)\s+\*?([A-Za-z_]\w*(?:\[[^\]]+\])?)$/)
+    : language === "rust"
+      ? text.match(/^(?:mut\s+)?([A-Za-z_]\w*)\s*:\s*&?(?:mut\s+)?([^=]+)$/)
+      : text.match(/(?:^|\s)([A-Za-z_]\w*)\s*$/);
+  if (!match) return undefined;
+  if (language === "go" || language === "rust") {
+    return { name: match[1]!, type: normalizeType(match[2]!) };
+  }
+  const inferredType = text.slice(0, text.lastIndexOf(match[1]!)).trim();
+  return inferredType
+    ? { name: match[1]!, type: normalizeType(inferredType) }
+    : undefined;
+}
+
+function collectGenericBounds(
+  node: TSNode,
+  language?: string,
+): Map<string, readonly string[]> {
+  const result = new Map<string, readonly string[]>();
+  const genericTypes = new Set([
+    "type_parameters",
+    "type_parameter_list",
+    "template_parameter_list",
+  ]);
+  let owner: TSNode | null = node;
+  let genericNode: TSNode | undefined;
+  for (let depth = 0; owner && depth < 3 && !genericNode; depth++) {
+    genericNode = owner.childForFieldName("type_parameters") ??
+      owner.namedChildren.find((child) => genericTypes.has(child.type));
+    owner = owner.parent;
+  }
+  const text = genericNode?.text ?? "";
+  const separator = language === "java" ? /\s+extends\s+/ : /\s*:\s*/;
+  const inner =
+    (text.startsWith("<") && text.endsWith(">")) ||
+    (text.startsWith("[") && text.endsWith("]"))
+      ? text.slice(1, -1)
+      : text;
+  for (const part of inner.split(",")) {
+    const trimmed = part.trim();
+    const constrained =
+      language === "go"
+        ? trimmed.match(/^([A-Za-z_]\w*)\s+(.+)$/)
+        : language === "cpp"
+          ? trimmed.match(/^([A-Za-z_]\w*)\s+([A-Za-z_]\w*)$/)
+          : null;
+    if (constrained && language === "go") {
+      result.set(constrained[1]!, [normalizeType(constrained[2]!)]);
+      continue;
+    }
+    if (
+      constrained &&
+      language === "cpp" &&
+      constrained[1] !== "typename" &&
+      constrained[1] !== "class"
+    ) {
+      result.set(constrained[2]!, [normalizeType(constrained[1]!)]);
+      continue;
+    }
+    const pieces = trimmed.split(separator);
+    const name = pieces.shift()?.replace(/^(?:typename|class)\s+/, "").trim();
+    if (!name || pieces.length === 0) continue;
+    const bounds = pieces.join(":").split(/[+&]/).map(normalizeType).filter(Boolean);
+    if (bounds.length > 0) result.set(name, bounds);
+  }
+  return result;
+}
+
+function normalizeType(value: string): string {
+  return value
+    .replace(/\b(?:const|volatile|mut|typename|class)\b/g, "")
+    .replace(/[&*]/g, "")
+    .replace(/<.*>|\[.*\]/g, "")
+    .trim()
+    .split(/\s+/)
+    .pop() ?? "";
 }
 
 export function isCallNode(node: TSNode): boolean {

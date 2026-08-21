@@ -1,5 +1,6 @@
 import type {
   ContainerNeighbor,
+  DynamicBoundary,
   FileNeighbor,
   GraphEdge,
   GraphStats,
@@ -92,6 +93,9 @@ export class UnavailableGraphStorage implements GraphStorage {
   }
   edges(): { edges: GraphEdge[]; truncated: boolean } {
     return { edges: [], truncated: false };
+  }
+  dynamicBoundaries(): DynamicBoundary[] {
+    return [];
   }
   stats(): GraphStats {
     return {

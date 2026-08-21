@@ -130,6 +130,56 @@ test("SQLite graph upsert resolves callers and reattaches incoming edges", async
   reopened.close();
 });
 
+test("qualified unresolved calls become explicit heuristic edges or dynamic boundaries", async () => {
+  const graph = new SqliteGraphStorage("", { inMemory: true });
+  graph.upsertFileGraph(
+    "file-a",
+    [
+      { id: "type-a", kind: "class", is_exported: true, name: "TypeA" },
+      { id: "run", kind: "function", is_exported: true, name: "run" },
+      { id: "helper", kind: "function", is_exported: true, name: "helper" },
+    ],
+    [edge("type-a", "helper", "CONTAINS", "contains")],
+    [rawRef({ owner: "run", refName: "value.helper", line: 3 })],
+  );
+  await graph.resolvePending();
+
+  const heuristic = graph.edges(["run", "helper"], ["CALLS"], 10).edges[0];
+  assert.equal(heuristic?.dst, "helper");
+  assert.equal(heuristic?.provenance, "heuristic");
+  assert.equal(heuristic?.confidence, 0.35);
+
+  graph.upsertFileGraph(
+    "file-b",
+    [
+      { id: "type-b", kind: "class", is_exported: true, name: "TypeB" },
+      { id: "run-2", kind: "function", is_exported: true, name: "run2" },
+      { id: "helper-a", kind: "function", is_exported: true, name: "helper" },
+      { id: "helper-b", kind: "function", is_exported: true, name: "helper" },
+    ],
+    [
+      edge("type-b", "helper-a", "CONTAINS", "contains"),
+      edge("type-b", "helper-b", "CONTAINS", "contains"),
+    ],
+    [rawRef({ owner: "run-2", refName: "value.helper", line: 7 })],
+  );
+  await graph.resolvePending();
+
+  assert.deepEqual(graph.dynamicBoundaries(["run-2"], 10), [
+    {
+      sourceId: "run-2",
+      target: {
+        raw: "value.helper",
+        member: "helper",
+        receiver: { kind: "qualified", name: "value" },
+      },
+      reason: "unknown_receiver_type",
+      candidates: [],
+    },
+  ]);
+  graph.close();
+});
+
 test("external refs are dropped without creating edges", async () => {
   const graph = new SqliteGraphStorage("", { inMemory: true });
   graph.upsertFileGraph(
@@ -407,6 +457,9 @@ test("raw incoming/outgoing edge queries are batch-capable and drive traversal",
     count: 2,
     first_line: 3,
     ref_name: "b",
+    provenance: "static",
+    confidence: 1,
+    evidence: undefined,
   });
 
   const outgoingBefore = graph.outgoingCalls;

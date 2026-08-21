@@ -104,6 +104,7 @@ erDiagram
   SYMBOL ||--o{ SYMBOL : REFS
   SYMBOL ||--o{ SYMBOL : INHERITS
   FILE ||--o{ FILE : IMPORTS
+  FILE ||--o{ IMPORT_BINDING : DECLARES
   FILE ||--o{ PENDING_REF : OWNS_IMPORT_REF
   SYMBOL ||--o{ PENDING_REF : OWNS_SYMBOL_REF
 
@@ -124,7 +125,20 @@ erDiagram
     text ref_name
     text ref_kind
     integer line
+    text source_language
+    text receiver_kind
+    text receiver_name
+    text member_name
+    text resolution_hints
+    integer last_attempt
     text status
+  }
+  IMPORT_BINDING {
+    text src_file_id PK
+    text dst_file_id PK
+    text local_name PK
+    text imported_name PK
+    text spec
   }
 ```
 
@@ -151,6 +165,7 @@ erDiagram
 | `contains` | `(parent_id, child_id)` | 容器与成员关系 |
 | `symbol_edges` | `(src_id, dst_id, kind, rel)` | `CALLS`、`REFS`、`INHERITS` |
 | `file_imports` | `(src_file_id, dst_file_id, spec)` | 文件导入关系 |
+| `file_import_bindings` | `(src_file_id, local_name, dst_file_id, imported_name)` | import 名称、alias 与目标文件的绑定 |
 
 几点说明：
 
@@ -158,8 +173,14 @@ erDiagram
 - `symbol_edges.kind` 表示大类，`rel` 保存更细的语义，例如 `call`、`new`、
   `extends`、`type`、`member`。
 - `count` 聚合同一关系出现次数，`first_line` 保存首次出现行号，`ref_name` 保存提取时名称。
+- `symbol_edges.provenance` 区分 `static` 和 `heuristic`；`confidence` 保存关系置信度，`evidence`
+  保存启发式规则，例如 `unique_member_in_visible_files`。静态边的默认置信度为 1。
+- `pending_refs.receiver_kind`、`receiver_name` 和 `member_name` 保存结构化调用目标；
+  `resolution_hints` 以 JSON 保存语言分析器提供的 receiver type、泛型约束、候选类型和分派方式。
+  `last_attempt` 用于控制失败引用的公平分批重试。
 - schema 使用 `STRICT`、外键、组合主键和按 src/dst/name 建立的查询索引。
-- 当前 schema 版本为 1，不匹配时拒绝打开，没有自动 schema upgrade。
+- 当前 schema 版本为 1。版本不匹配时拒绝打开；同一版本内新增的兼容字段会在可写模式打开时通过
+  `ensureOptionalColumns()` 补齐，read-only 模式不会修改数据库。
 - 引入图索引后，workspace `CURRENT_INDEX_VERSION` 已提升为 2。旧 v1 workspace 不会把 unchanged
   文件直接沿用为“已有图数据”，而是要求执行 rebuild；rebuild 会同时重建 Zvec 主索引和完整图索引。
 - drop/rebuild 会删除 `<workspace>/.zvec-grep/code-graph`，不会把旧 `graph.sqlite`、节点或边带入新索引。
@@ -450,6 +471,9 @@ change surface:
 - login type -> LoginRequest
 - login return -> LoginResult (rescued)
 
+dynamic boundaries:
+- dispatch -> handler.handle (unknown_receiver_type)
+
 src/auth/login.ts (central, score=0.3512)
 relations: login --CALLS--> authenticate; login --REFS--> LoginRequest
 source:
@@ -492,6 +516,7 @@ type ExploreResult = {
   callPaths: ExploreCallPath[];
   blastRadius: ExploreBlastRadius[];
   changeSurface: ExploreChangeSurfaceRef[];
+  dynamicBoundaries: DynamicBoundary[];
   files: ExploreFileBundle[];
   emptyReason?: "graph_unavailable" | "no_seeds" | "no_context";
 };
@@ -504,11 +529,27 @@ type ExploreEdge = {
   count: number;
   firstLine: number;
   refName: string;
+  provenance: "static" | "heuristic";
+  confidence: number;
+  evidence?: string;
 };
 ```
 
 `edges` 是存储层返回的真实类型化边，不是根据邻接节点猜测的关系；同一对节点可以同时出现
-`CALLS` 和 `REFS`，并保留关系子类型、聚合次数、首次行号和提取时名称。
+`CALLS` 和 `REFS`，并保留关系子类型、聚合次数、首次行号和提取时名称。静态绑定的边标记为
+`provenance: "static"`；静态解析失败、但可见文件中只有一个同名成员候选时，允许生成
+`provenance: "heuristic"` 的低置信度边。RWR 会按 `confidence` 降权，文本关系摘要也会显示该边是推测。
+
+`dynamicBoundaries` 不是另一种边。它记录子图节点仍未确定的 receiver 调用，例如动态对象、接口分派或
+无法确定接收者类型的 `obj.method()`，让 Agent 知道静态图在这里断开，而不是把“没有边”误读成
+“没有调用”。每个 boundary 同时返回预算内的 `candidates`。
+
+结构化 target 的 `receiverType`、`candidateTypes`、`genericBounds` 和 `dispatch` 由语言 AST 提取：
+Go 支持方法 receiver、参数类型和类型参数 constraint；Rust 支持参数类型和 trait bound；Java 支持参数
+类型；C++ 支持参数类型和 constrained template 参数。resolver 先按 receiver type 查找容器，再沿
+`INHERITS` 的 extends/implements/trait 方向收集实现成员。Go interface 和 Rust trait 没有显式继承边时，
+还会在可见文件内按 method set 形成启发式候选。唯一候选可以生成带 provenance/confidence 的关系；
+多个候选保留为 `polymorphic_dispatch` boundary，不会伪造唯一调用边。
 
 默认输出预算为最多 8 个 seeds、深度 3、200 个子图节点、8 个文件和 24,000 字符。
 `maxChars` 是最终源码文本的硬上限，首个符号超过预算时也会截断；roots 和调用路径节点在子图裁剪时
@@ -524,7 +565,9 @@ type ExploreEdge = {
 - JS/TS named import alias 和 Python `from ... import ... as ...` 已通过 binding IR 解析；namespace、
   限定名、default import 和 re-export 链仍不完整。
 - 不理解 `tsconfig paths`、package exports、workspace package 等完整模块解析规则。
-- 缺少变量类型传播，`obj.method()` 难以稳定解析到具体类的方法。
+- 当前只提取方法 receiver、函数参数和直接泛型约束，尚未进行赋值流、返回值、字段访问和跨函数类型传播；
+  这些来源的 `obj.method()` 仍只能在唯一可见成员候选时建立低置信度 heuristic edge，否则作为
+  dynamic boundary 输出。
 - 重载、同名方法、嵌套作用域和跨文件多候选容易保持 `failed`。
 - 动态语言调用、反射、运行时注册、依赖注入和字符串形式调用无法可靠建边。
 - external/builtin 过滤是名称规则，存在误判或漏判可能。

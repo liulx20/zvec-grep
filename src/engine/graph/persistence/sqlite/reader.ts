@@ -1,10 +1,12 @@
 import type { DatabaseSync as NodeDatabaseSync } from "node:sqlite";
+import type { ReferenceResolutionHints } from "../../../reference-target.js";
 import { SqliteGraphDatabase } from "./database.js";
 import type {
   ContainerNeighbor,
   FileNeighbor,
   GraphEdge,
   GraphEdgeKind,
+  DynamicBoundary,
   GraphStats,
   InducedEdgesResult,
   SeedNeighbor,
@@ -22,6 +24,9 @@ export type EdgeRow = {
   count: number;
   first_line: number;
   ref_name: string;
+  provenance: "static" | "heuristic";
+  confidence: number;
+  evidence: string | null;
 };
 export type RefRow = {
   id: string;
@@ -37,6 +42,7 @@ export type RefRow = {
   receiver_kind: "owner" | "super" | "qualified" | null;
   receiver_name: string | null;
   member_name: string | null;
+  resolution_hints: string | null;
   last_attempt: number;
 };
 export type SymbolRow = {
@@ -76,6 +82,88 @@ export class SqliteGraphReader {
   }
   close(): void {
     this.database.close();
+  }
+
+  dynamicBoundaries(nodeIds: readonly string[], limit: number): DynamicBoundary[] {
+    if (nodeIds.length === 0 || limit <= 0) return [];
+    const ids = [...new Set(nodeIds)];
+    const placeholders = ids.map(() => "?").join(",");
+    return this.all<RefRow>(
+      `SELECT id,owner_id,owner_is_file,ref_name,ref_kind,line,status,imported_name,local_name,source_language,receiver_kind,receiver_name,member_name,resolution_hints,last_attempt
+       FROM pending_refs
+       WHERE owner_is_file=0 AND status='failed' AND receiver_kind IS NOT NULL
+         AND owner_id IN (${placeholders})
+       ORDER BY owner_id,line,id LIMIT ?`,
+      ...ids,
+      limit,
+    ).map((row) => {
+      const hints = parseResolutionHints(row.resolution_hints);
+      const target = {
+        raw: row.ref_name,
+        member: row.member_name ?? row.ref_name,
+        receiver: row.receiver_kind && row.receiver_name
+          ? { kind: row.receiver_kind, name: row.receiver_name }
+          : undefined,
+        ...resolutionHintsField(row.resolution_hints),
+      } as DynamicBoundary["target"];
+      const candidates = hints?.receiverType
+        ? this.semanticBoundaryCandidates(
+            hints.candidateTypes ?? [hints.receiverType],
+            target.member,
+            row.owner_id,
+          )
+        : [];
+      return {
+        sourceId: row.owner_id,
+        target,
+        reason: candidates.length > 1 || hints?.dispatch
+          ? "polymorphic_dispatch"
+          : row.receiver_kind === "owner" || row.receiver_kind === "super"
+            ? "polymorphic_dispatch"
+            : "unknown_receiver_type",
+        candidates,
+      };
+    });
+  }
+
+  private semanticBoundaryCandidates(
+    typeNames: readonly string[],
+    memberName: string,
+    sourceId: string,
+  ): string[] {
+    return this.all<{ id: string }>(
+      `WITH RECURSIVE visible(file_id) AS (
+         SELECT file_id FROM symbols WHERE id=?
+         UNION SELECT imports.dst_file_id FROM file_imports imports
+         JOIN symbols source ON source.file_id=imports.src_file_id WHERE source.id=?
+       ), roots(id,kind) AS (
+         SELECT id,kind FROM symbols
+         WHERE name IN (SELECT value FROM json_each(?))
+           AND file_id IN (SELECT file_id FROM visible)
+       ), containers(id) AS (
+         SELECT id FROM roots
+         UNION
+         SELECT e.src_id FROM symbol_edges e JOIN containers c ON c.id=e.dst_id
+         WHERE e.kind='INHERITS' AND e.rel IN ('extends','implements','trait')
+       ), candidate_containers(id) AS (
+         SELECT id FROM containers
+         UNION
+         SELECT DISTINCT owned.parent_id
+         FROM contains owned JOIN symbols member ON member.id=owned.child_id
+         WHERE member.name=? AND EXISTS(SELECT 1 FROM roots WHERE kind='interface')
+           AND member.file_id IN (SELECT file_id FROM visible)
+       )
+       SELECT DISTINCT member.id
+       FROM candidate_containers scope
+       JOIN contains owned ON owned.parent_id=scope.id
+       JOIN symbols member ON member.id=owned.child_id
+       WHERE member.name=? ORDER BY member.id LIMIT 64`,
+      sourceId,
+      sourceId,
+      JSON.stringify([...new Set(typeNames)]),
+      memberName,
+      memberName,
+    ).map((row) => row.id);
   }
 
   symbolScope(root: string, depth: number, limit: number): string[] {
@@ -315,7 +403,7 @@ export class SqliteGraphReader {
     if (rel.length) {
       const p = rel.map(() => "?").join(",");
       selects.push(
-        `SELECT src_id AS src,dst_id AS dst,kind,rel,count,first_line,ref_name
+        `SELECT src_id AS src,dst_id AS dst,kind,rel,count,first_line,ref_name,provenance,confidence,evidence
          FROM symbol_edges
          WHERE src_id IN(SELECT value FROM json_each(?))
            AND dst_id IN(SELECT value FROM json_each(?)) AND kind IN(${p})`,
@@ -325,7 +413,8 @@ export class SqliteGraphReader {
     if (edgeKinds.includes("CONTAINS")) {
       selects.push(
         `SELECT parent_id AS src,child_id AS dst,'CONTAINS' AS kind,
-                'contains' AS rel,1 AS count,0 AS first_line,'' AS ref_name
+                'contains' AS rel,1 AS count,0 AS first_line,'' AS ref_name,
+                'static' AS provenance,1.0 AS confidence,NULL AS evidence
          FROM contains
          WHERE parent_id IN(SELECT value FROM json_each(?))
            AND child_id IN(SELECT value FROM json_each(?))`,
@@ -335,7 +424,8 @@ export class SqliteGraphReader {
     if (edgeKinds.includes("DEFINES")) {
       selects.push(
         `SELECT file_id AS src,id AS dst,'DEFINES' AS kind,
-                'defines' AS rel,1 AS count,0 AS first_line,'' AS ref_name
+                'defines' AS rel,1 AS count,0 AS first_line,'' AS ref_name,
+                'static' AS provenance,1.0 AS confidence,NULL AS evidence
          FROM symbols
          WHERE file_id IN(SELECT value FROM json_each(?))
            AND id IN(SELECT value FROM json_each(?))`,
@@ -345,7 +435,8 @@ export class SqliteGraphReader {
     if (edgeKinds.includes("IMPORTS")) {
       selects.push(
         `SELECT src_file_id AS src,dst_file_id AS dst,'IMPORTS' AS kind,
-                spec AS rel,1 AS count,0 AS first_line,'' AS ref_name
+                spec AS rel,1 AS count,0 AS first_line,'' AS ref_name,
+                'static' AS provenance,1.0 AS confidence,NULL AS evidence
          FROM file_imports
          WHERE src_file_id IN(SELECT value FROM json_each(?))
            AND dst_file_id IN(SELECT value FROM json_each(?))`,
@@ -362,6 +453,9 @@ export class SqliteGraphReader {
       count: number;
       first_line: number;
       ref_name: string;
+      provenance: "static" | "heuristic";
+      confidence: number;
+      evidence?: string;
     }>(
       `SELECT * FROM (${selects.join(" UNION ALL ")})
        ORDER BY kind,src,dst,rel LIMIT ?`,
@@ -585,7 +679,28 @@ function toGraphEdge(r: EdgeRow): GraphEdge {
     count: r.count,
     first_line: r.first_line,
     ref_name: r.ref_name,
+    provenance: r.provenance ?? "static",
+    confidence: r.confidence ?? 1,
+    evidence: r.evidence ?? undefined,
   };
+}
+
+function parseResolutionHints(
+  value: string | null,
+): ReferenceResolutionHints | undefined {
+  if (!value) return undefined;
+  try {
+    return JSON.parse(value) as ReferenceResolutionHints;
+  } catch {
+    return undefined;
+  }
+}
+
+function resolutionHintsField(
+  value: string | null,
+): { hints?: ReferenceResolutionHints } {
+  const hints = parseResolutionHints(value);
+  return hints ? { hints } : {};
 }
 function structuralEdge(
   src: string,
@@ -593,7 +708,7 @@ function structuralEdge(
   kind: GraphEdgeKind,
   rel: string,
 ): GraphEdge {
-  return { src, dst, kind, rel, count: 1, first_line: 0, ref_name: rel };
+  return { src, dst, kind, rel, count: 1, first_line: 0, ref_name: rel, provenance: "static", confidence: 1 };
 }
 function dedupeEdges(edges: readonly GraphEdge[]): GraphEdge[] {
   const seen = new Set<string>();

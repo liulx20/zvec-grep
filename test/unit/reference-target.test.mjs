@@ -71,6 +71,7 @@ for (const fixture of [
     "a.helper",
     "qualified",
     "a",
+    { receiverType: "A", candidateTypes: ["A"] },
   ],
 ]) {
   test(`${fixture[0]} call target IR`, async () => {
@@ -85,6 +86,7 @@ for (const fixture of [
       raw: fixture[3],
       member: "helper",
       receiver: { kind: fixture[4], name: fixture[5] },
+      ...(fixture[6] ? { hints: fixture[6] } : {}),
     });
   });
 }
@@ -99,3 +101,66 @@ test("inheritance target IR is structured", async () => {
     receiver: { kind: "qualified", name: "ns" },
   });
 });
+
+for (const fixture of [
+  {
+    name: "Go interface constraint",
+    format: "go",
+    path: "generic.go",
+    text: "package p\nfunc invoke[T Runner](value T) { value.Run() }",
+    raw: "value.Run",
+    hints: {
+      receiverType: "T",
+      candidateTypes: ["T", "Runner"],
+      genericBounds: ["Runner"],
+      dispatch: "interface",
+    },
+  },
+  {
+    name: "Rust trait bound",
+    format: "rust",
+    path: "generic.rs",
+    text: "fn invoke<T: Runner>(value: T) { value.run(); }",
+    raw: "value.run",
+    hints: {
+      receiverType: "T",
+      candidateTypes: ["T", "Runner"],
+      genericBounds: ["Runner"],
+      dispatch: "trait",
+    },
+  },
+  {
+    name: "C++ constrained template",
+    format: "cpp",
+    path: "generic.cpp",
+    text: "template<Runner T> void invoke(T value) { value.run(); }",
+    raw: "value.run",
+    hints: {
+      receiverType: "T",
+      candidateTypes: ["T", "Runner"],
+      genericBounds: ["Runner"],
+      dispatch: "virtual",
+    },
+  },
+  {
+    name: "Java interface parameter",
+    format: "java",
+    path: "Generic.java",
+    text: "class Generic { void invoke(Runner value) { value.run(); } }",
+    raw: "value.run",
+    hints: {
+      receiverType: "Runner",
+      candidateTypes: ["Runner"],
+      dispatch: "virtual",
+    },
+  },
+]) {
+  test(`${fixture.name} adds semantic resolution hints`, async () => {
+    const calls = await collectFunctionCallSites(
+      source(fixture.format, fixture.path, fixture.text),
+    );
+    const site = calls.flatMap((owner) => owner.sites).find((item) => item.name === fixture.raw);
+    assert.ok(site);
+    assert.deepEqual(site.target.hints, fixture.hints);
+  });
+}

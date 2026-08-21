@@ -1,5 +1,8 @@
 import { bareName, isExternalRefName } from "./builtins.js";
-import type { ReferenceTarget } from "../reference-target.js";
+import type {
+  ReferenceResolutionHints,
+  ReferenceTarget,
+} from "../reference-target.js";
 
 const OWNER_RECEIVERS = new Set(["this", "self", "cls"]);
 
@@ -19,6 +22,7 @@ export type AnalyzedReference = {
   bareName: string;
   language?: string;
   receiver: ReferenceReceiver;
+  hints?: ReferenceResolutionHints;
 };
 
 export type ReferenceResolutionContext = {
@@ -73,6 +77,7 @@ export class ReferenceResolutionPolicy {
       bareName: target.member,
       language,
       receiver,
+      hints: target.hints,
     };
   }
 
@@ -94,7 +99,10 @@ export class ReferenceResolutionPolicy {
     if (reference.receiver.kind === "qualified") {
       return {
         lookupName: reference.bareName,
-        containerScope: { kind: "named", name: reference.receiver.name },
+        containerScope: {
+          kind: "named",
+          name: reference.hints?.receiverType ?? reference.receiver.name,
+        },
       };
     }
     return { lookupName: reference.name, containerScope: { kind: "none" } };
@@ -153,9 +161,12 @@ export class ReferenceResolutionPolicy {
     if (receiver.kind === "qualified") {
       return {
         lookupName: reference.bareName,
-        preferredFileIds: [owner.fileId],
+        preferredFileIds: [owner.fileId, ...preferredFileIds],
         allowBareFallback: false,
-        containerScope: { kind: "named", name: receiver.name },
+        containerScope: {
+          kind: "named",
+          name: reference.hints?.receiverType ?? receiver.name,
+        },
       };
     }
     return {

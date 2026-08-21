@@ -186,7 +186,9 @@ function absorbRelationOwners(input: {
         reference,
         input.containerNameByChild.get(ownerId),
       );
-      const localHits = resolveLocalReferenceCandidates(plan, ownerId, input);
+      const localHits = reference.hints?.dispatch
+        ? []
+        : resolveLocalReferenceCandidates(plan, ownerId, input);
       const targets = localHits.filter((id) => id !== ownerId);
 
       if (targets.length === 1) {

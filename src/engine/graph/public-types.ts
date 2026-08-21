@@ -2,6 +2,7 @@ export type {
   ContainerNeighbor,
   FileNeighbor,
   GraphEdge,
+  DynamicBoundary,
   GraphEdgeKind,
   InducedEdgesResult,
   GraphReader,
@@ -27,5 +28,6 @@ export type { FileGraphInput } from "./from-fragments.js";
 export type { GraphBackend, OpenGraphOptions } from "./open.js";
 export type {
   ReferenceReceiverTarget,
+  ReferenceResolutionHints,
   ReferenceTarget,
 } from "../reference-target.js";
