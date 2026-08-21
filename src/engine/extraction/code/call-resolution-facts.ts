@@ -4,6 +4,8 @@ import type { TSNode } from "./tree-sitter/nodes.js";
 
 export type CallResolutionFact = {
   receiverTypes: ReadonlyMap<string, string>;
+  ownerFieldTypes: ReadonlyMap<string, string>;
+  dynamicReceivers: ReadonlySet<string>;
   genericBounds: ReadonlyMap<string, readonly string[]>;
   language: string;
 };
@@ -15,6 +17,8 @@ export function extractCallResolutionFacts(
 ): ReadonlyMap<string, CallResolutionFact> {
   const facts = new Map<string, CallResolutionFact>();
   const scopes: Map<string, string>[] = [initialBindings(node, adapter)];
+  const ownerFieldTypes = collectOwnerFields(node, adapter.format);
+  const dynamicReceivers = collectDynamicReceivers(node, adapter);
   const genericBounds = collectGenericBounds(node, adapter.format);
 
   const visit = (current: TSNode | null, skipSelfEntity: boolean): void => {
@@ -41,6 +45,8 @@ export function extractCallResolutionFacts(
     if (isCallNodeType(current.type)) {
       facts.set(callNodeKey(current), {
         receiverTypes: flattenScopes(scopes),
+        ownerFieldTypes,
+        dynamicReceivers,
         genericBounds,
         language: adapter.format,
       });
@@ -65,10 +71,14 @@ export function enrichTargetWithResolutionFact(
       ? target
       : { ...target, hints: { ...target.hints, ...arityHints } };
   if (!fact) return target;
-  const receiverType = fact.receiverTypes.get(receiver) ??
-    fact.receiverTypes.get(receiver.split(".").pop() ?? receiver);
+  const receiverTail = receiver.split(".").pop() ?? receiver;
+  const receiverType = isOwnerFieldReceiver(receiver)
+    ? fact.ownerFieldTypes.get(receiverTail)
+    : fact.receiverTypes.get(receiver) ?? fact.receiverTypes.get(receiverTail);
   if (!receiverType) return target;
   const bounds = fact.genericBounds.get(receiverType);
+  const dynamicDispatch = fact.dynamicReceivers.has(receiver) ||
+    fact.dynamicReceivers.has(receiverTail);
   return {
     ...target,
     hints: {
@@ -79,6 +89,8 @@ export function enrichTargetWithResolutionFact(
       candidateTypes: bounds ? [receiverType, ...bounds] : [receiverType],
       ...(bounds && bounds.length > 0
         ? { dispatch: dispatchForLanguage(fact.language) }
+        : dynamicDispatch
+          ? { dispatch: dispatchForLanguage(fact.language) }
         : VIRTUAL_LANGUAGES.has(fact.language)
           ? { dispatch: "virtual" as const }
           : {}),
@@ -121,8 +133,28 @@ function initialBindings(node: TSNode, adapter: LanguageAdapter): Map<string, st
     const binding = parameterBinding(receiver, adapter.format);
     if (binding) bindings.set(binding.name, binding.type);
   }
-  collectOwnerFields(node, adapter.format, bindings);
   return bindings;
+}
+
+function collectDynamicReceivers(
+  node: TSNode,
+  adapter: LanguageAdapter,
+): Set<string> {
+  const receivers = new Set<string>();
+  if (adapter.format !== "rust") return receivers;
+  const parameters = node.childForFieldName("parameters") ??
+    node.namedChildren.find((child) => /parameters/.test(child.type));
+  const collect = (current: TSNode): void => {
+    if (PARAMETER_TYPES.has(current.type)) {
+      const binding = parameterBinding(current, adapter.format);
+      if (binding && /:\s*&?\s*(?:mut\s+)?dyn\b/.test(current.text))
+        receivers.add(binding.name);
+      return;
+    }
+    for (const child of current.namedChildren ?? []) collect(child);
+  };
+  if (parameters) collect(parameters);
+  return receivers;
 }
 
 function collectSignatureParameters(
@@ -149,14 +181,15 @@ function collectSignatureParameters(
 function collectOwnerFields(
   node: TSNode,
   language: string,
-  bindings: Map<string, string>,
-): void {
+): Map<string, string> {
+  const bindings = new Map<string, string>();
   let parent = node.parent;
   for (let depth = 0; parent && depth < 3; depth++, parent = parent.parent) {
     if (!/class|struct|impl/.test(parent.type)) continue;
     const visit = (current: TSNode): void => {
-      if (!sameSyntaxNode(current, node) && /method|function|constructor/.test(current.type))
-        return;
+      // Owner fields live outside every executable body, including the
+      // current method. Entering it lets later locals overwrite a field type.
+      if (/method|function|constructor/.test(current.type)) return;
       if (DECLARATION_TYPES.has(current.type)) {
         for (const binding of declarationBindings(current, language))
           bindings.set(binding.name, binding.type);
@@ -166,6 +199,11 @@ function collectOwnerFields(
     visit(parent);
     break;
   }
+  return bindings;
+}
+
+function isOwnerFieldReceiver(receiver: string): boolean {
+  return /^(?:this|self|cls)\./.test(receiver);
 }
 
 function flattenScopes(scopes: readonly ReadonlyMap<string, string>[]): Map<string, string> {

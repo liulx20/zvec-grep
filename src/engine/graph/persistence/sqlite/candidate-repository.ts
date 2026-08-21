@@ -43,6 +43,20 @@ export class SemanticCandidateRepository {
              WHERE kind IN (SELECT value FROM json_each(?))
            )
            AND member.file_id IN (SELECT file_id FROM visible)
+           AND NOT EXISTS(
+             SELECT 1 FROM roots root
+             JOIN contains required_owned ON required_owned.parent_id=root.id
+             JOIN symbols required ON required.id=required_owned.child_id
+             WHERE root.kind IN (SELECT value FROM json_each(?))
+               AND NOT EXISTS(
+                 SELECT 1 FROM contains provided_owned
+                 JOIN symbols provided ON provided.id=provided_owned.child_id
+                 WHERE provided_owned.parent_id=owned.parent_id
+                   AND provided.name=required.name
+                   AND (required.arity IS NULL OR provided.arity IS NULL
+                        OR provided.arity=required.arity)
+               )
+           )
        ), candidate_members(id,container_id) AS (
          SELECT DISTINCT member.id,scope.id
          FROM candidate_containers scope
@@ -64,6 +78,7 @@ export class SemanticCandidateRepository {
       JSON.stringify([...new Set(query.typeNames)]),
       JSON.stringify(policy.inheritanceRelations),
       query.memberName,
+      JSON.stringify(policy.structuralRootKinds),
       JSON.stringify(policy.structuralRootKinds),
       query.memberName,
       query.callArity ?? -1,

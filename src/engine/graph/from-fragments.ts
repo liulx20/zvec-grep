@@ -79,11 +79,29 @@ export function fileGraphFromFragments(
     if (!parentName) {
       continue;
     }
+    const parentFragments = publicFragments
+      .filter((candidate) =>
+        candidate.metadata?.kind === "code" &&
+        candidate.metadata.symbolName === parentName &&
+        candidate.range.kind === "text" &&
+        fragment.range.kind === "text" &&
+        candidate.range.startOffset <= fragment.range.startOffset &&
+        candidate.range.endOffset >= fragment.range.endOffset &&
+        publicEntityId(candidate) !== publicEntityId(fragment)
+      )
+      .sort((left, right) => {
+        if (left.range.kind !== "text" || right.range.kind !== "text") return 0;
+        return (left.range.endOffset - left.range.startOffset) -
+          (right.range.endOffset - right.range.startOffset);
+      });
+    const containingParent = parentFragments[0];
     const parents = byName.get(parentName);
-    if (!parents || parents.length !== 1) {
+    const parentId = containingParent
+      ? publicEntityId(containingParent)
+      : parents?.length === 1 ? parents[0] : undefined;
+    if (!parentId) {
       continue;
     }
-    const parentId = parents[0]!;
     const childId = publicEntityId(fragment);
     if (parentId === childId) {
       continue;

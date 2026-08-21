@@ -34,10 +34,17 @@ export class SqliteGraphWriter {
     this.database.assertWritable();
     const oldIds = this.symbolIdsForFile(fileId);
     const oldNames = this.symbolNamesForFile(fileId);
+    const changedInstantiationTypes = this.changedInstantiationTypes(
+      fileId,
+      nodes,
+      edges,
+      refs,
+    );
     const affected = this.affectedResolvedEdgeIds(
       fileId,
       [...oldNames, ...this.changedSemanticNames(nodes, refs)],
     );
+    affected.push(...this.affectedInstantiationProjectionIds(changedInstantiationTypes));
     this.database.transaction(() => {
       this.restoreEdgesToUnresolved(affected);
       this.deleteOwnedFacts(fileId, oldIds);
@@ -59,10 +66,14 @@ export class SqliteGraphWriter {
   deleteFileGraph(fileId: string): void {
     this.database.assertWritable();
     const oldIds = this.symbolIdsForFile(fileId);
+    const changedInstantiationTypes = this.changedInstantiationTypes(
+      fileId, [], [], [],
+    );
     const affected = this.affectedResolvedEdgeIds(
       fileId,
       this.symbolNamesForFile(fileId),
     );
+    affected.push(...this.affectedInstantiationProjectionIds(changedInstantiationTypes));
     this.database.transaction(() => {
       this.restoreEdgesToUnresolved(affected);
       this.deleteOwnedFacts(fileId, oldIds);
@@ -174,6 +185,98 @@ export class SqliteGraphWriter {
     ).map((row) => row.id);
   }
 
+  /**
+   * Return dispatch projections whose result depends on whether one of the
+   * supplied concrete types is instantiated anywhere in the workspace.
+   */
+  private affectedInstantiationProjectionIds(typeNames: readonly string[]): string[] {
+    if (typeNames.length === 0) return [];
+    const names = JSON.stringify([...new Set(typeNames)]);
+    return this.all<{ id: string }>(
+      `SELECT DISTINCT edge.id FROM edges edge
+       LEFT JOIN contains ownership ON ownership.child_id=edge.dst_id
+       LEFT JOIN symbols container ON container.id=ownership.parent_id
+       WHERE edge.kind='CALLS' AND edge.provenance='heuristic' AND (
+         container.name IN (SELECT value FROM json_each(?))
+         OR json_extract(edge.resolution_hints,'$.receiverType')
+              IN (SELECT value FROM json_each(?))
+         OR EXISTS(
+           SELECT 1 FROM json_each(COALESCE(
+             json_extract(edge.resolution_hints,'$.candidateTypes'),'[]'
+           )) candidate_type
+           WHERE candidate_type.value IN (SELECT value FROM json_each(?))
+         )
+       )
+       UNION
+       SELECT DISTINCT unresolved.id FROM unresolved_refs unresolved
+       LEFT JOIN edge_candidates candidate ON candidate.edge_id=unresolved.id
+       LEFT JOIN contains ownership ON ownership.child_id=candidate.target_id
+       LEFT JOIN symbols container ON container.id=ownership.parent_id
+       WHERE unresolved.status='dynamic' AND (
+         container.name IN (SELECT value FROM json_each(?))
+         OR json_extract(unresolved.resolution_hints,'$.receiverType')
+              IN (SELECT value FROM json_each(?))
+         OR EXISTS(
+           SELECT 1 FROM json_each(COALESCE(
+             json_extract(unresolved.resolution_hints,'$.candidateTypes'),'[]'
+           )) candidate_type
+           WHERE candidate_type.value IN (SELECT value FROM json_each(?))
+         )
+       )`,
+      names, names, names, names, names, names,
+    ).map((row) => row.id);
+  }
+
+  /**
+   * Compare the global boolean presence of instantiated types before and
+   * after replacing one file. Multiple makers of the same type collapse to
+   * one fact, so removing one maker does not invalidate stable projections.
+   */
+  private changedInstantiationTypes(
+    fileId: string,
+    nodes: readonly SymNode[],
+    edges: readonly LocalEdge[],
+    refs: readonly RawRef[],
+  ): string[] {
+    const oldTypes = new Set(this.instantiationTypesForFile(fileId));
+    const nodeNames = new Map(nodes.map((node) => [node.id, node.name]));
+    const newTypes = new Set<string>();
+    for (const edge of edges) {
+      if (edge.kind !== "INSTANTIATES") continue;
+      const name = nodeNames.get(edge.dst);
+      if (name) newTypes.add(name);
+    }
+    for (const ref of refs) {
+      if (ref.type !== "symbol" || ref.ref_kind !== "new") continue;
+      if (ref.target.member) newTypes.add(ref.target.member);
+      if (ref.ref_name) newTypes.add(ref.ref_name);
+    }
+    const relevant = [...new Set([...oldTypes, ...newTypes])];
+    if (relevant.length === 0) return [];
+    const otherTypes = new Set(this.all<{ name: string }>(
+      `SELECT DISTINCT target.name FROM edges edge
+       JOIN symbols source ON source.id=edge.src_id AND edge.src_is_file=0
+       JOIN symbols target ON target.id=edge.dst_id AND edge.dst_is_file=0
+       WHERE edge.kind='INSTANTIATES' AND source.file_id<>?
+         AND target.name IN (SELECT value FROM json_each(?))`,
+      fileId, JSON.stringify(relevant),
+    ).map((row) => row.name));
+    return relevant.filter((name) =>
+      (otherTypes.has(name) || oldTypes.has(name)) !==
+      (otherTypes.has(name) || newTypes.has(name))
+    );
+  }
+
+  private instantiationTypesForFile(fileId: string): string[] {
+    return this.all<{ name: string }>(
+      `SELECT DISTINCT target.name FROM edges edge
+       JOIN symbols source ON source.id=edge.src_id AND edge.src_is_file=0
+       JOIN symbols target ON target.id=edge.dst_id AND edge.dst_is_file=0
+       WHERE edge.kind='INSTANTIATES' AND source.file_id=?`,
+      fileId,
+    ).map((row) => row.name);
+  }
+
   private restoreEdgesToUnresolved(edgeIds: readonly string[]): void {
     if (edgeIds.length === 0) return;
     const ids = JSON.stringify([...new Set(edgeIds)]);
@@ -227,7 +330,7 @@ export class SqliteGraphWriter {
     return [...new Set([
       ...nodes.flatMap((node) => node.name ? [node.name] : []),
       ...refs.flatMap((ref) => ref.type === "symbol" &&
-          ["new", "extends", "implements", "overrides", "type"].includes(ref.ref_kind)
+          ["extends", "implements", "overrides", "type"].includes(ref.ref_kind)
         ? [ref.ref_name, ref.target.member] : []),
     ])];
   }
