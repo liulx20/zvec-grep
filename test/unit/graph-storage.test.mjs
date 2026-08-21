@@ -430,6 +430,67 @@ test("RTA invalidation expands concrete types to receiver interfaces", async () 
   graph.close();
 });
 
+test("RTA distinguishes unrelated same-name concrete type identities", async () => {
+  const graph = new SqliteGraphStorage("", { inMemory: true });
+  graph.upsertFileGraph(
+    "types",
+    [
+      { id: "runner-one", kind: "interface", is_exported: true, name: "RunnerOne" },
+      { id: "alpha-one", kind: "class", is_exported: true, name: "Alpha" },
+      { id: "run-one", kind: "method", is_exported: true, name: "run" },
+      { id: "runner-two", kind: "interface", is_exported: true, name: "RunnerTwo" },
+      { id: "alpha-two", kind: "class", is_exported: true, name: "Alpha" },
+      { id: "run-two", kind: "method", is_exported: true, name: "run" },
+      { id: "same-name-caller", kind: "function", is_exported: true, name: "caller" },
+    ],
+    [
+      edge("alpha-one", "run-one", "CONTAINS", "contains"),
+      edge("alpha-two", "run-two", "CONTAINS", "contains"),
+      edge("alpha-one", "runner-one", "INHERITS", "implements"),
+      edge("alpha-two", "runner-two", "INHERITS", "implements"),
+    ],
+    [],
+  );
+  graph.upsertFileGraph(
+    "maker-one-file",
+    [{ id: "maker-one", kind: "function", is_exported: true, name: "makerOne" }],
+    [edge("maker-one", "alpha-one", "INSTANTIATES", "new")],
+    [],
+  );
+  graph.upsertFileGraph(
+    "maker-two-file",
+    [{ id: "maker-two", kind: "function", is_exported: true, name: "makerTwo" }],
+    [edge("maker-two", "alpha-two", "INSTANTIATES", "new")],
+    [],
+  );
+  graph.database.db.prepare(
+    `INSERT INTO edges(
+       id,src_id,dst_id,src_is_file,dst_is_file,kind,rel,count,first_line,
+       ref_name,source_language,receiver_kind,receiver_name,member_name,
+       resolution_hints,provenance,confidence,evidence
+     ) VALUES('same-name-dispatch','same-name-caller','run-one',0,0,
+       'CALLS','call',1,1,'value.run','java','qualified','value','run',?,
+       'heuristic',0.75,'receiver_type_member')`,
+  ).run(JSON.stringify({
+    receiverType: "RunnerOne",
+    candidateTypes: ["RunnerOne"],
+    dispatch: "interface",
+  }));
+
+  graph.deleteFileGraph("maker-one-file");
+
+  assert.equal(
+    graph.edges(["same-name-caller", "run-one"], ["CALLS"], 10).edges.length,
+    0,
+  );
+  assert.equal(graph.stats().pendingRefCount, 1);
+  assert.equal(
+    graph.edges(["maker-two", "alpha-two"], ["INSTANTIATES"], 10).edges.length,
+    1,
+  );
+  graph.close();
+});
+
 test("failed refs retry in deterministic per-name batches", async () => {
   const graph = new SqliteGraphStorage("", { inMemory: true });
   const nodes = Array.from({ length: 501 }, (_, index) => ({

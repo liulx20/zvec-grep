@@ -10,6 +10,16 @@ type StoredEdgeFact = {
   resolution_hints: string | null;
 };
 
+type InstantiationChanges = {
+  symbolIds: string[];
+  unresolvedNames: string[];
+};
+
+type DispatchDependencyTypes = {
+  symbolIds: string[];
+  names: string[];
+};
+
 /** File-scoped graph mutations and resolved-edge invalidation. */
 export class SqliteGraphWriter {
   constructor(private readonly database: SqliteGraphDatabase) {}
@@ -195,15 +205,19 @@ export class SqliteGraphWriter {
    * Return dispatch projections whose result depends on whether one of the
    * supplied concrete types is instantiated anywhere in the workspace.
    */
-  private affectedInstantiationProjectionIds(typeNames: readonly string[]): string[] {
-    if (typeNames.length === 0) return [];
-    const names = JSON.stringify([...new Set(typeNames)]);
+  private affectedInstantiationProjectionIds(
+    types: DispatchDependencyTypes,
+  ): string[] {
+    if (types.symbolIds.length === 0 && types.names.length === 0) return [];
+    const ids = JSON.stringify([...new Set(types.symbolIds)]);
+    const names = JSON.stringify([...new Set(types.names)]);
     return this.all<{ id: string }>(
       `SELECT DISTINCT edge.id FROM edges edge
        LEFT JOIN contains ownership ON ownership.child_id=edge.dst_id
        LEFT JOIN symbols container ON container.id=ownership.parent_id
        WHERE edge.kind='CALLS' AND edge.provenance='heuristic' AND (
-         container.name IN (SELECT value FROM json_each(?))
+         container.id IN (SELECT value FROM json_each(?))
+         OR container.name IN (SELECT value FROM json_each(?))
          OR json_extract(edge.resolution_hints,'$.receiverType')
               IN (SELECT value FROM json_each(?))
          OR EXISTS(
@@ -219,7 +233,8 @@ export class SqliteGraphWriter {
        LEFT JOIN contains ownership ON ownership.child_id=candidate.target_id
        LEFT JOIN symbols container ON container.id=ownership.parent_id
        WHERE unresolved.status='dynamic' AND (
-         container.name IN (SELECT value FROM json_each(?))
+         container.id IN (SELECT value FROM json_each(?))
+         OR container.name IN (SELECT value FROM json_each(?))
          OR json_extract(unresolved.resolution_hints,'$.receiverType')
               IN (SELECT value FROM json_each(?))
          OR EXISTS(
@@ -229,17 +244,21 @@ export class SqliteGraphWriter {
            WHERE candidate_type.value IN (SELECT value FROM json_each(?))
          )
        )`,
-      names, names, names, names, names, names,
+      ids, names, names, names, ids, names, names, names,
     ).map((row) => row.id);
   }
 
   /** Include every nominal base/interface whose dispatch can depend on RTA. */
-  private inheritanceDependencyTypes(typeNames: readonly string[]): string[] {
-    if (typeNames.length === 0) return [];
-    return this.all<{ name: string }>(
+  private inheritanceDependencyTypes(
+    changes: InstantiationChanges,
+  ): DispatchDependencyTypes {
+    if (changes.symbolIds.length === 0 && changes.unresolvedNames.length === 0)
+      return { symbolIds: [], names: [] };
+    const rows = this.all<{ id: string; name: string }>(
       `WITH RECURSIVE hierarchy(id,name) AS (
          SELECT id,name FROM symbols
-         WHERE name IN (SELECT value FROM json_each(?))
+         WHERE id IN (SELECT value FROM json_each(?))
+            OR name IN (SELECT value FROM json_each(?))
          UNION
          SELECT parent.id,parent.name
          FROM hierarchy child
@@ -248,9 +267,17 @@ export class SqliteGraphWriter {
            AND relation.kind='INHERITS'
          JOIN symbols parent ON parent.id=relation.dst_id
        )
-       SELECT DISTINCT name FROM hierarchy WHERE name IS NOT NULL`,
-      JSON.stringify([...new Set(typeNames)]),
-    ).map((row) => row.name);
+       SELECT DISTINCT id,name FROM hierarchy WHERE name IS NOT NULL`,
+      JSON.stringify([...new Set(changes.symbolIds)]),
+      JSON.stringify([...new Set(changes.unresolvedNames)]),
+    );
+    return {
+      symbolIds: rows.map((row) => row.id),
+      names: [...new Set([
+        ...rows.map((row) => row.name),
+        ...changes.unresolvedNames,
+      ])],
+    };
   }
 
   /**
@@ -263,44 +290,62 @@ export class SqliteGraphWriter {
     nodes: readonly SymNode[],
     edges: readonly LocalEdge[],
     refs: readonly RawRef[],
-  ): string[] {
-    const oldTypes = new Set(this.instantiationTypesForFile(fileId));
+  ): InstantiationChanges {
+    const oldTypeIds = new Set(this.instantiationTypeIdsForFile(fileId));
     const nodeNames = new Map(nodes.map((node) => [node.id, node.name]));
-    const newTypes = new Set<string>();
+    const newTypeIds = new Set<string>();
+    const newTypeNames = new Set<string>();
     for (const edge of edges) {
       if (edge.kind !== "INSTANTIATES") continue;
+      newTypeIds.add(edge.dst);
       const name = nodeNames.get(edge.dst);
-      if (name) newTypes.add(name);
+      if (name) newTypeNames.add(name);
     }
     for (const ref of refs) {
       if (ref.type !== "symbol" || ref.ref_kind !== "new") continue;
-      if (ref.target.member) newTypes.add(ref.target.member);
-      if (ref.ref_name) newTypes.add(ref.ref_name);
+      if (ref.target.member) newTypeNames.add(ref.target.member);
+      if (ref.ref_name) newTypeNames.add(ref.ref_name);
     }
-    const relevant = [...new Set([...oldTypes, ...newTypes])];
-    if (relevant.length === 0) return [];
-    const otherTypes = new Set(this.all<{ name: string }>(
-      `SELECT DISTINCT target.name FROM edges edge
+    const namedCandidates = newTypeNames.size === 0 ? [] : this.all<{ id: string }>(
+      `SELECT id FROM symbols
+       WHERE name IN (SELECT value FROM json_each(?))`,
+      JSON.stringify([...newTypeNames]),
+    ).map((row) => row.id);
+    for (const id of namedCandidates) newTypeIds.add(id);
+    const relevantIds = [...new Set([...oldTypeIds, ...newTypeIds])];
+    if (relevantIds.length === 0)
+      return { symbolIds: [], unresolvedNames: [...newTypeNames] };
+    const otherTypeIds = new Set(this.all<{ id: string }>(
+      `SELECT DISTINCT target.id FROM edges edge
        JOIN symbols source ON source.id=edge.src_id AND edge.src_is_file=0
        JOIN symbols target ON target.id=edge.dst_id AND edge.dst_is_file=0
        WHERE edge.kind='INSTANTIATES' AND source.file_id<>?
-         AND target.name IN (SELECT value FROM json_each(?))`,
-      fileId, JSON.stringify(relevant),
-    ).map((row) => row.name));
-    return relevant.filter((name) =>
-      (otherTypes.has(name) || oldTypes.has(name)) !==
-      (otherTypes.has(name) || newTypes.has(name))
+         AND target.id IN (SELECT value FROM json_each(?))`,
+      fileId, JSON.stringify(relevantIds),
+    ).map((row) => row.id));
+    const changedIds = relevantIds.filter((id) =>
+      (otherTypeIds.has(id) || oldTypeIds.has(id)) !==
+      (otherTypeIds.has(id) || newTypeIds.has(id))
     );
+    const resolvedNames = new Set(this.all<{ name: string }>(
+      `SELECT DISTINCT name FROM symbols
+       WHERE id IN (SELECT value FROM json_each(?)) AND name IS NOT NULL`,
+      JSON.stringify([...newTypeIds]),
+    ).map((row) => row.name));
+    return {
+      symbolIds: changedIds,
+      unresolvedNames: [...newTypeNames].filter((name) => !resolvedNames.has(name)),
+    };
   }
 
-  private instantiationTypesForFile(fileId: string): string[] {
-    return this.all<{ name: string }>(
-      `SELECT DISTINCT target.name FROM edges edge
+  private instantiationTypeIdsForFile(fileId: string): string[] {
+    return this.all<{ id: string }>(
+      `SELECT DISTINCT target.id FROM edges edge
        JOIN symbols source ON source.id=edge.src_id AND edge.src_is_file=0
        JOIN symbols target ON target.id=edge.dst_id AND edge.dst_is_file=0
        WHERE edge.kind='INSTANTIATES' AND source.file_id=?`,
       fileId,
-    ).map((row) => row.name);
+    ).map((row) => row.id);
   }
 
   private restoreEdgesToUnresolved(edgeIds: readonly string[]): void {
