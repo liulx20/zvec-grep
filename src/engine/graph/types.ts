@@ -91,6 +91,7 @@ export type GraphStats = {
   /** Pending and failed references retained for backward compatibility. */
   refCount: number;
   pendingRefCount: number;
+  failedRefCount: number;
   dynamicBoundaryCount: number;
   externalRefCount: number;
   callsCount: number;

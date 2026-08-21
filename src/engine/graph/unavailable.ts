@@ -103,6 +103,7 @@ export class UnavailableGraphStorage implements GraphStorage {
       fileCount: 0,
       refCount: 0,
       pendingRefCount: 0,
+      failedRefCount: 0,
       dynamicBoundaryCount: 0,
       externalRefCount: 0,
       callsCount: 0,

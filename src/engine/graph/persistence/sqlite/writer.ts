@@ -33,9 +33,10 @@ export class SqliteGraphWriter {
   ): void {
     this.database.assertWritable();
     const oldIds = this.symbolIdsForFile(fileId);
+    const oldNames = this.symbolNamesForFile(fileId);
     const affected = this.affectedResolvedEdgeIds(
       fileId,
-      this.changedSemanticNames(nodes, refs),
+      [...oldNames, ...this.changedSemanticNames(nodes, refs)],
     );
     this.database.transaction(() => {
       this.restoreEdgesToUnresolved(affected);
@@ -155,10 +156,21 @@ export class SqliteGraphWriter {
        JOIN symbols target ON target.id=candidate.target_id
        LEFT JOIN contains ownership ON ownership.child_id=candidate.target_id
        LEFT JOIN symbols container ON container.id=ownership.parent_id
-       WHERE target.file_id=? OR (?<>'[]' AND
-         container.name IN (SELECT value FROM json_each(?)))`,
+       WHERE target.file_id=? OR (?<>'[]' AND (
+         container.name IN (SELECT value FROM json_each(?))
+         OR unresolved.member_name IN (SELECT value FROM json_each(?))
+         OR unresolved.ref_name IN (SELECT value FROM json_each(?))
+         OR json_extract(unresolved.resolution_hints,'$.receiverType')
+              IN (SELECT value FROM json_each(?))
+         OR EXISTS(
+           SELECT 1 FROM json_each(COALESCE(
+             json_extract(unresolved.resolution_hints,'$.candidateTypes'),'[]'
+           )) candidate_type
+           WHERE candidate_type.value IN (SELECT value FROM json_each(?))
+         )
+       ))`,
       fileId, fileId, fileId, fileId, fileId, names, names, names, names, names,
-      fileId, names, names,
+      fileId, names, names, names, names, names, names,
     ).map((row) => row.id);
   }
 

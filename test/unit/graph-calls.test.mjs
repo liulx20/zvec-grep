@@ -703,6 +703,7 @@ func invoke[T Runner](value T) { value.Run() }
   assert.deepEqual(candidateNames, ["Run", "Run", "Run"]);
   assert.equal(graph.stats().refCount, 0);
   assert.equal(graph.stats().pendingRefCount, 0);
+  assert.equal(graph.stats().failedRefCount, 0);
   assert.equal(graph.stats().dynamicBoundaryCount, 1);
   assert.equal(boundaries[0].candidateDetails.length, 3);
   await graph.resolvePending();

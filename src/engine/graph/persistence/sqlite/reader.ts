@@ -539,14 +539,14 @@ export class SqliteGraphReader {
         "SELECT status,COUNT(*) AS count FROM unresolved_refs GROUP BY status",
       ).map((row) => [row.status, Number(row.count)]),
     );
-    const pendingRefCount =
-      (unresolvedCounts.get("pending") ?? 0) +
-      (unresolvedCounts.get("failed") ?? 0);
+    const pendingRefCount = unresolvedCounts.get("pending") ?? 0;
+    const failedRefCount = unresolvedCounts.get("failed") ?? 0;
     return {
       symCount: count("symbols"),
       fileCount: count("files"),
-      refCount: pendingRefCount,
+      refCount: pendingRefCount + failedRefCount,
       pendingRefCount,
+      failedRefCount,
       dynamicBoundaryCount: unresolvedCounts.get("dynamic") ?? 0,
       externalRefCount: unresolvedCounts.get("external") ?? 0,
       callsCount: this.edgeOccurrenceCount("CALLS"),

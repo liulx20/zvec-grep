@@ -313,6 +313,72 @@ test("new same-name symbols invalidate ordinary resolved projections", async () 
   graph.close();
 });
 
+test("renaming a receiver type invalidates existing dynamic candidates", async () => {
+  const graph = new SqliteGraphStorage("", { inMemory: true });
+  graph.upsertFileGraph(
+    "contract",
+    [{ id: "old-contract", kind: "interface", is_exported: true, name: "OldContract" }],
+    [],
+    [],
+  );
+  graph.upsertFileGraph(
+    "implementations",
+    [
+      { id: "impl-a", kind: "class", is_exported: true, name: "ImplA" },
+      { id: "impl-b", kind: "class", is_exported: true, name: "ImplB" },
+      { id: "helper-a", kind: "method", is_exported: true, name: "helper" },
+      { id: "helper-b", kind: "method", is_exported: true, name: "helper" },
+    ],
+    [
+      edge("impl-a", "helper-a", "CONTAINS", "contains"),
+      edge("impl-b", "helper-b", "CONTAINS", "contains"),
+      { ...edge("impl-a", "old-contract", "INHERITS", "implements"), ref_name: "OldContract" },
+      { ...edge("impl-b", "old-contract", "INHERITS", "implements"), ref_name: "OldContract" },
+    ],
+    [],
+  );
+  graph.upsertFileGraph(
+    "caller-file",
+    [{ id: "caller", kind: "function", is_exported: true, name: "caller" }],
+    [],
+    [],
+  );
+  graph.database.db.prepare(
+    `INSERT INTO unresolved_refs(
+       id,owner_id,owner_is_file,ref_name,ref_kind,line,source_language,
+       receiver_kind,receiver_name,member_name,resolution_hints,status,
+       last_attempt,dynamic_reason
+     ) VALUES('dynamic-call','caller',0,'value.helper','call',1,'typescript',
+       'qualified','value','helper',?,'dynamic',0,'polymorphic_dispatch')`,
+  ).run(JSON.stringify({
+    receiverType: "OldContract",
+    candidateTypes: ["OldContract"],
+    dispatch: "interface",
+  }));
+  const insertCandidate = graph.database.db.prepare(
+    "INSERT INTO edge_candidates(edge_id,target_id,reason,confidence) VALUES('dynamic-call',?,'hierarchy',0.65)",
+  );
+  insertCandidate.run("helper-a");
+  insertCandidate.run("helper-b");
+  assert.equal(graph.dynamicBoundaries(["caller"], 10).length, 1);
+  assert.ok(
+    graph.writer
+      .affectedResolvedEdgeIds("contract", ["OldContract", "NewContract"])
+      .includes("dynamic-call"),
+  );
+
+  graph.upsertFileGraph(
+    "contract",
+    [{ id: "new-contract", kind: "interface", is_exported: true, name: "NewContract" }],
+    [],
+    [],
+  );
+
+  assert.equal(graph.dynamicBoundaries(["caller"], 10).length, 0);
+  assert.ok(graph.stats().pendingRefCount >= 1);
+  graph.close();
+});
+
 test("failed refs retry in deterministic per-name batches", async () => {
   const graph = new SqliteGraphStorage("", { inMemory: true });
   const nodes = Array.from({ length: 501 }, (_, index) => ({
