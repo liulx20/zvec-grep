@@ -111,6 +111,7 @@ erDiagram
   SYMBOL ||--o{ SOURCE_REF : OWNS_SYMBOL_REF
   FILE ||--o{ SOURCE_REF : OWNS_FILE_REF
   SOURCE_REF ||--o| RESOLVED_SOURCE_REF : MATERIALIZES
+  SOURCE_REF ||--o| RESOLVED_IMPORT_REF : MATERIALIZES_IMPORT
   FILE ||--o{ PENDING_REF : OWNS_IMPORT_REF
   SYMBOL ||--o{ PENDING_REF : OWNS_SYMBOL_REF
 
@@ -174,6 +175,12 @@ erDiagram
     text kind
     text rel
   }
+  RESOLVED_IMPORT_REF {
+    text ref_id PK
+    text src_file_id FK
+    text dst_file_id FK
+    text spec
+  }
 ```
 
 `source_refs` 保存从 AST 提取出的引用事实，`pending_refs` 保存这些事实当前的解析队列状态。其中：
@@ -203,6 +210,7 @@ erDiagram
 | `instantiates` | `(src_id, type_id)` | callable 对具体类型的实例化事实，用于轻量 RTA |
 | `source_refs` | `id` | AST 提取的 durable 引用事实，不因一次解析成功而删除 |
 | `resolved_source_refs` | `ref_id` | 需要重算的源事实当前物化出的唯一边，用于精确撤销旧投影 |
+| `resolved_import_refs` | `ref_id` | import 源事实当前物化出的文件关系或 binding |
 | `dynamic_calls` | `id` | 已确认是多态分派、但没有唯一静态目标的调用点 |
 | `dispatch_candidates` | `(call_id, target_id)` | 动态调用的候选目标、依据和置信度 |
 
@@ -219,13 +227,13 @@ erDiagram
   `last_attempt` 用于控制失败引用的公平分批重试。
 - `symbols.signature`、`arity` 和 `return_type` 保存用于重载过滤与类型传播的签名事实。
 - `source_refs` 保存 symbol、inheritance、import 和 import binding 的 AST 源事实；`pending_refs` 只承担
-  pending / failed / external 解析状态与重试队列职责。qualified receiver 候选唯一时，物化边同时登记到
-  `resolved_source_refs`；候选数大于 1 时，
+  pending / failed / external 解析状态与重试队列职责。symbol 投影登记到 `resolved_source_refs`，import
+  投影登记到 `resolved_import_refs`；候选数大于 1 时，
   结果写入 `dynamic_calls` 和 `dispatch_candidates`。每次 finalize 先撤销上一次物化结果，再从
   `source_refs` 重新投影动态引用，因此后续新增或删除 subclass/implementation 不会留下过期 heuristic 边。
-- 目标文件重建时，incoming edge 快照会扣除由 `resolved_source_refs` 标记的动态物化部分；这些
-  调用随后直接从 `source_refs` 重算，不会通过 `ref_name` 反解析而丢失语言、receiver type、
-  candidate types 或 dispatch hints。静态边与同一端点上的非动态聚合计数仍按原流程恢复。
+- 目标文件删除或重建时，writer 根据两个 projection 表定位受影响的 `ref_id`，撤销旧投影并把原始
+  `source_refs` 重新放入解析队列。新增同名 symbol 也会使已解析的普通名称引用失效重算，因此无需从
+  聚合边的 `ref_name` 反推源码语义；只有没有 source fact 的 legacy/direct 边才走 incoming snapshot 兜底。
 - schema 使用 `STRICT`、外键、组合主键和按 src/dst/name 建立的查询索引。
 - 当前 schema 版本为 2。main 的 v1 可以在可写 index 流程中通过新增表、`ensureOptionalColumns()`
   补列并升级到 v2；read-only 模式不会修改数据库，遇到 v1 会明确拒绝打开并要求先执行升级/重建。

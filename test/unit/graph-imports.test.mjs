@@ -261,3 +261,31 @@ export function formatDate() {
   );
   graph.close();
 });
+
+test("deleted and re-added import targets are reprojected from source facts", async () => {
+  const caller = codeFile("caller", "src/caller.ts");
+  const target = codeFile("target", "src/target.ts");
+  const graph = new SqliteGraphStorage("", { inMemory: true });
+  graph.upsertFileGraph(
+    caller.id,
+    [],
+    [],
+    [rawRef({ type: "import", owner: caller.id, refName: "./target", line: 1 })],
+  );
+  graph.upsertFileGraph(target.id, [], [], []);
+  await graph.resolvePending({ files: [caller, target] });
+  assert.deepEqual(graph.expandFileNeighbors([caller.id], 10), [
+    { fid: caller.id, id: target.id, direction: "out" },
+  ]);
+
+  graph.deleteFileGraph(target.id);
+  assert.deepEqual(graph.expandFileNeighbors([caller.id], 10), []);
+  assert.equal(graph.stats().refCount, 1);
+
+  graph.upsertFileGraph(target.id, [], [], []);
+  await graph.resolvePending({ files: [caller, target] });
+  assert.deepEqual(graph.expandFileNeighbors([caller.id], 10), [
+    { fid: caller.id, id: target.id, direction: "out" },
+  ]);
+  graph.close();
+});

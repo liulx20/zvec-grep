@@ -297,7 +297,12 @@ export class SqlitePendingRefResolver {
         dst_id: string;
         kind: string;
         rel: string;
-      }>("SELECT ref_id,src_id,dst_id,kind,rel FROM resolved_source_refs");
+      }>(
+        `SELECT r.ref_id,r.src_id,r.dst_id,r.kind,r.rel
+         FROM resolved_source_refs r
+         JOIN source_refs f ON f.id=r.ref_id
+         WHERE f.receiver_kind IS NOT NULL`,
+      );
       const remove = this.db.prepare(
         `DELETE FROM symbol_edges
          WHERE src_id=? AND dst_id=? AND kind=? AND rel=?`,
@@ -327,7 +332,8 @@ export class SqlitePendingRefResolver {
         }
       }
       this.db.exec(
-        `DELETE FROM resolved_source_refs;
+        `DELETE FROM resolved_source_refs
+         WHERE ref_id IN (SELECT id FROM source_refs WHERE receiver_kind IS NOT NULL);
          DELETE FROM dynamic_calls;
          DELETE FROM pending_refs
          WHERE status<>'external' AND id IN (
@@ -385,9 +391,7 @@ export class SqlitePendingRefResolver {
       );
     this.db.prepare(
       `INSERT OR REPLACE INTO resolved_source_refs(ref_id,src_id,dst_id,kind,rel)
-       SELECT ?,?,?,?,? WHERE EXISTS(
-         SELECT 1 FROM source_refs WHERE id=? AND receiver_kind IS NOT NULL
-       )`,
+       SELECT ?,?,?,?,? WHERE EXISTS(SELECT 1 FROM source_refs WHERE id=?)`,
     ).run(ref.id, ref.owner_id, dst, edgeKind, ref.ref_kind, ref.id);
   }
 
@@ -404,7 +408,12 @@ export class SqlitePendingRefResolver {
       from.format,
       paths,
     );
-    if (result.status === "external") return this.deleteRef(ref.id);
+    if (result.status === "external") {
+      this.db.prepare("UPDATE pending_refs SET status='external' WHERE id=?").run(
+        ref.id,
+      );
+      return;
+    }
     if (result.status !== "resolved") return this.failRef(ref.id, attempt);
     this.db
       .prepare(
@@ -424,6 +433,18 @@ export class SqlitePendingRefResolver {
           ref.ref_name,
         );
     }
+    this.db.prepare(
+      `INSERT OR REPLACE INTO resolved_import_refs(
+         ref_id,src_file_id,dst_file_id,spec,local_name,imported_name
+       ) VALUES(?,?,?,?,?,?)`,
+    ).run(
+      ref.id,
+      ref.owner_id,
+      result.fileId,
+      ref.ref_name,
+      ref.local_name,
+      ref.imported_name,
+    );
     this.deleteRef(ref.id);
   }
 

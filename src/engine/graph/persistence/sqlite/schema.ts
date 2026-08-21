@@ -73,6 +73,12 @@ CREATE TABLE IF NOT EXISTS resolved_source_refs (
  dst_id TEXT NOT NULL REFERENCES symbols(id) ON DELETE CASCADE,
  kind TEXT NOT NULL, rel TEXT NOT NULL
 ) STRICT;
+CREATE TABLE IF NOT EXISTS resolved_import_refs (
+ ref_id TEXT PRIMARY KEY REFERENCES source_refs(id) ON DELETE CASCADE,
+ src_file_id TEXT NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+ dst_file_id TEXT NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+ spec TEXT NOT NULL, local_name TEXT, imported_name TEXT
+) STRICT;
 CREATE TABLE IF NOT EXISTS dispatch_candidates (
  call_id TEXT NOT NULL REFERENCES dynamic_calls(id) ON DELETE CASCADE,
  target_id TEXT NOT NULL REFERENCES symbols(id) ON DELETE CASCADE,
@@ -92,4 +98,5 @@ CREATE INDEX IF NOT EXISTS pending_refs_retry_idx ON pending_refs(ref_name,statu
 CREATE INDEX IF NOT EXISTS instantiates_type_idx ON instantiates(type_id);
 CREATE INDEX IF NOT EXISTS dynamic_calls_owner_idx ON dynamic_calls(owner_id);
 CREATE INDEX IF NOT EXISTS source_refs_owner_idx ON source_refs(owner_id,owner_is_file);
+CREATE INDEX IF NOT EXISTS resolved_import_refs_dst_idx ON resolved_import_refs(dst_file_id);
 `;

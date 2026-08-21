@@ -50,8 +50,14 @@ export class SqliteGraphWriter {
   ): void {
     this.assertWritable();
     const oldIds = this.symbolIdsForFile(fileId);
+    const incomingRefIds = this.incomingSymbolRefIds(fileId);
+    const nameAffectedRefIds = this.nameAffectedRefIds(fileId, nodes);
     const incoming = this.incomingSnapshots(fileId);
     this.transaction(() => {
+      this.invalidateSymbolProjections([
+        ...incomingRefIds,
+        ...nameAffectedRefIds,
+      ]);
       this.deletePendingOwners(fileId, oldIds);
       this.db.prepare("INSERT OR IGNORE INTO files(id) VALUES (?)").run(fileId);
       this.db.prepare("DELETE FROM symbols WHERE file_id=?").run(fileId);
@@ -84,16 +90,22 @@ export class SqliteGraphWriter {
           this.insertRef(this.snapshotRef(snap, occurrence++), fileId);
         }
       }
+      this.requeueSourceRefs([...incomingRefIds, ...nameAffectedRefIds]);
     });
   }
 
   deleteFileGraph(fileId: string): void {
     this.assertWritable();
     const oldIds = this.symbolIdsForFile(fileId);
+    const incomingRefIds = [
+      ...this.incomingSymbolRefIds(fileId),
+      ...this.incomingImportRefIds(fileId),
+    ];
     const incoming = this.incomingSnapshots(fileId);
     const incomingImports = this.incomingImportSnapshots(fileId);
     const incomingBindings = this.incomingBindingSnapshots(fileId);
     this.transaction(() => {
+      this.invalidateSymbolProjections(incomingRefIds);
       this.deletePendingOwners(fileId, oldIds);
       this.db.prepare("DELETE FROM files WHERE id=?").run(fileId);
       let occurrence = 0;
@@ -114,6 +126,7 @@ export class SqliteGraphWriter {
           snapshot.src_file_id,
         );
       }
+      this.requeueSourceRefs(incomingRefIds);
     });
   }
 
@@ -237,16 +250,70 @@ export class SqliteGraphWriter {
     );
   }
 
+  private incomingSymbolRefIds(fileId: string): string[] {
+    return this.all<{ ref_id: string }>(
+      `SELECT r.ref_id FROM resolved_source_refs r
+       JOIN symbols target ON target.id=r.dst_id
+       JOIN symbols source ON source.id=r.src_id
+       WHERE target.file_id=? AND source.file_id<>?
+       ORDER BY r.ref_id`,
+      fileId,
+      fileId,
+    ).map((row) => row.ref_id);
+  }
+
+  private incomingImportRefIds(fileId: string): string[] {
+    return this.all<{ ref_id: string }>(
+      `SELECT ref_id FROM resolved_import_refs
+       WHERE dst_file_id=? AND src_file_id<>? ORDER BY ref_id`,
+      fileId,
+      fileId,
+    ).map((row) => row.ref_id);
+  }
+
+  private nameAffectedRefIds(
+    fileId: string,
+    nodes: readonly SymNode[],
+  ): string[] {
+    const names = [...new Set(nodes.flatMap((node) => node.name ? [node.name] : []))];
+    if (names.length === 0) return [];
+    return this.all<{ ref_id: string }>(
+      `SELECT DISTINCT projection.ref_id
+       FROM resolved_source_refs projection
+       JOIN source_refs fact ON fact.id=projection.ref_id
+       JOIN symbols source ON source.id=projection.src_id
+       WHERE source.file_id<>? AND fact.receiver_kind IS NULL
+         AND (fact.ref_name IN (SELECT value FROM json_each(?))
+              OR fact.member_name IN (SELECT value FROM json_each(?)))
+       ORDER BY projection.ref_id`,
+      fileId,
+      JSON.stringify(names),
+      JSON.stringify(names),
+    ).map((row) => row.ref_id);
+  }
+
   private incomingImportSnapshots(fileId: string): IncomingImport[] {
     return this.all<IncomingImport>(
-      "SELECT src_file_id,spec FROM file_imports WHERE dst_file_id=? ORDER BY src_file_id,spec",
+      `SELECT i.src_file_id,i.spec FROM file_imports i
+       WHERE i.dst_file_id=? AND NOT EXISTS(
+         SELECT 1 FROM resolved_import_refs r
+         WHERE r.src_file_id=i.src_file_id AND r.dst_file_id=i.dst_file_id
+           AND r.spec=i.spec AND r.local_name IS NULL
+       ) ORDER BY i.src_file_id,i.spec`,
       fileId,
     );
   }
 
   private incomingBindingSnapshots(fileId: string): IncomingImportBinding[] {
     return this.all<IncomingImportBinding>(
-      "SELECT src_file_id,spec,local_name,imported_name FROM file_import_bindings WHERE dst_file_id=? ORDER BY src_file_id,spec,local_name,imported_name",
+      `SELECT b.src_file_id,b.spec,b.local_name,b.imported_name
+       FROM file_import_bindings b
+       WHERE b.dst_file_id=? AND NOT EXISTS(
+         SELECT 1 FROM resolved_import_refs r
+         WHERE r.src_file_id=b.src_file_id AND r.dst_file_id=b.dst_file_id
+           AND r.spec=b.spec AND r.local_name=b.local_name
+           AND r.imported_name=b.imported_name
+       ) ORDER BY b.src_file_id,b.spec,b.local_name,b.imported_name`,
       fileId,
     ).filter((row) => row.spec.length > 0);
   }
@@ -286,6 +353,81 @@ export class SqliteGraphWriter {
       "SELECT id FROM symbols WHERE file_id=?",
       fileId,
     ).map((row) => row.id);
+  }
+
+  private requeueSourceRefs(refIds: readonly string[]): void {
+    if (refIds.length === 0) return;
+    const ids = JSON.stringify([...new Set(refIds)]);
+    this.db
+      .prepare(
+        "DELETE FROM dynamic_calls WHERE id IN(SELECT value FROM json_each(?))",
+      )
+      .run(ids);
+    this.db.prepare(
+      `INSERT OR REPLACE INTO pending_refs(
+         id,owner_id,owner_is_file,ref_name,ref_kind,line,imported_name,
+         local_name,source_language,receiver_kind,receiver_name,member_name,
+         resolution_hints,status,last_attempt
+       )
+       SELECT id,owner_id,owner_is_file,ref_name,ref_kind,line,imported_name,
+              local_name,source_language,receiver_kind,receiver_name,member_name,
+              resolution_hints,'pending',0
+       FROM source_refs WHERE id IN(SELECT value FROM json_each(?))`,
+    ).run(ids);
+  }
+
+  private invalidateSymbolProjections(refIds: readonly string[]): void {
+    if (refIds.length === 0) return;
+    const ids = JSON.stringify([...new Set(refIds)]);
+    const projections = this.all<{
+      src_id: string;
+      dst_id: string;
+      kind: string;
+      rel: string;
+    }>(
+      `SELECT src_id,dst_id,kind,rel FROM resolved_source_refs
+       WHERE ref_id IN(SELECT value FROM json_each(?))`,
+      ids,
+    );
+    const count = this.db.prepare(
+      `SELECT count FROM symbol_edges
+       WHERE src_id=? AND dst_id=? AND kind=? AND rel=?`,
+    );
+    const remove = this.db.prepare(
+      `DELETE FROM symbol_edges
+       WHERE src_id=? AND dst_id=? AND kind=? AND rel=?`,
+    );
+    const decrement = this.db.prepare(
+      `UPDATE symbol_edges SET count=count-1
+       WHERE src_id=? AND dst_id=? AND kind=? AND rel=?`,
+    );
+    for (const projection of projections) {
+      const row = count.get(
+        projection.src_id,
+        projection.dst_id,
+        projection.kind,
+        projection.rel,
+      ) as { count: number } | undefined;
+      if (row) {
+        const statement = row.count <= 1 ? remove : decrement;
+        statement.run(
+          projection.src_id,
+          projection.dst_id,
+          projection.kind,
+          projection.rel,
+        );
+      }
+      if (projection.rel === "new") {
+        this.db.prepare(
+          "DELETE FROM instantiates WHERE src_id=? AND type_id=?",
+        ).run(projection.src_id, projection.dst_id);
+      }
+    }
+    this.db
+      .prepare(
+        "DELETE FROM resolved_source_refs WHERE ref_id IN(SELECT value FROM json_each(?))",
+      )
+      .run(ids);
   }
 
   private deletePendingOwners(fileId: string, ids: readonly string[]): void {

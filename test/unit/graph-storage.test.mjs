@@ -104,7 +104,7 @@ test("SQLite graph upsert resolves callers and reattaches incoming edges", async
   assert.equal(graph.stats().refCount, 0);
   assert.equal(graph.stats().callsCount, 1);
 
-  // Reindex target file with a new symbol id; incoming edge must revive via ref_name.
+  // Reindex target file with a new symbol id; its durable source fact is reprojected.
   graph.upsertFileGraph(
     "file-b",
     [{ id: "sym-b2", kind: "function", is_exported: true, name: "callee" }],
@@ -218,6 +218,36 @@ test("resolved references retain durable source facts", async () => {
   assert.equal(graph.stats().callsCount, 1);
   assert.equal(graph.stats().refCount, 0);
   assert.equal(graph.sourceRefCount(), 1);
+  graph.close();
+});
+
+test("new same-name symbols invalidate ordinary resolved projections", async () => {
+  const graph = new SqliteGraphStorage("", { inMemory: true });
+  graph.upsertFileGraph(
+    "caller-file",
+    [{ id: "caller", kind: "function", is_exported: false, name: "caller" }],
+    [],
+    [rawRef({ owner: "caller", refName: "target", line: 1 })],
+  );
+  graph.upsertFileGraph(
+    "first-target",
+    [{ id: "target-a", kind: "function", is_exported: true, name: "target" }],
+    [],
+    [],
+  );
+  await graph.resolvePending();
+  assert.deepEqual(graph.callees("caller", 1, 10).map((item) => item.id), ["target-a"]);
+
+  graph.upsertFileGraph(
+    "second-target",
+    [{ id: "target-b", kind: "function", is_exported: true, name: "target" }],
+    [],
+    [],
+  );
+  await graph.resolvePending();
+
+  assert.deepEqual(graph.callees("caller", 1, 10), []);
+  assert.equal(graph.stats().refCount, 1);
   graph.close();
 });
 
