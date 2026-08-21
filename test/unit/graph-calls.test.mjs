@@ -892,6 +892,80 @@ func invoke[T Runner](value T) { value.Run() }
   graph.close();
 });
 
+test("Go structural dispatch includes embedded interface method sets", async () => {
+  const file = { ...codeFile("embedded-method-set.go"), format: "go" };
+  const source = {
+    kind: "text",
+    file,
+    text: `package p
+type Base interface { Stop() }
+type Runner interface { Base; Run() }
+type Alpha struct{}
+func (a Alpha) Run() {}
+func (a Alpha) Stop() {}
+type Unrelated struct{}
+func (u Unrelated) Run() {}
+func invoke[T Runner](value T) { value.Run() }
+`,
+  };
+  const input = await extractFileGraph(
+    source,
+    await new CodeExtractor().extract(source),
+  );
+  const invoke = input.nodes.find((node) => node.name === "invoke");
+  assert.ok(invoke);
+  const graph = new SqliteGraphStorage("", { inMemory: true });
+  graph.upsertFileGraph(file.id, input.nodes, input.edges, input.refs);
+  await graph.resolvePending();
+  const boundary = graph.dynamicBoundaries([invoke.id], 10)[0];
+  assert.ok(boundary);
+  const parentByChild = new Map(
+    input.edges.filter((edge) => edge.kind === "CONTAINS")
+      .map((edge) => [edge.dst, edge.src]),
+  );
+  const nameById = new Map(input.nodes.map((node) => [node.id, node.name]));
+  const candidateContainers = boundary.candidates.map(
+    (id) => nameById.get(parentByChild.get(id)),
+  );
+  assert.ok(candidateContainers.includes("Alpha"));
+  assert.equal(candidateContainers.includes("Unrelated"), false);
+  graph.close();
+});
+
+test("Rust wrapped trait objects retain the inner dynamic trait", async () => {
+  const file = { ...codeFile("wrapped-dispatch.rs"), format: "rust" };
+  const source = {
+    kind: "text",
+    file,
+    text: `trait Runner { fn run(&self); }
+struct Alpha;
+impl Runner for Alpha { fn run(&self) {} }
+fn invoke(value: Box<dyn Runner>) { value.run(); }
+`,
+  };
+  const input = await extractFileGraph(
+    source,
+    await new CodeExtractor().extract(source),
+  );
+  const invoke = input.nodes.find((node) => node.name === "invoke");
+  assert.ok(invoke);
+  const call = input.refs.find(
+    (ref) => ref.type === "symbol" && ref.owner === invoke.id &&
+      ref.target.member === "run",
+  );
+  assert.equal(call?.target.hints?.receiverType, "Runner");
+  assert.deepEqual(call?.target.hints?.candidateTypes, ["Runner"]);
+  assert.equal(call?.target.hints?.dispatch, "trait");
+
+  const graph = new SqliteGraphStorage("", { inMemory: true });
+  graph.upsertFileGraph(file.id, input.nodes, input.edges, input.refs);
+  await graph.resolvePending();
+  const boundary = graph.dynamicBoundaries([invoke.id], 10)[0];
+  assert.ok(boundary);
+  assert.ok(boundary.candidates.length > 0);
+  graph.close();
+});
+
 test("Java interface receiver keeps virtual implementations as candidates", async () => {
   const file = { ...codeFile("Dispatch.java"), format: "java" };
   const source = {

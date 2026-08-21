@@ -29,6 +29,8 @@ export type EdgeRow = {
   confidence: number;
   evidence: string | null;
 };
+
+const MAX_TRAVERSAL_EDGE_READ = 10_000;
 export type RefRow = {
   id: string;
   owner_id: string;
@@ -574,20 +576,27 @@ export class SqliteGraphReader {
       const next: string[] = [];
       const active = new Set(frontier);
       const remaining = Math.max(0, limit - ordered.length);
-      for (const edge of this.adjacentEdges(
-        frontier,
-        kinds,
-        direction,
-        remaining,
-      ))
-        for (const id of adjacentTargets(edge, active, direction)) {
-          if (seen.has(id)) continue;
-          seen.add(id);
-          ordered.push(id);
-          next.push(id);
-          if (ordered.length >= Math.max(0, limit))
-            return this.refsForIds(ordered);
-        }
+      let edgeBudget = Math.min(MAX_TRAVERSAL_EDGE_READ, Math.max(1, remaining));
+      while (next.length < remaining) {
+        const adjacent = this.adjacentEdges(
+          frontier,
+          kinds,
+          direction,
+          edgeBudget,
+        );
+        for (const edge of adjacent)
+          for (const id of adjacentTargets(edge, active, direction)) {
+            if (seen.has(id)) continue;
+            seen.add(id);
+            ordered.push(id);
+            next.push(id);
+            if (ordered.length >= Math.max(0, limit))
+              return this.refsForIds(ordered);
+          }
+        if (adjacent.length < edgeBudget || edgeBudget >= MAX_TRAVERSAL_EDGE_READ)
+          break;
+        edgeBudget = Math.min(MAX_TRAVERSAL_EDGE_READ, edgeBudget * 2);
+      }
       frontier = next;
     }
     return this.refsForIds(ordered);

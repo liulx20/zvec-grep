@@ -943,6 +943,35 @@ test("mixed directional queries reserve budget per edge kind and refill unused q
   graph.close();
 });
 
+test("traversal node limits refill edges that point to an already seen node", () => {
+  const graph = new SqliteGraphStorage("", { inMemory: true });
+  graph.upsertFileGraph(
+    "duplicate-neighbors",
+    [
+      { id: "a", kind: "function", is_exported: true, name: "a" },
+      { id: "b", kind: "function", is_exported: true, name: "b" },
+      { id: "c", kind: "function", is_exported: true, name: "c" },
+    ],
+    [
+      edge("a", "b", "CALLS", "call"),
+      edge("a", "b", "REFS", "ref"),
+      edge("a", "c", "CALLS", "call"),
+    ],
+    [],
+  );
+
+  assert.deepEqual(
+    graph.traverse("a", {
+      edgeKinds: ["CALLS", "REFS"],
+      direction: "outgoing",
+      maxDepth: 1,
+      limit: 2,
+    }).map((item) => item.id),
+    ["b", "c"],
+  );
+  graph.close();
+});
+
 test("reprojecting a local constructor keeps one instantiation fact", async () => {
   class InspectableGraph extends SqliteGraphStorage {
     instantiationRows() {

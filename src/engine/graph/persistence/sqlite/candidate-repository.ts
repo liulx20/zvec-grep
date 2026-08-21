@@ -26,6 +26,15 @@ export class SemanticCandidateRepository {
          SELECT id,kind FROM symbols
          WHERE name IN (SELECT value FROM json_each(?))
            AND file_id IN (SELECT file_id FROM visible)
+       ), required_interfaces(id) AS (
+         SELECT id FROM roots WHERE kind IN (SELECT value FROM json_each(?))
+         UNION
+         SELECT inheritance.dst_id FROM edges inheritance
+         JOIN required_interfaces required ON required.id=inheritance.src_id
+         JOIN symbols inherited ON inherited.id=inheritance.dst_id
+         WHERE inheritance.kind='INHERITS'
+           AND inheritance.rel IN (SELECT value FROM json_each(?))
+           AND inherited.kind IN (SELECT value FROM json_each(?))
        ), containers(id) AS (
          SELECT id FROM roots
          UNION
@@ -44,11 +53,11 @@ export class SemanticCandidateRepository {
            )
            AND member.file_id IN (SELECT file_id FROM visible)
            AND NOT EXISTS(
-             SELECT 1 FROM roots root
-             JOIN contains required_owned ON required_owned.parent_id=root.id
+             SELECT 1 FROM required_interfaces required_interface
+             JOIN contains required_owned
+               ON required_owned.parent_id=required_interface.id
              JOIN symbols required ON required.id=required_owned.child_id
-             WHERE root.kind IN (SELECT value FROM json_each(?))
-               AND NOT EXISTS(
+             WHERE NOT EXISTS(
                  SELECT 1 FROM contains provided_owned
                  JOIN symbols provided ON provided.id=provided_owned.child_id
                  WHERE provided_owned.parent_id=owned.parent_id
@@ -76,9 +85,11 @@ export class SemanticCandidateRepository {
       query.sourceId,
       query.sourceId,
       JSON.stringify([...new Set(query.typeNames)]),
+      JSON.stringify(policy.structuralRootKinds),
+      JSON.stringify(policy.inheritanceRelations),
+      JSON.stringify(policy.structuralRootKinds),
       JSON.stringify(policy.inheritanceRelations),
       query.memberName,
-      JSON.stringify(policy.structuralRootKinds),
       JSON.stringify(policy.structuralRootKinds),
       query.memberName,
       query.callArity ?? -1,
@@ -93,7 +104,10 @@ function candidatePolicy(language?: string): {
   structuralRootKinds: readonly string[];
 } {
   if (language === "go")
-    return { inheritanceRelations: ["implements"], structuralRootKinds: ["interface"] };
+    return {
+      inheritanceRelations: ["implements", "extends"],
+      structuralRootKinds: ["interface"],
+    };
   if (language === "rust")
     return {
       inheritanceRelations: ["trait", "implements"],

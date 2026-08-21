@@ -5,7 +5,7 @@ import type { TSNode } from "./tree-sitter/nodes.js";
 export type CallResolutionFact = {
   receiverTypes: ReadonlyMap<string, string>;
   ownerFieldTypes: ReadonlyMap<string, string>;
-  dynamicReceivers: ReadonlySet<string>;
+  dynamicReceivers: ReadonlyMap<string, readonly string[]>;
   genericBounds: ReadonlyMap<string, readonly string[]>;
   language: string;
 };
@@ -72,13 +72,14 @@ export function enrichTargetWithResolutionFact(
       : { ...target, hints: { ...target.hints, ...arityHints } };
   if (!fact) return target;
   const receiverTail = receiver.split(".").pop() ?? receiver;
-  const receiverType = isOwnerFieldReceiver(receiver)
+  const dynamicTypes = fact.dynamicReceivers.get(receiver) ??
+    fact.dynamicReceivers.get(receiverTail);
+  const receiverType = dynamicTypes?.[0] ?? (isOwnerFieldReceiver(receiver)
     ? fact.ownerFieldTypes.get(receiverTail)
-    : fact.receiverTypes.get(receiver) ?? fact.receiverTypes.get(receiverTail);
+    : fact.receiverTypes.get(receiver) ?? fact.receiverTypes.get(receiverTail));
   if (!receiverType) return target;
   const bounds = fact.genericBounds.get(receiverType);
-  const dynamicDispatch = fact.dynamicReceivers.has(receiver) ||
-    fact.dynamicReceivers.has(receiverTail);
+  const dynamicDispatch = Boolean(dynamicTypes?.length);
   return {
     ...target,
     hints: {
@@ -86,7 +87,9 @@ export function enrichTargetWithResolutionFact(
       receiverType,
       ...arityHints,
       ...(bounds ? { genericBounds: [...bounds] } : {}),
-      candidateTypes: bounds ? [receiverType, ...bounds] : [receiverType],
+      candidateTypes: dynamicTypes?.length
+        ? [...dynamicTypes]
+        : bounds ? [receiverType, ...bounds] : [receiverType],
       ...(bounds && bounds.length > 0
         ? { dispatch: dispatchForLanguage(fact.language) }
         : dynamicDispatch
@@ -139,22 +142,29 @@ function initialBindings(node: TSNode, adapter: LanguageAdapter): Map<string, st
 function collectDynamicReceivers(
   node: TSNode,
   adapter: LanguageAdapter,
-): Set<string> {
-  const receivers = new Set<string>();
+): Map<string, readonly string[]> {
+  const receivers = new Map<string, readonly string[]>();
   if (adapter.format !== "rust") return receivers;
   const parameters = node.childForFieldName("parameters") ??
     node.namedChildren.find((child) => /parameters/.test(child.type));
   const collect = (current: TSNode): void => {
     if (PARAMETER_TYPES.has(current.type)) {
       const binding = parameterBinding(current, adapter.format);
-      if (binding && /:\s*&?\s*(?:mut\s+)?dyn\b/.test(current.text))
-        receivers.add(binding.name);
+      const traits = extractDynTraits(current.text);
+      if (binding && traits.length > 0) receivers.set(binding.name, traits);
       return;
     }
     for (const child of current.namedChildren ?? []) collect(child);
   };
   if (parameters) collect(parameters);
   return receivers;
+}
+
+function extractDynTraits(typeText: string): string[] {
+  const traits: string[] = [];
+  for (const match of typeText.matchAll(/\bdyn\s+([A-Za-z_]\w*(?:::\w+)*)/g))
+    traits.push(match[1]!.split("::").pop()!);
+  return [...new Set(traits)];
 }
 
 function collectSignatureParameters(
