@@ -196,6 +196,7 @@ erDiagram
   `extends`、`type`、`member`。
 - `edges` 以源码 occurrence 为主；文件内直接解析阶段可以用 `count` 保存已分组的相同关系次数。
   `first_line` 保存首次出现行号，`ref_name` 保存提取时名称。
+- `stats` 中的关系数量按 `SUM(count)` 统计，表示源码 occurrence 数，而不是物理 edge 行数。
 - `edges.provenance` 区分 `static` 和 `heuristic`；`confidence` 保存关系置信度，`evidence`
   保存启发式规则，例如 `unique_member_in_visible_files`。静态边的默认置信度为 1。
 - `unresolved_refs` 与 `edges` 都保留 receiver、member 和 resolution hints；成功解析不会丢失重新投影所需的信息。

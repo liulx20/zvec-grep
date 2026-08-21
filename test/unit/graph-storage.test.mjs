@@ -651,6 +651,81 @@ test("raw incoming/outgoing edge queries are batch-capable and drive traversal",
   graph.close();
 });
 
+test("occurrence edges are grouped before traversal limits are applied", async () => {
+  const graph = new SqliteGraphStorage("", { inMemory: true });
+  graph.upsertFileGraph(
+    "source",
+    [{ id: "caller", kind: "function", is_exported: true, name: "caller" }],
+    [],
+    [
+      rawRef({ owner: "caller", refName: "targetB", line: 1, occurrence: 0 }),
+      rawRef({ owner: "caller", refName: "targetB", line: 2, occurrence: 1 }),
+      rawRef({ owner: "caller", refName: "targetB", line: 3, occurrence: 2 }),
+      rawRef({ owner: "caller", refName: "targetC", line: 4, occurrence: 3 }),
+    ],
+  );
+  graph.upsertFileGraph(
+    "targets",
+    [
+      { id: "b", kind: "function", is_exported: true, name: "targetB" },
+      { id: "c", kind: "function", is_exported: true, name: "targetC" },
+    ],
+    [],
+    [],
+  );
+  await graph.resolvePending();
+
+  assert.deepEqual(
+    graph.outgoingEdges(["caller"], ["CALLS"], 2).map((edge) => [
+      edge.dst,
+      edge.count,
+    ]),
+    [["b", 3], ["c", 1]],
+  );
+  assert.deepEqual(
+    graph.context("caller").outgoing.map((edge) => edge.id),
+    ["b", "c"],
+  );
+  assert.equal(graph.stats().callsCount, 4);
+  graph.close();
+});
+
+test("reprojecting a local constructor keeps one instantiation fact", async () => {
+  class InspectableGraph extends SqliteGraphStorage {
+    instantiationRows() {
+      return this.database.db
+        .prepare("SELECT COUNT(*) AS count FROM edges WHERE kind='INSTANTIATES'")
+        .get().count;
+    }
+  }
+  const graph = new InspectableGraph("", { inMemory: true });
+  graph.upsertFileGraph(
+    "source",
+    [
+      { id: "make", kind: "function", is_exported: true, name: "make" },
+      { id: "local-widget", kind: "class", is_exported: true, name: "Widget" },
+    ],
+    [
+      edge("make", "local-widget", "CALLS", "new"),
+      edge("make", "local-widget", "INSTANTIATES", "instantiates"),
+    ],
+    [],
+  );
+  graph.upsertFileGraph(
+    "other",
+    [{ id: "other-widget", kind: "class", is_exported: true, name: "Widget" }],
+    [],
+    [],
+  );
+  await graph.resolvePending();
+
+  assert.equal(graph.instantiationRows(), 1);
+  assert.deepEqual(graph.callees("make", 1, 10).map((item) => item.id), [
+    "local-widget",
+  ]);
+  graph.close();
+});
+
 test("openGraphStorage respects the off backend", async () => {
   const { openGraphStorage } = await import("../../dist/engine/graph/index.js");
   const off = openGraphStorage("/tmp/unused-graph-off", { backend: "off" });
@@ -692,7 +767,7 @@ test("SQLite is the default persistent backend and reopens read-only", async (t)
 
   const reopened = openGraphStorage(dir, { readOnly: true });
   assert.equal(reopened.constructor.name, "SqliteGraphStorage");
-  assert.equal(reopened.stats().callsCount, 1);
+  assert.equal(reopened.stats().callsCount, 2);
   assert.deepEqual(reopened.callees("a", 1, 10), [
     { id: "b", kind: "function", count: 2 },
   ]);
