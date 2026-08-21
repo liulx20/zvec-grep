@@ -195,6 +195,32 @@ test("external refs are dropped without creating edges", async () => {
   graph.close();
 });
 
+test("resolved references retain durable source facts", async () => {
+  class InspectableGraph extends SqliteGraphStorage {
+    sourceRefCount() {
+      return this.database.db
+        .prepare("SELECT COUNT(*) AS count FROM source_refs")
+        .get().count;
+    }
+  }
+  const graph = new InspectableGraph("", { inMemory: true });
+  graph.upsertFileGraph(
+    "source-facts",
+    [
+      { id: "caller", kind: "function", is_exported: false, name: "caller" },
+      { id: "target", kind: "function", is_exported: false, name: "target" },
+    ],
+    [],
+    [rawRef({ owner: "caller", refName: "target", line: 1 })],
+  );
+  await graph.resolvePending();
+
+  assert.equal(graph.stats().callsCount, 1);
+  assert.equal(graph.stats().refCount, 0);
+  assert.equal(graph.sourceRefCount(), 1);
+  graph.close();
+});
+
 test("failed refs retry in deterministic per-name batches", async () => {
   const graph = new SqliteGraphStorage("", { inMemory: true });
   const nodes = Array.from({ length: 501 }, (_, index) => ({
@@ -232,6 +258,59 @@ test("failed refs retry in deterministic per-name batches", async () => {
   await graph.resolvePending();
   assert.equal(graph.stats().callsCount, 501);
   assert.equal(graph.stats().refCount, 0);
+  graph.close();
+});
+
+test("inheritance batches are fully drained before receiver calls", async () => {
+  const graph = new SqliteGraphStorage("", { inMemory: true });
+  const children = Array.from({ length: 501 }, (_, index) => ({
+    id: `child-${String(index).padStart(3, "0")}`,
+    kind: "class",
+    is_exported: false,
+    name: `Child${index}`,
+  }));
+  const run = { id: "child-run", kind: "method", is_exported: false, name: "run" };
+  graph.upsertFileGraph(
+    "children",
+    [...children, run],
+    [edge(children[500].id, run.id, "CONTAINS", "contains")],
+    [
+      ...children.map((child, occurrence) =>
+        rawRef({
+          owner: child.id,
+          refName: "Base",
+          refKind: "extends",
+          line: 1,
+          occurrence,
+          sourceLanguage: "typescript",
+        }),
+      ),
+      rawRef({
+        owner: run.id,
+        refName: "this.helper",
+        line: 2,
+        sourceLanguage: "typescript",
+      }),
+    ],
+  );
+  await graph.resolvePending();
+
+  graph.upsertFileGraph(
+    "base-file",
+    [
+      { id: "base", kind: "class", is_exported: true, name: "Base" },
+      { id: "base-helper", kind: "method", is_exported: false, name: "helper" },
+    ],
+    [edge("base", "base-helper", "CONTAINS", "contains")],
+    [],
+  );
+  await graph.resolvePending();
+
+  assert.equal(graph.stats().inheritsCount, 501);
+  assert.deepEqual(
+    graph.callees(run.id, 1, 10).map((candidate) => candidate.id),
+    ["base-helper"],
+  );
   graph.close();
 });
 

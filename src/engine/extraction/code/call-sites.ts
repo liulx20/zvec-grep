@@ -26,7 +26,7 @@ export function collectCallSites(
 ): CallSite[] {
   const sites: CallSite[] = [];
   const entityTypes = adapter?.entityTypes;
-  const resolutionContext = collectResolutionContext(node, adapter?.format);
+  const resolutionContext = collectResolutionContext(node, adapter);
 
   const visit = (current: TSNode | null, skipSelfEntity: boolean): void => {
     if (!current) {
@@ -96,7 +96,10 @@ function enrichReferenceTarget(
       candidateTypes: bounds ? [receiverType, ...bounds] : [receiverType],
       ...(bounds && bounds.length > 0
         ? { dispatch: dispatchForLanguage(context.language) }
-        : context.language === "java" || context.language === "cpp"
+        : context.language === "java" ||
+            context.language === "cpp" ||
+            context.language === "typescript" ||
+            context.language === "tsx"
           ? { dispatch: "virtual" as const }
         : {}),
     },
@@ -121,8 +124,10 @@ function dispatchForLanguage(
 
 function collectResolutionContext(
   node: TSNode,
-  language?: string,
+  adapter?: LanguageAdapter | null,
 ): ResolutionContext {
+  const language = adapter?.format;
+  const entityTypes = adapter?.entityTypes;
   const receiverTypes = new Map<string, string>();
   const genericBounds = collectGenericBounds(node, language);
   const parameterTypes = new Set([
@@ -130,6 +135,8 @@ function collectResolutionContext(
     "formal_parameter",
     "receiver_parameter",
     "parameter",
+    "required_parameter",
+    "optional_parameter",
     "variadic_parameter_declaration",
   ]);
   const declarationTypes = new Set([
@@ -144,6 +151,13 @@ function collectResolutionContext(
     "short_var_declaration",
   ]);
   const visit = (current: TSNode): void => {
+    if (
+      !sameSyntaxNode(current, node) &&
+      entityTypes?.has(current.type) &&
+      adapter?.shouldIndexEntity?.(current) !== false
+    ) {
+      return;
+    }
     if (parameterTypes.has(current.type)) {
       const binding = parameterBinding(current, language);
       if (binding) receiverTypes.set(binding.name, binding.type);
@@ -166,7 +180,10 @@ function collectResolutionContext(
   for (let depth = 0; parent && depth < 3; depth++, parent = parent.parent) {
     if (/class|struct|impl/.test(parent.type)) {
       const visitFields = (current: TSNode): void => {
-        if (current !== node && /method|function|constructor/.test(current.type))
+        if (
+          !sameSyntaxNode(current, node) &&
+          /method|function|constructor/.test(current.type)
+        )
           return;
         if (declarationTypes.has(current.type)) {
           for (const binding of declarationBindings(current, language))
@@ -179,6 +196,14 @@ function collectResolutionContext(
     }
   }
   return { receiverTypes, genericBounds, language };
+}
+
+function sameSyntaxNode(left: TSNode, right: TSNode): boolean {
+  return (
+    left.type === right.type &&
+    left.startIndex === right.startIndex &&
+    left.endIndex === right.endIndex
+  );
 }
 
 function declarationBindings(
@@ -214,7 +239,9 @@ function parameterBinding(
   node: TSNode,
   language?: string,
 ): { name: string; type: string } | undefined {
-  const name = node.childForFieldName("name")?.text;
+  const name =
+    node.childForFieldName("name")?.text ??
+    node.childForFieldName("pattern")?.text;
   const type = node.childForFieldName("type")?.text;
   if (name && type) return { name, type: normalizeType(type) };
   const text = node.text.trim().replace(/^\(|\)$/g, "");

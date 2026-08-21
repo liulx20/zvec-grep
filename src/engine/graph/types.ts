@@ -151,7 +151,7 @@ export type PendingRef = {
   ref_name: string;
   ref_kind: string;
   line: number;
-  status: "pending" | "failed";
+  status: "pending" | "failed" | "external";
   source_language?: string;
   target?: ReferenceTarget;
 };

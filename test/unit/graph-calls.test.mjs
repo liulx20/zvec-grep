@@ -827,3 +827,85 @@ class Use { void invoke(Target value) { value.run(1); } }
   );
   graph.close();
 });
+
+test("resolved dispatch facts are recomputed when a later override is indexed", async () => {
+  const workerFile = { ...codeFile("worker.ts"), id: "worker-file" };
+  const callerFile = { ...codeFile("caller.ts"), id: "caller-file" };
+  const specialFile = { ...codeFile("special.ts"), id: "special-file" };
+  const prepare = async (file, text) => {
+    const source = { kind: "text", file, text };
+    return extractFileGraph(source, await new CodeExtractor().extract(source));
+  };
+  const worker = await prepare(
+    workerFile,
+    "export class Worker { help() {} }",
+  );
+  const caller = await prepare(
+    callerFile,
+    'import { Worker } from "./worker"; export function invoke(value: Worker) { value.help(); }',
+  );
+  const invoke = caller.nodes.find((node) => node.name === "invoke");
+  const workerHelp = worker.nodes.find((node) => node.name === "help");
+  assert.ok(invoke && workerHelp);
+
+  const graph = new SqliteGraphStorage("", { inMemory: true });
+  graph.upsertFileGraph(workerFile.id, worker.nodes, worker.edges, worker.refs);
+  graph.upsertFileGraph(callerFile.id, caller.nodes, caller.edges, caller.refs);
+  await graph.resolvePending({ files: [workerFile, callerFile] });
+  assert.deepEqual(
+    graph.callees(invoke.id, 1, 10).map((candidate) => candidate.id),
+    [workerHelp.id],
+  );
+
+  const special = await prepare(
+    specialFile,
+    'import { Worker } from "./worker"; export class Special extends Worker { help() {} }',
+  );
+  graph.upsertFileGraph(specialFile.id, special.nodes, special.edges, special.refs);
+  await graph.resolvePending({ files: [workerFile, callerFile, specialFile] });
+
+  const boundary = graph.dynamicBoundaries([invoke.id], 10)[0];
+  assert.ok(boundary);
+  assert.equal(boundary.reason, "polymorphic_dispatch");
+  assert.equal(boundary.candidates.length, 2);
+  assert.equal(graph.callees(invoke.id, 1, 10).length, 0);
+  graph.close();
+});
+
+test("target file rebuild preserves structured dispatch facts", async () => {
+  const workerFile = { ...codeFile("worker.ts"), id: "worker-file" };
+  const otherFile = { ...codeFile("other.ts"), id: "other-file" };
+  const callerFile = { ...codeFile("caller.ts"), id: "caller-file" };
+  const prepare = async (file, text) => {
+    const source = { kind: "text", file, text };
+    return extractFileGraph(source, await new CodeExtractor().extract(source));
+  };
+  const worker = await prepare(workerFile, "export class Worker { help() {} }");
+  const other = await prepare(otherFile, "export class Other { help() {} }");
+  const caller = await prepare(
+    callerFile,
+    'import { Worker } from "./worker"; export function invoke(value: Worker) { value.help(); }',
+  );
+  const invoke = caller.nodes.find((node) => node.name === "invoke");
+  const workerHelp = worker.nodes.find((node) => node.name === "help");
+  assert.ok(invoke && workerHelp);
+
+  const graph = new SqliteGraphStorage("", { inMemory: true });
+  graph.upsertFileGraph(workerFile.id, worker.nodes, worker.edges, worker.refs);
+  graph.upsertFileGraph(otherFile.id, other.nodes, other.edges, other.refs);
+  graph.upsertFileGraph(callerFile.id, caller.nodes, caller.edges, caller.refs);
+  await graph.resolvePending({ files: [workerFile, otherFile, callerFile] });
+
+  graph.upsertFileGraph(workerFile.id, worker.nodes, worker.edges, worker.refs);
+  await graph.resolvePending({ files: [workerFile, otherFile, callerFile] });
+
+  assert.deepEqual(
+    graph.callees(invoke.id, 1, 10).map((candidate) => candidate.id),
+    [workerHelp.id],
+  );
+  const edge = graph.edges([invoke.id, workerHelp.id], ["CALLS"], 10).edges[0];
+  assert.equal(edge?.provenance, "heuristic");
+  assert.equal(edge?.confidence, 0.75);
+  assert.equal(edge?.evidence, "receiver_type_member");
+  graph.close();
+});

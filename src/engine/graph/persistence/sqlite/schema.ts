@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS pending_refs (
  source_language TEXT,
  receiver_kind TEXT, receiver_name TEXT, member_name TEXT, resolution_hints TEXT,
  last_attempt INTEGER NOT NULL DEFAULT 0,
- status TEXT NOT NULL CHECK (status IN ('pending','failed'))
+ status TEXT NOT NULL CHECK (status IN ('pending','failed','external'))
 ) STRICT;
 CREATE TABLE IF NOT EXISTS contains (
  parent_id TEXT NOT NULL REFERENCES symbols(id) ON DELETE CASCADE,
@@ -59,6 +59,20 @@ CREATE TABLE IF NOT EXISTS dynamic_calls (
  source_language TEXT, receiver_kind TEXT, receiver_name TEXT,
  resolution_hints TEXT, reason TEXT NOT NULL
 ) STRICT;
+CREATE TABLE IF NOT EXISTS source_refs (
+ id TEXT PRIMARY KEY,
+ owner_id TEXT NOT NULL, owner_is_file INTEGER NOT NULL CHECK(owner_is_file IN (0,1)),
+ ref_name TEXT NOT NULL, ref_kind TEXT NOT NULL, member_name TEXT,
+ line INTEGER NOT NULL, source_language TEXT,
+ imported_name TEXT, local_name TEXT,
+ receiver_kind TEXT, receiver_name TEXT, resolution_hints TEXT
+) STRICT;
+CREATE TABLE IF NOT EXISTS resolved_source_refs (
+ ref_id TEXT PRIMARY KEY REFERENCES source_refs(id) ON DELETE CASCADE,
+ src_id TEXT NOT NULL REFERENCES symbols(id) ON DELETE CASCADE,
+ dst_id TEXT NOT NULL REFERENCES symbols(id) ON DELETE CASCADE,
+ kind TEXT NOT NULL, rel TEXT NOT NULL
+) STRICT;
 CREATE TABLE IF NOT EXISTS dispatch_candidates (
  call_id TEXT NOT NULL REFERENCES dynamic_calls(id) ON DELETE CASCADE,
  target_id TEXT NOT NULL REFERENCES symbols(id) ON DELETE CASCADE,
@@ -77,4 +91,5 @@ CREATE INDEX IF NOT EXISTS pending_refs_owner_idx ON pending_refs(owner_id);
 CREATE INDEX IF NOT EXISTS pending_refs_retry_idx ON pending_refs(ref_name,status,last_attempt,id);
 CREATE INDEX IF NOT EXISTS instantiates_type_idx ON instantiates(type_id);
 CREATE INDEX IF NOT EXISTS dynamic_calls_owner_idx ON dynamic_calls(owner_id);
+CREATE INDEX IF NOT EXISTS source_refs_owner_idx ON source_refs(owner_id,owner_is_file);
 `;

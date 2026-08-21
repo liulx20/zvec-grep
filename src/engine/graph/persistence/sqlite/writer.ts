@@ -118,6 +118,31 @@ export class SqliteGraphWriter {
   }
 
   protected insertRef(ref: RawRef, fallbackOwner: string): void {
+    this.db.prepare(
+      `INSERT OR REPLACE INTO source_refs(
+         id,owner_id,owner_is_file,ref_name,ref_kind,member_name,line,
+         source_language,imported_name,local_name,receiver_kind,receiver_name,
+         resolution_hints
+       ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    ).run(
+      ref.id,
+      ref.owner || fallbackOwner,
+      ref.type === "symbol" ? 0 : 1,
+      ref.ref_name,
+      ref.ref_kind,
+      ref.type === "symbol" ? ref.target.member : null,
+      ref.line,
+      ref.type === "symbol" || ref.type === "import_binding"
+        ? (ref.source_language ?? null)
+        : null,
+      ref.type === "import_binding" ? ref.imported_name : null,
+      ref.type === "import_binding" ? ref.local_name : null,
+      ref.type === "symbol" ? (ref.target.receiver?.kind ?? null) : null,
+      ref.type === "symbol" ? (ref.target.receiver?.name ?? null) : null,
+      ref.type === "symbol" && ref.target.hints
+        ? JSON.stringify(ref.target.hints)
+        : null,
+    );
     this.db
       .prepare(
         "INSERT OR REPLACE INTO pending_refs(id,owner_id,owner_is_file,ref_name,ref_kind,line,imported_name,local_name,source_language,receiver_kind,receiver_name,member_name,resolution_hints,status,last_attempt) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',0)",
@@ -195,7 +220,18 @@ export class SqliteGraphWriter {
 
   private incomingSnapshots(fileId: string): EdgeRow[] {
     return this.all<EdgeRow>(
-      "SELECT e.* FROM symbol_edges e JOIN symbols d ON d.id=e.dst_id JOIN symbols s ON s.id=e.src_id WHERE d.file_id=? AND s.file_id<>?",
+      `SELECT e.src_id,e.dst_id,e.kind,e.rel,
+              e.count-(SELECT COUNT(*) FROM resolved_source_refs r
+                       WHERE r.src_id=e.src_id AND r.dst_id=e.dst_id
+                         AND r.kind=e.kind AND r.rel=e.rel) AS count,
+              e.first_line,e.ref_name,e.provenance,e.confidence,e.evidence
+       FROM symbol_edges e
+       JOIN symbols d ON d.id=e.dst_id
+       JOIN symbols s ON s.id=e.src_id
+       WHERE d.file_id=? AND s.file_id<>?
+         AND e.count>(SELECT COUNT(*) FROM resolved_source_refs r
+                     WHERE r.src_id=e.src_id AND r.dst_id=e.dst_id
+                       AND r.kind=e.kind AND r.rel=e.rel)`,
       fileId,
       fileId,
     );
@@ -262,6 +298,14 @@ export class SqliteGraphWriter {
           "DELETE FROM pending_refs WHERE owner_id IN(SELECT value FROM json_each(?))",
         )
         .run(JSON.stringify(ids));
+      this.db
+        .prepare(
+          "DELETE FROM source_refs WHERE owner_is_file=0 AND owner_id IN(SELECT value FROM json_each(?))",
+        )
+        .run(JSON.stringify(ids));
     }
+    this.db
+      .prepare("DELETE FROM source_refs WHERE owner_is_file=1 AND owner_id=?")
+      .run(fileId);
   }
 }

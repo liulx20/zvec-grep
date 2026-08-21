@@ -108,6 +108,9 @@ erDiagram
   SYMBOL ||--o{ SYMBOL : INSTANTIATES
   SYMBOL ||--o{ DYNAMIC_CALL : OWNS
   DYNAMIC_CALL ||--o{ DISPATCH_CANDIDATE : HAS
+  SYMBOL ||--o{ SOURCE_REF : OWNS_SYMBOL_REF
+  FILE ||--o{ SOURCE_REF : OWNS_FILE_REF
+  SOURCE_REF ||--o| RESOLVED_SOURCE_REF : MATERIALIZES
   FILE ||--o{ PENDING_REF : OWNS_IMPORT_REF
   SYMBOL ||--o{ PENDING_REF : OWNS_SYMBOL_REF
 
@@ -156,9 +159,24 @@ erDiagram
     text reason
     real confidence
   }
+  SOURCE_REF {
+    text id PK
+    text owner_id
+    boolean owner_is_file
+    text ref_kind
+    text member_name
+    text resolution_hints
+  }
+  RESOLVED_SOURCE_REF {
+    text ref_id PK
+    text src_id FK
+    text dst_id FK
+    text kind
+    text rel
+  }
 ```
 
-`pending_refs` 保存“已经发现、但暂时还不知道目标是谁”的引用。其中：
+`source_refs` 保存从 AST 提取出的引用事实，`pending_refs` 保存这些事实当前的解析队列状态。其中：
 
 - `owner_id` 表示这条引用由谁产生，也就是未来关系边的起点。
 - `owner_is_file = false` 时，`owner_id` 是 `symbols.id`。例如 `login()` 中调用了尚未解析的
@@ -183,6 +201,8 @@ erDiagram
 | `file_imports` | `(src_file_id, dst_file_id, spec)` | 文件导入关系 |
 | `file_import_bindings` | `(src_file_id, local_name, dst_file_id, imported_name)` | import 名称、alias 与目标文件的绑定 |
 | `instantiates` | `(src_id, type_id)` | callable 对具体类型的实例化事实，用于轻量 RTA |
+| `source_refs` | `id` | AST 提取的 durable 引用事实，不因一次解析成功而删除 |
+| `resolved_source_refs` | `ref_id` | 需要重算的源事实当前物化出的唯一边，用于精确撤销旧投影 |
 | `dynamic_calls` | `id` | 已确认是多态分派、但没有唯一静态目标的调用点 |
 | `dispatch_candidates` | `(call_id, target_id)` | 动态调用的候选目标、依据和置信度 |
 
@@ -198,8 +218,14 @@ erDiagram
   `resolution_hints` 以 JSON 保存语言分析器提供的 receiver type、泛型约束、候选类型和分派方式。
   `last_attempt` 用于控制失败引用的公平分批重试。
 - `symbols.signature`、`arity` 和 `return_type` 保存用于重载过滤与类型传播的签名事实。
-- 多态调用不再长期留在 `pending_refs`。候选数大于 1 时转入 `dynamic_calls` 和
-  `dispatch_candidates`；每次 finalize 会重新入队计算，以吸收增量索引新增或删除的实现。
+- `source_refs` 保存 symbol、inheritance、import 和 import binding 的 AST 源事实；`pending_refs` 只承担
+  pending / failed / external 解析状态与重试队列职责。qualified receiver 候选唯一时，物化边同时登记到
+  `resolved_source_refs`；候选数大于 1 时，
+  结果写入 `dynamic_calls` 和 `dispatch_candidates`。每次 finalize 先撤销上一次物化结果，再从
+  `source_refs` 重新投影动态引用，因此后续新增或删除 subclass/implementation 不会留下过期 heuristic 边。
+- 目标文件重建时，incoming edge 快照会扣除由 `resolved_source_refs` 标记的动态物化部分；这些
+  调用随后直接从 `source_refs` 重算，不会通过 `ref_name` 反解析而丢失语言、receiver type、
+  candidate types 或 dispatch hints。静态边与同一端点上的非动态聚合计数仍按原流程恢复。
 - schema 使用 `STRICT`、外键、组合主键和按 src/dst/name 建立的查询索引。
 - 当前 schema 版本为 2。main 的 v1 可以在可写 index 流程中通过新增表、`ensureOptionalColumns()`
   补列并升级到 v2；read-only 模式不会修改数据库，遇到 v1 会明确拒绝打开并要求先执行升级/重建。
@@ -235,7 +261,9 @@ erDiagram
    import 也先作为文件级 pending Ref 保存，等待完整文件列表可用后解析路径。
 
 4. **写入并统一解析。** `upsertFileGraph()` 在 SQLite 事务中写入当前文件的 Symbol、直接边和
-   pending Ref。所有文件处理完成后执行 `resolvePending()`：成功的引用转换成
+   pending Ref。所有文件处理完成后执行 `resolvePending()`。解析器按依赖顺序完整 drain 三个阶段：
+   先解析 import，再分批建立完整的 `INHERITS` 关系，最后解析普通 `CALLS` / `REFS`；继承阶段
+   完成后才创建 hierarchy cache，避免调用解析读到或缓存不完整的继承图。成功的引用转换成
    `CALLS`、`REFS`、`INHERITS` 或 `IMPORTS`，重复引用聚合到边的 `count`；无法唯一解析的引用
    保留为 `failed`，等待后续索引重新尝试。
 
@@ -576,6 +604,15 @@ Go 支持方法 receiver、参数类型和类型参数 constraint；Rust 支持�
 候选选择同时使用方法 `arity` 过滤重载。字段、局部变量显式类型以及简单的 `new Type()` 赋值会补充
 receiver type；`INSTANTIATES` 记录实际构造过的类型。当 CHA 得到多个实现且其中只有部分类型被实例化时，
 RTA 优先保留这些实际类型；仓库没有实例化证据时仍保留完整 CHA 候选，避免把未覆盖测试路径误删。
+
+resolver projection 与 reader 的 dynamic-boundary 查询共用 `SemanticCandidateRepository`，不再维护两份
+递归候选 SQL。repository 统一处理可见文件、arity、RTA、排序和预算；Java、Go、Rust 策略分别决定
+`extends/implements/trait` 范围与 interface/trait method-set 的结构化候选规则。
+
+类型事实收集会在进入嵌套 method/function/constructor entity 前停止，节点边界按 type 和 source range
+判断，不依赖 Tree-sitter wrapper 对象身份，因此匿名内部类或嵌套函数的参数不会污染外层 receiver map。
+成员语法统一识别 `.`, `->` 和 `::`；例如 C++ / Rust 的 `Base::helper()` 会保留原始文本，同时形成
+`receiver=Base`、`member=helper` 的结构化 target。
 
 默认输出预算为最多 8 个 seeds、深度 3、200 个子图节点、8 个文件和 24,000 字符。
 `maxChars` 是最终源码文本的硬上限，首个符号超过预算时也会截断；roots 和调用路径节点在子图裁剪时

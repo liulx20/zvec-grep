@@ -1,6 +1,7 @@
 import type { DatabaseSync as NodeDatabaseSync } from "node:sqlite";
 import type { ReferenceResolutionHints } from "../../../reference-target.js";
 import { SqliteGraphDatabase } from "./database.js";
+import { SemanticCandidateRepository } from "./candidate-repository.js";
 import type {
   ContainerNeighbor,
   FileNeighbor,
@@ -35,7 +36,7 @@ export type RefRow = {
   ref_name: string;
   ref_kind: string;
   line: number;
-  status: "pending" | "failed";
+  status: "pending" | "failed" | "external";
   imported_name: string | null;
   local_name: string | null;
   source_language: string | null;
@@ -65,6 +66,7 @@ const ALL_EDGE_KINDS: readonly GraphEdgeKind[] = [
 
 /** Indexed SQLite graph reader without a full-memory mirror. */
 export class SqliteGraphReader {
+  private readonly candidates: SemanticCandidateRepository;
   readonly available = true;
   protected readonly db: NodeDatabaseSync;
   protected readonly readOnly: boolean;
@@ -80,6 +82,7 @@ export class SqliteGraphReader {
         : new SqliteGraphDatabase(directory, options);
     this.db = this.database.db;
     this.readOnly = this.database.readOnly;
+    this.candidates = new SemanticCandidateRepository(this.database);
   }
   close(): void {
     this.database.close();
@@ -155,12 +158,13 @@ export class SqliteGraphReader {
         ...resolutionHintsField(row.resolution_hints),
       } as DynamicBoundary["target"];
       const candidates = hints?.receiverType
-        ? this.semanticBoundaryCandidates(
-            hints.candidateTypes ?? [hints.receiverType],
-            target.member,
-            row.owner_id,
-            hints.callArity,
-          )
+        ? this.candidates.find({
+            sourceId: row.owner_id,
+            sourceLanguage: row.source_language ?? undefined,
+            typeNames: hints.candidateTypes ?? [hints.receiverType],
+            memberName: target.member,
+            callArity: hints.callArity,
+          })
         : [];
       return {
         sourceId: row.owner_id,
@@ -181,56 +185,6 @@ export class SqliteGraphReader {
       };
     });
     return [...persisted, ...unresolved];
-  }
-
-  private semanticBoundaryCandidates(
-    typeNames: readonly string[],
-    memberName: string,
-    sourceId: string,
-    callArity?: number,
-  ): string[] {
-    return this.all<{ id: string }>(
-      `WITH RECURSIVE visible(file_id) AS (
-         SELECT file_id FROM symbols WHERE id=?
-         UNION SELECT imports.dst_file_id FROM file_imports imports
-         JOIN symbols source ON source.file_id=imports.src_file_id WHERE source.id=?
-       ), roots(id,kind) AS (
-         SELECT id,kind FROM symbols
-         WHERE name IN (SELECT value FROM json_each(?))
-           AND file_id IN (SELECT file_id FROM visible)
-       ), containers(id) AS (
-         SELECT id FROM roots
-         UNION
-         SELECT e.src_id FROM symbol_edges e JOIN containers c ON c.id=e.dst_id
-         WHERE e.kind='INHERITS' AND e.rel IN ('extends','implements','trait')
-       ), candidate_containers(id) AS (
-         SELECT id FROM containers
-         UNION
-         SELECT DISTINCT owned.parent_id
-         FROM contains owned JOIN symbols member ON member.id=owned.child_id
-         WHERE member.name=? AND EXISTS(SELECT 1 FROM roots WHERE kind='interface')
-           AND member.file_id IN (SELECT file_id FROM visible)
-       ), candidate_members(id,container_id) AS (
-         SELECT DISTINCT member.id,scope.id
-       FROM candidate_containers scope
-       JOIN contains owned ON owned.parent_id=scope.id
-       JOIN symbols member ON member.id=owned.child_id
-       WHERE member.name=? AND (?<0 OR member.arity IS NULL OR member.arity=?)
-       )
-       SELECT id FROM candidate_members
-       WHERE NOT EXISTS(
-         SELECT 1 FROM candidate_members candidate
-         JOIN instantiates made ON made.type_id=candidate.container_id
-       ) OR container_id IN (SELECT type_id FROM instantiates)
-       ORDER BY id LIMIT 64`,
-      sourceId,
-      sourceId,
-      JSON.stringify([...new Set(typeNames)]),
-      memberName,
-      memberName,
-      callArity ?? -1,
-      callArity ?? -1,
-    ).map((row) => row.id);
   }
 
   symbolScope(root: string, depth: number, limit: number): string[] {
@@ -556,7 +510,9 @@ export class SqliteGraphReader {
     return {
       symCount: count("symbols"),
       fileCount: count("files"),
-      refCount: count("pending_refs"),
+      refCount: this.one<{ count: number }>(
+        "SELECT COUNT(*) AS count FROM pending_refs WHERE status<>'external'",
+      )?.count ?? 0,
       callsCount: count("symbol_edges", "WHERE kind='CALLS'"),
       refsCount: count("symbol_edges", "WHERE kind='REFS'"),
       inheritsCount: count("symbol_edges", "WHERE kind='INHERITS'"),

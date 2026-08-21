@@ -8,12 +8,18 @@ import { resolveRef } from "../../resolve.js";
 import type { PendingRef, ResolvePendingOptions } from "../../types.js";
 import { type RefRow, type SymbolRow } from "./reader.js";
 import type { SqliteGraphDatabase } from "./database.js";
+import { SemanticCandidateRepository } from "./candidate-repository.js";
 
 const PER_NAME_CEILING = 500;
+type ResolvePhase = "imports" | "inheritance" | "symbols";
 
 /** Converts pending call/ref/import sites into persisted graph edges. */
 export class SqlitePendingRefResolver {
-  constructor(private readonly database: SqliteGraphDatabase) {}
+  private readonly candidates: SemanticCandidateRepository;
+
+  constructor(private readonly database: SqliteGraphDatabase) {
+    this.candidates = new SemanticCandidateRepository(database);
+  }
 
   private get db() {
     return this.database.db;
@@ -39,7 +45,7 @@ export class SqlitePendingRefResolver {
   }
   async resolvePending(options: ResolvePendingOptions = {}): Promise<void> {
     this.assertWritable();
-    this.requeueDynamicCalls();
+    this.refreshDispatchFacts();
     const names = new NameIndex();
     names.load(
       this.all<
@@ -65,25 +71,29 @@ export class SqlitePendingRefResolver {
     );
     const paths = new FilePathIndex(options.files ?? []);
     const attempt = this.nextAttempt();
-    const rounds = this.retryRounds(attempt);
+    this.drainPhase("imports", attempt, (ref) =>
+      this.resolveImport(ref, paths, attempt),
+    );
+    this.drainPhase("inheritance", attempt, (ref) =>
+      this.resolveSymbol(ref, names, attempt, new Map()),
+    );
+    // Build/cache hierarchy lookups only after every inheritance batch has
+    // completed, so calls never observe a partial inheritance graph.
     const hierarchyCache = new Map<string, readonly string[]>();
+    this.drainPhase("symbols", attempt, (ref) =>
+      this.resolveSymbol(ref, names, attempt, hierarchyCache),
+    );
+  }
+
+  private drainPhase(
+    phase: ResolvePhase,
+    attempt: number,
+    resolve: (ref: RefRow) => void,
+  ): void {
+    const rounds = this.retryRounds(attempt, phase);
     for (let round = 0; round < rounds; round++) {
       this.transaction(() => {
-        const refs = this.retryableRefs(attempt);
-        for (const ref of refs.filter(
-          (item) => item.owner_is_file || item.ref_kind === "import",
-        )) {
-          this.resolveImport(ref, paths, attempt);
-        }
-        const symbolRefs = refs.filter(
-          (item) => !item.owner_is_file && item.ref_kind !== "import",
-        );
-        for (const ref of symbolRefs.filter(isInheritanceRef)) {
-          this.resolveSymbol(ref, names, attempt, hierarchyCache);
-        }
-        for (const ref of symbolRefs.filter((ref) => !isInheritanceRef(ref))) {
-          this.resolveSymbol(ref, names, attempt, hierarchyCache);
-        }
+        for (const ref of this.retryableRefs(attempt, phase)) resolve(ref);
       });
     }
   }
@@ -148,12 +158,14 @@ export class SqlitePendingRefResolver {
     );
     const target = pending.target!;
     const semanticCandidates = target.hints?.receiverType
-      ? this.semanticMemberCandidates(
-          target.hints.candidateTypes ?? [target.hints.receiverType],
-          target.member,
-          [owner.file_id, ...preferred],
-          target.hints.callArity,
-        )
+      ? this.candidates.find({
+          sourceId: ref.owner_id,
+          sourceLanguage: ref.source_language ?? undefined,
+          typeNames: target.hints.candidateTypes ?? [target.hints.receiverType],
+          memberName: target.member,
+          callArity: target.hints.callArity,
+          limit: 65,
+        })
       : [];
     if (semanticCandidates.length === 1) {
       this.insertSymbolEdge(
@@ -194,7 +206,12 @@ export class SqlitePendingRefResolver {
         : [],
       reference,
     );
-    if (result.status === "external") return this.deleteRef(ref.id);
+    if (result.status === "external") {
+      this.db.prepare("UPDATE pending_refs SET status='external' WHERE id=?").run(
+        ref.id,
+      );
+      return;
+    }
     if (result.status !== "resolved") {
       const heuristic = this.heuristicCandidate(
         ref,
@@ -230,56 +247,6 @@ export class SqlitePendingRefResolver {
     return candidates.length === 1 ? candidates[0]!.id : null;
   }
 
-  private semanticMemberCandidates(
-    typeNames: readonly string[],
-    memberName: string,
-    visibleFileIds: readonly string[],
-    callArity?: number,
-  ): string[] {
-    const names = JSON.stringify([...new Set(typeNames)]);
-    const files = JSON.stringify([...new Set(visibleFileIds)]);
-    return this.all<{ id: string }>(
-      `WITH RECURSIVE roots(id,kind) AS (
-         SELECT id,kind FROM symbols
-         WHERE name IN (SELECT value FROM json_each(?))
-           AND file_id IN (SELECT value FROM json_each(?))
-       ), containers(id) AS (
-         SELECT id FROM roots
-         UNION
-         SELECT e.src_id FROM symbol_edges e
-         JOIN containers c ON c.id=e.dst_id
-         WHERE e.kind='INHERITS'
-           AND e.rel IN ('extends','implements','trait')
-       ), candidate_containers(id) AS (
-         SELECT id FROM containers
-         UNION
-         SELECT DISTINCT owned.parent_id
-         FROM contains owned JOIN symbols member ON member.id=owned.child_id
-         WHERE member.name=? AND EXISTS(SELECT 1 FROM roots WHERE kind='interface')
-           AND member.file_id IN (SELECT value FROM json_each(?))
-       ), candidate_members(id,container_id) AS (
-         SELECT DISTINCT member.id,scope.id
-       FROM candidate_containers scope
-       JOIN contains owned ON owned.parent_id=scope.id
-       JOIN symbols member ON member.id=owned.child_id
-       WHERE member.name=? AND (?<0 OR member.arity IS NULL OR member.arity=?)
-       )
-       SELECT id FROM candidate_members
-       WHERE NOT EXISTS(
-         SELECT 1 FROM candidate_members candidate
-         JOIN instantiates made ON made.type_id=candidate.container_id
-       ) OR container_id IN (SELECT type_id FROM instantiates)
-       ORDER BY id LIMIT 65`,
-      names,
-      files,
-      memberName,
-      files,
-      memberName,
-      callArity ?? -1,
-      callArity ?? -1,
-    ).map((row) => row.id);
-  }
-
   private persistDynamicCall(
     ref: RefRow,
     target: NonNullable<PendingRef["target"]>,
@@ -313,17 +280,68 @@ export class SqlitePendingRefResolver {
     this.deleteRef(ref.id);
   }
 
-  private requeueDynamicCalls(): void {
+  private refreshDispatchFacts(): void {
     this.transaction(() => {
       this.db.exec(
-        `INSERT OR REPLACE INTO pending_refs(
+        `INSERT OR IGNORE INTO source_refs(
+           id,owner_id,owner_is_file,ref_name,ref_kind,member_name,line,
+           source_language,receiver_kind,receiver_name,resolution_hints
+         )
+         SELECT id,owner_id,0,ref_name,ref_kind,member_name,line,source_language,
+                receiver_kind,receiver_name,resolution_hints
+         FROM dynamic_calls;`,
+      );
+      const resolved = this.all<{
+        ref_id: string;
+        src_id: string;
+        dst_id: string;
+        kind: string;
+        rel: string;
+      }>("SELECT ref_id,src_id,dst_id,kind,rel FROM resolved_source_refs");
+      const remove = this.db.prepare(
+        `DELETE FROM symbol_edges
+         WHERE src_id=? AND dst_id=? AND kind=? AND rel=?`,
+      );
+      const decrement = this.db.prepare(
+        `UPDATE symbol_edges SET count=count-1
+         WHERE src_id=? AND dst_id=? AND kind=? AND rel=?`,
+      );
+      const count = this.db.prepare(
+        `SELECT count FROM symbol_edges
+         WHERE src_id=? AND dst_id=? AND kind=? AND rel=?`,
+      );
+      for (const item of resolved) {
+        const row = count.get(
+          item.src_id,
+          item.dst_id,
+          item.kind,
+          item.rel,
+        ) as { count: number } | undefined;
+        if (!row) continue;
+        const statement = row.count <= 1 ? remove : decrement;
+        statement.run(item.src_id, item.dst_id, item.kind, item.rel);
+        if (item.rel === "new") {
+          this.db.prepare(
+            "DELETE FROM instantiates WHERE src_id=? AND type_id=?",
+          ).run(item.src_id, item.dst_id);
+        }
+      }
+      this.db.exec(
+        `DELETE FROM resolved_source_refs;
+         DELETE FROM dynamic_calls;
+         DELETE FROM pending_refs
+         WHERE status<>'external' AND id IN (
+           SELECT id FROM source_refs WHERE receiver_kind IS NOT NULL
+         );
+         INSERT OR REPLACE INTO pending_refs(
            id,owner_id,owner_is_file,ref_name,ref_kind,line,source_language,
            receiver_kind,receiver_name,member_name,resolution_hints,status,last_attempt
          )
          SELECT id,owner_id,0,ref_name,ref_kind,line,source_language,
                 receiver_kind,receiver_name,member_name,resolution_hints,'pending',0
-         FROM dynamic_calls;
-         DELETE FROM dynamic_calls;`,
+         FROM source_refs
+         WHERE owner_is_file=0 AND receiver_kind IS NOT NULL
+           AND id NOT IN (SELECT id FROM pending_refs WHERE status='external');`,
       );
     });
   }
@@ -365,6 +383,12 @@ export class SqlitePendingRefResolver {
         metadata.confidence,
         metadata.evidence ?? null,
       );
+    this.db.prepare(
+      `INSERT OR REPLACE INTO resolved_source_refs(ref_id,src_id,dst_id,kind,rel)
+       SELECT ?,?,?,?,? WHERE EXISTS(
+         SELECT 1 FROM source_refs WHERE id=? AND receiver_kind IS NOT NULL
+       )`,
+    ).run(ref.id, ref.owner_id, dst, edgeKind, ref.ref_kind, ref.id);
   }
 
   private resolveImport(
@@ -403,20 +427,24 @@ export class SqlitePendingRefResolver {
     this.deleteRef(ref.id);
   }
 
-  private retryableRefs(attemptWatermark: number): RefRow[] {
+  private retryableRefs(
+    attemptWatermark: number,
+    phase: ResolvePhase,
+  ): RefRow[] {
+    const phaseCondition = resolvePhaseCondition(phase);
     return this.all<RefRow>(
       `SELECT id,owner_id,owner_is_file,ref_name,ref_kind,line,status,imported_name,local_name,source_language,receiver_kind,receiver_name,member_name,resolution_hints,last_attempt
        FROM (
          SELECT pending_refs.*,
                 row_number() OVER (PARTITION BY ref_name ORDER BY last_attempt,id) AS retry_rank
          FROM pending_refs
-         WHERE status='failed' AND last_attempt<?
+         WHERE status='failed' AND last_attempt<? AND ${phaseCondition}
        )
        WHERE retry_rank<=?
        UNION ALL
        SELECT id,owner_id,owner_is_file,ref_name,ref_kind,line,status,imported_name,local_name,source_language,receiver_kind,receiver_name,member_name,resolution_hints,last_attempt
        FROM pending_refs
-       WHERE status='pending' AND last_attempt<?
+       WHERE status='pending' AND last_attempt<? AND ${phaseCondition}
        ORDER BY ref_name,id`,
       attemptWatermark,
       PER_NAME_CEILING,
@@ -457,11 +485,16 @@ export class SqlitePendingRefResolver {
     return containers;
   }
 
-  private retryRounds(attemptWatermark: number): number {
+  private retryRounds(
+    attemptWatermark: number,
+    phase: ResolvePhase,
+  ): number {
+    const phaseCondition = resolvePhaseCondition(phase);
     const row = this.one<{ max_count: number }>(
       `SELECT COALESCE(MAX(ref_count),0) AS max_count FROM (
          SELECT COUNT(*) AS ref_count FROM pending_refs
-         WHERE status='failed' AND last_attempt<? GROUP BY ref_name
+         WHERE status='failed' AND last_attempt<? AND ${phaseCondition}
+         GROUP BY ref_name
        )`,
       attemptWatermark,
     );
@@ -492,16 +525,16 @@ export class SqlitePendingRefResolver {
   }
 }
 
-function refReceiver(name: string): string {
-  return name.split(/[./]/, 1)[0] ?? name;
+function resolvePhaseCondition(phase: ResolvePhase): string {
+  if (phase === "imports")
+    return "(owner_is_file=1 OR ref_kind='import')";
+  if (phase === "inheritance")
+    return "owner_is_file=0 AND ref_kind IN ('extends','implements','overrides')";
+  return "owner_is_file=0 AND ref_kind NOT IN ('import','extends','implements','overrides')";
 }
 
-function isInheritanceRef(ref: RefRow): boolean {
-  return (
-    ref.ref_kind === "extends" ||
-    ref.ref_kind === "implements" ||
-    ref.ref_kind === "overrides"
-  );
+function refReceiver(name: string): string {
+  return name.split(/[./]/, 1)[0] ?? name;
 }
 
 function refKindToEdgeKind(kind: string): "CALLS" | "REFS" | "INHERITS" {

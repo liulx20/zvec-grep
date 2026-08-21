@@ -73,6 +73,22 @@ for (const fixture of [
     "a",
     { receiverType: "A", callArity: 0, candidateTypes: ["A"] },
   ],
+  [
+    "cpp",
+    "static.cpp",
+    "struct Base { static void helper(); }; void run(){ Base::helper(); }",
+    "Base::helper",
+    "qualified",
+    "Base",
+  ],
+  [
+    "rust",
+    "static.rs",
+    "struct Base; impl Base { fn helper() {} } fn run(){ Base::helper(); }",
+    "Base::helper",
+    "qualified",
+    "Base",
+  ],
 ]) {
   test(`${fixture[0]} call target IR`, async () => {
     const calls = await collectFunctionCallSites(
@@ -90,6 +106,25 @@ for (const fixture of [
     });
   });
 }
+
+test("nested entity parameters do not overwrite outer receiver types", async () => {
+  const calls = await collectFunctionCallSites(
+    source(
+      "java",
+      "Nested.java",
+      `class Use {
+        void invoke(Runner value) {
+          Object nested = new Object() { void nested(Other value) {} };
+          value.run();
+        }
+      }`,
+    ),
+  );
+  const invoke = calls.find((owner) => owner.sites.some((site) => site.name === "value.run"));
+  const site = invoke?.sites.find((item) => item.name === "value.run");
+  assert.ok(site);
+  assert.equal(site.target.hints?.receiverType, "Runner");
+});
 
 for (const fixture of [
   {

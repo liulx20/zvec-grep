@@ -23,7 +23,7 @@ const OWNER_RECEIVERS = new Set(["this", "self", "cls"]);
 
 /** Build a structured target while the source-language syntax is available. */
 export function referenceTargetFromSyntax(raw: string): ReferenceTarget {
-  const normalized = raw.replace(/->/g, ".");
+  const normalized = raw.replace(/->|::/g, ".");
   const separator = normalized.lastIndexOf(".");
   if (separator < 0) return { raw, member: normalized };
   const receiverRaw = normalized.slice(0, separator).replace(/\(\)$/, "");
