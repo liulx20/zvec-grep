@@ -40,11 +40,14 @@ export class SqliteGraphWriter {
       edges,
       refs,
     );
+    const affectedDispatchTypes = this.inheritanceDependencyTypes(
+      changedInstantiationTypes,
+    );
     const affected = this.affectedResolvedEdgeIds(
       fileId,
       [...oldNames, ...this.changedSemanticNames(nodes, refs)],
     );
-    affected.push(...this.affectedInstantiationProjectionIds(changedInstantiationTypes));
+    affected.push(...this.affectedInstantiationProjectionIds(affectedDispatchTypes));
     this.database.transaction(() => {
       this.restoreEdgesToUnresolved(affected);
       this.deleteOwnedFacts(fileId, oldIds);
@@ -69,11 +72,14 @@ export class SqliteGraphWriter {
     const changedInstantiationTypes = this.changedInstantiationTypes(
       fileId, [], [], [],
     );
+    const affectedDispatchTypes = this.inheritanceDependencyTypes(
+      changedInstantiationTypes,
+    );
     const affected = this.affectedResolvedEdgeIds(
       fileId,
       this.symbolNamesForFile(fileId),
     );
-    affected.push(...this.affectedInstantiationProjectionIds(changedInstantiationTypes));
+    affected.push(...this.affectedInstantiationProjectionIds(affectedDispatchTypes));
     this.database.transaction(() => {
       this.restoreEdgesToUnresolved(affected);
       this.deleteOwnedFacts(fileId, oldIds);
@@ -225,6 +231,26 @@ export class SqliteGraphWriter {
        )`,
       names, names, names, names, names, names,
     ).map((row) => row.id);
+  }
+
+  /** Include every nominal base/interface whose dispatch can depend on RTA. */
+  private inheritanceDependencyTypes(typeNames: readonly string[]): string[] {
+    if (typeNames.length === 0) return [];
+    return this.all<{ name: string }>(
+      `WITH RECURSIVE hierarchy(id,name) AS (
+         SELECT id,name FROM symbols
+         WHERE name IN (SELECT value FROM json_each(?))
+         UNION
+         SELECT parent.id,parent.name
+         FROM hierarchy child
+         JOIN edges relation ON relation.src_id=child.id
+           AND relation.src_is_file=0 AND relation.dst_is_file=0
+           AND relation.kind='INHERITS'
+         JOIN symbols parent ON parent.id=relation.dst_id
+       )
+       SELECT DISTINCT name FROM hierarchy WHERE name IS NOT NULL`,
+      JSON.stringify([...new Set(typeNames)]),
+    ).map((row) => row.name);
   }
 
   /**

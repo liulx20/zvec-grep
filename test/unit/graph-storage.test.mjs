@@ -379,6 +379,57 @@ test("renaming a receiver type invalidates existing dynamic candidates", async (
   graph.close();
 });
 
+test("RTA invalidation expands concrete types to receiver interfaces", async () => {
+  const graph = new SqliteGraphStorage("", { inMemory: true });
+  graph.upsertFileGraph(
+    "types",
+    [
+      { id: "runner", kind: "interface", is_exported: true, name: "Runner" },
+      { id: "alpha", kind: "class", is_exported: true, name: "Alpha" },
+      { id: "alpha-run", kind: "method", is_exported: true, name: "run" },
+      { id: "fallback", kind: "class", is_exported: true, name: "Fallback" },
+      { id: "fallback-run", kind: "method", is_exported: true, name: "run" },
+    ],
+    [
+      edge("alpha", "alpha-run", "CONTAINS", "contains"),
+      edge("fallback", "fallback-run", "CONTAINS", "contains"),
+      edge("alpha", "runner", "INHERITS", "implements"),
+    ],
+    [],
+  );
+  graph.upsertFileGraph(
+    "caller-file",
+    [{ id: "caller", kind: "function", is_exported: true, name: "caller" }],
+    [],
+    [],
+  );
+  graph.upsertFileGraph(
+    "maker-file",
+    [{ id: "maker", kind: "function", is_exported: true, name: "maker" }],
+    [edge("maker", "alpha", "INSTANTIATES", "new")],
+    [],
+  );
+  graph.database.db.prepare(
+    `INSERT INTO edges(
+       id,src_id,dst_id,src_is_file,dst_is_file,kind,rel,count,first_line,
+       ref_name,source_language,receiver_kind,receiver_name,member_name,
+       resolution_hints,provenance,confidence,evidence
+     ) VALUES('dispatch','caller','fallback-run',0,0,'CALLS','call',1,1,
+       'value.run','java','qualified','value','run',?,'heuristic',0.75,
+       'receiver_type_member')`,
+  ).run(JSON.stringify({
+    receiverType: "Runner",
+    candidateTypes: ["Runner"],
+    dispatch: "interface",
+  }));
+
+  graph.deleteFileGraph("maker-file");
+
+  assert.equal(graph.edges(["caller", "fallback-run"], ["CALLS"], 10).edges.length, 0);
+  assert.equal(graph.stats().pendingRefCount, 1);
+  graph.close();
+});
+
 test("failed refs retry in deterministic per-name batches", async () => {
   const graph = new SqliteGraphStorage("", { inMemory: true });
   const nodes = Array.from({ length: 501 }, (_, index) => ({
