@@ -48,6 +48,7 @@ export async function extractFileGraph(
   const refs = [...base.refs];
   const seenRefIds = new Set(refs.map((r) => r.id));
   const localEdges = new Map<string, LocalEdge>();
+  const occurrences = new Map<string, number>();
 
   const importSpecs = analysis.imports.filter(
     (spec) => !isExternalImportSpec(spec.spec, source.file.format),
@@ -111,6 +112,7 @@ export async function extractFileGraph(
     nameToIds,
     fragments,
     localEdges,
+    occurrences,
     refs,
     seenRefIds,
     sourceLanguage: source.file.format,
@@ -126,6 +128,7 @@ export async function extractFileGraph(
     nameToIds,
     fragments,
     localEdges,
+    occurrences,
     refs,
     seenRefIds,
     sourceLanguage: source.file.format,
@@ -141,6 +144,7 @@ export async function extractFileGraph(
     nameToIds,
     fragments,
     localEdges,
+    occurrences,
     refs,
     seenRefIds,
     sourceLanguage: source.file.format,
@@ -162,13 +166,13 @@ function absorbRelationOwners(input: {
   nameToIds: Map<string, string[]>;
   fragments: readonly EntityFragment[];
   localEdges: Map<string, LocalEdge>;
+  occurrences: Map<string, number>;
   refs: ReturnType<typeof rawRef>[];
   seenRefIds: Set<string>;
   sourceLanguage: string;
   containerNameByChild: ReadonlyMap<string, string>;
   containerIdByChild: ReadonlyMap<string, string>;
 }): void {
-  const occurrences = new Map<string, number>();
   for (const owner of input.owners) {
     const ownerId =
       input.idByOffset.get(owner.startOffset) ??
@@ -179,7 +183,7 @@ function absorbRelationOwners(input: {
 
     for (const site of owner.sites) {
       const occurrence = nextOccurrence(
-        occurrences,
+        input.occurrences,
         `${ownerId}\0${site.name}\0${site.kind}\0${site.line}`,
       );
       const siteRef = rawRef({

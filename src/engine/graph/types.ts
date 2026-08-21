@@ -88,7 +88,11 @@ export type TraverseOpts = {
 export type GraphStats = {
   symCount: number;
   fileCount: number;
+  /** Pending and failed references retained for backward compatibility. */
   refCount: number;
+  pendingRefCount: number;
+  dynamicBoundaryCount: number;
+  externalRefCount: number;
   callsCount: number;
   refsCount: number;
   inheritsCount: number;

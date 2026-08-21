@@ -197,6 +197,8 @@ erDiagram
 - `edges` 对调用、引用和继承关系按源码 occurrence 保存；查询时再按 `src / dst / kind / rel`
   聚合 `count`。`first_line` 保存首次出现行号，`ref_name` 保存提取时名称。
 - `stats` 中的关系数量按 `SUM(count)` 统计，表示源码 occurrence 数，而不是物理 edge 行数。
+  未解析统计分别提供 `pendingRefCount`、`dynamicBoundaryCount` 和 `externalRefCount`；兼容字段
+  `refCount` 等于 pending 与 failed 的合计。
 - `edges.provenance` 区分 `static` 和 `heuristic`；`confidence` 保存关系置信度，`evidence`
   保存启发式规则，例如 `unique_member_in_visible_files`。静态边的默认置信度为 1。
 - `unresolved_refs` 与 `edges` 都保留 receiver、member 和 resolution hints；成功解析不会丢失重新投影所需的信息。

@@ -192,6 +192,7 @@ test("external refs are dropped without creating edges", async () => {
   await graph.resolvePending();
   assert.equal(graph.stats().callsCount, 0);
   assert.equal(graph.stats().refCount, 0);
+  assert.equal(graph.stats().externalRefCount, 1);
   graph.close();
 });
 
