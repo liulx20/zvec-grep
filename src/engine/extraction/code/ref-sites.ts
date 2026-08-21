@@ -1,10 +1,16 @@
 import type { LanguageAdapter } from "./adapter.js";
+import {
+  referenceTargetFromSyntax,
+  memberReferenceTarget,
+  type ReferenceTarget,
+} from "../../reference-target.js";
 import { isCallNode } from "./call-sites.js";
 import type { TSNode } from "./tree-sitter/nodes.js";
 
 export type RefSite = {
   /** Referenced name as written (may be qualified). */
   name: string;
+  target: ReferenceTarget;
   /** 1-based source line. */
   line: number;
   /** REFS rel: type | return | member | decorates */
@@ -81,7 +87,9 @@ export function collectRefSites(
   const entityTypes = adapter?.entityTypes;
   const seen = new Set<string>();
 
-  const push = (site: RefSite): void => {
+  const push = (
+    site: Omit<RefSite, "target"> & { target?: ReferenceTarget },
+  ): void => {
     if (!site.name || isNoiseName(site.name, language)) {
       return;
     }
@@ -90,7 +98,10 @@ export function collectRefSites(
       return;
     }
     seen.add(key);
-    sites.push(site);
+    sites.push({
+      ...site,
+      target: site.target ?? referenceTargetFromSyntax(site.name),
+    });
   };
 
   const visit = (current: TSNode | null, skipSelfEntity: boolean): void => {
@@ -137,10 +148,11 @@ export function collectRefSites(
         current.type === "field_access") &&
       !isCallCallee(current)
     ) {
-      const name = memberPropertyName(current);
-      if (name) {
+      const target = memberTarget(current);
+      if (target) {
         push({
-          name,
+          name: target.raw,
+          target,
           line: current.startPosition.row + 1,
           kind: "member",
         });
@@ -311,7 +323,7 @@ function decoratorName(node: TSNode): string | undefined {
   return normalizeRefName(id.text.replace(/^@/, ""));
 }
 
-function memberPropertyName(node: TSNode): string | undefined {
+function memberTarget(node: TSNode): ReferenceTarget | undefined {
   const prop =
     node.childForFieldName("property") ??
     node.childForFieldName("field") ??
@@ -327,7 +339,14 @@ function memberPropertyName(node: TSNode): string | undefined {
   ) {
     return undefined;
   }
-  return normalizeRefName(prop.text);
+  const member = normalizeRefName(prop.text);
+  const receiver =
+    node.childForFieldName("object") ??
+    node.childForFieldName("argument") ??
+    node.childForFieldName("value") ??
+    node.namedChildren[0];
+  if (!member || !receiver || receiver === prop) return undefined;
+  return memberReferenceTarget(node.text, receiver.text, member);
 }
 
 function isCallCallee(node: TSNode): boolean {

@@ -85,11 +85,15 @@ export function run(obj: { field: number }) {
   const fragments = await new CodeExtractor().extract(source);
   const graphInput = await extractFileGraph(source, fragments);
 
-  assert.ok(
-    graphInput.edges.some(
-      (e) => e.kind === "REFS" && e.rel === "member" && e.ref_name === "field",
-    ),
+  const memberRef = graphInput.refs.find(
+    (ref) => ref.ref_kind === "member" && ref.ref_name === "obj.field",
   );
+  assert.ok(memberRef);
+  assert.deepEqual(memberRef.target, {
+    raw: "obj.field",
+    member: "field",
+    receiver: { kind: "qualified", name: "obj" },
+  });
   // callTarget should be CALLS, not member REFS
   assert.ok(
     graphInput.edges.some(

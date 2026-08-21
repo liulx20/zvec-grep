@@ -13,6 +13,7 @@ import {
 } from "./from-fragments.js";
 import { isExternalImportSpec } from "./imports/resolve-path.js";
 import type { LocalEdge } from "./types.js";
+import { resolveLocalReferenceCandidates } from "./local-reference-resolver.js";
 
 type RelationOwner = {
   name?: string;
@@ -20,7 +21,7 @@ type RelationOwner = {
   startLine: number;
   sites: readonly {
     name: string;
-    target?: ReferenceTarget;
+    target: ReferenceTarget;
     line: number;
     kind: string;
   }[];
@@ -178,26 +179,14 @@ function absorbRelationOwners(input: {
 
     for (const site of owner.sites) {
       const reference = referenceResolutionPolicy.analyzeReference(
-        site.target ?? site.name,
+        site.target,
         input.sourceLanguage,
       );
       const plan = referenceResolutionPolicy.localLookupPlan(
         reference,
         input.containerNameByChild.get(ownerId),
       );
-      let localHits = input.nameToIds.get(plan.lookupName) ?? [];
-      if (plan.containerScope.kind !== "none") {
-        const containers = localContainerScope(
-          plan.containerScope,
-          ownerId,
-          input,
-        );
-        localHits = firstScopedHits(
-          localHits,
-          containers,
-          input.containerIdByChild,
-        );
-      }
+      const localHits = resolveLocalReferenceCandidates(plan, ownerId, input);
       const targets = localHits.filter((id) => id !== ownerId);
 
       if (targets.length === 1) {
@@ -241,63 +230,6 @@ function absorbRelationOwners(input: {
       }
     }
   }
-}
-
-function localContainerScope(
-  scope: ReturnType<
-    typeof referenceResolutionPolicy.localLookupPlan
-  >["containerScope"],
-  ownerId: string,
-  input: {
-    nameToIds: Map<string, string[]>;
-    containerIdByChild: ReadonlyMap<string, string>;
-    localEdges: Map<string, LocalEdge>;
-  },
-): string[] {
-  if (scope.kind === "named") {
-    return input.nameToIds.get(scope.name) ?? [];
-  }
-  if (scope.kind !== "owner-hierarchy") return [];
-  const ownerContainer = input.containerIdByChild.get(ownerId);
-  if (!ownerContainer) return [];
-  const seen = new Set<string>();
-  const containers: string[] = [];
-  const queue = scope.includeOwner
-    ? [ownerContainer]
-    : localBases(ownerContainer);
-  while (queue.length > 0) {
-    const current = queue.shift()!;
-    if (seen.has(current)) continue;
-    seen.add(current);
-    containers.push(current);
-    queue.push(...localBases(current));
-  }
-  return containers;
-
-  function localBases(containerId: string): string[] {
-    return [...input.localEdges.values()]
-      .filter(
-        (edge) =>
-          edge.kind === "INHERITS" &&
-          (edge.rel === "extends" || edge.rel === "implements") &&
-          edge.src === containerId,
-      )
-      .map((edge) => edge.dst);
-  }
-}
-
-function firstScopedHits(
-  candidates: readonly string[],
-  containerIds: readonly string[],
-  containerIdByChild: ReadonlyMap<string, string>,
-): string[] {
-  for (const containerId of containerIds) {
-    const hits = candidates.filter(
-      (candidate) => containerIdByChild.get(candidate) === containerId,
-    );
-    if (hits.length > 0) return hits;
-  }
-  return [];
 }
 
 function nextOccurrence(counts: Map<string, number>, key: string): number {

@@ -11,8 +11,8 @@ export type ReferenceTarget = {
 
 const OWNER_RECEIVERS = new Set(["this", "self", "cls"]);
 
-/** Compatibility parser for persisted/legacy raw references. */
-export function referenceTargetFromRaw(raw: string): ReferenceTarget {
+/** Build a structured target while the source-language syntax is available. */
+export function referenceTargetFromSyntax(raw: string): ReferenceTarget {
   const normalized = raw.replace(/->/g, ".");
   const separator = normalized.lastIndexOf(".");
   if (separator < 0) return { raw, member: normalized };
@@ -27,11 +27,14 @@ export function referenceTargetFromRaw(raw: string): ReferenceTarget {
   return { raw, member, receiver: { kind, name: receiverRaw } };
 }
 
+/** Compatibility fallback for persisted references created before target IR. */
+export const referenceTargetFromRaw = referenceTargetFromSyntax;
+
 export function memberReferenceTarget(
   raw: string,
   receiver: string,
   member: string,
 ): ReferenceTarget {
-  const parsed = referenceTargetFromRaw(`${receiver}.${member}`);
+  const parsed = referenceTargetFromSyntax(`${receiver}.${member}`);
   return { ...parsed, raw };
 }

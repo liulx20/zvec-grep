@@ -1,7 +1,7 @@
 import type { LanguageAdapter } from "./adapter.js";
 import {
   memberReferenceTarget,
-  referenceTargetFromRaw,
+  referenceTargetFromSyntax,
   type ReferenceTarget,
 } from "../../reference-target.js";
 import type { TSNode } from "./tree-sitter/nodes.js";
@@ -94,7 +94,7 @@ export function extractCallTarget(node: TSNode): ReferenceTarget | undefined {
       return raw
         ? receiver
           ? memberReferenceTarget(raw, receiver.text, name.text)
-          : referenceTargetFromRaw(raw)
+          : referenceTargetFromSyntax(raw)
         : undefined;
     }
   }
@@ -110,7 +110,7 @@ export function extractCallTarget(node: TSNode): ReferenceTarget | undefined {
   }
 
   const raw = normalizeCallName(target.text);
-  return raw ? referenceTargetFromRaw(raw) : undefined;
+  return raw ? referenceTargetFromSyntax(raw) : undefined;
 }
 
 const MAX_CALL_NAME_CHARS = 180;

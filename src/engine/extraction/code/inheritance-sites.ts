@@ -1,12 +1,19 @@
 import type { TSNode } from "./tree-sitter/nodes.js";
+import {
+  referenceTargetFromSyntax,
+  type ReferenceTarget,
+} from "../../reference-target.js";
 
 export type InheritanceSite = {
   /** Base / interface name as written (may be qualified). */
   name: string;
+  target: ReferenceTarget;
   /** 1-based source line of the heritage clause entry. */
   line: number;
   kind: "extends" | "implements";
 };
+
+type RawInheritanceSite = Omit<InheritanceSite, "target">;
 
 const MAX_TYPE_NAME_CHARS = 180;
 
@@ -18,30 +25,36 @@ export function collectInheritanceSites(
   node: TSNode,
   language: string,
 ): InheritanceSite[] {
-  switch (language) {
-    case "typescript":
-    case "tsx":
-    case "javascript":
-    case "jsx":
-      return collectJsTs(node);
-    case "python":
-      return collectPython(node);
-    case "java":
-      return collectJava(node);
-    case "cpp":
-    case "c":
-      return collectCpp(node);
-    case "rust":
-      return collectRust(node);
-    case "go":
-      return collectGo(node);
-    default:
-      return [];
-  }
+  const sites: RawInheritanceSite[] = (() => {
+    switch (language) {
+      case "typescript":
+      case "tsx":
+      case "javascript":
+      case "jsx":
+        return collectJsTs(node);
+      case "python":
+        return collectPython(node);
+      case "java":
+        return collectJava(node);
+      case "cpp":
+      case "c":
+        return collectCpp(node);
+      case "rust":
+        return collectRust(node);
+      case "go":
+        return collectGo(node);
+      default:
+        return [];
+    }
+  })();
+  return sites.map((site) => ({
+    ...site,
+    target: referenceTargetFromSyntax(site.name),
+  }));
 }
 
-function collectJsTs(node: TSNode): InheritanceSite[] {
-  const sites: InheritanceSite[] = [];
+function collectJsTs(node: TSNode): RawInheritanceSite[] {
+  const sites: RawInheritanceSite[] = [];
 
   if (
     node.type === "class_declaration" ||
@@ -80,7 +93,7 @@ function collectJsTs(node: TSNode): InheritanceSite[] {
   return sites;
 }
 
-function collectPython(node: TSNode): InheritanceSite[] {
+function collectPython(node: TSNode): RawInheritanceSite[] {
   if (node.type === "decorated_definition") {
     const inner = node.namedChildren.find((c) => c.type === "class_definition");
     return inner ? collectPython(inner) : [];
@@ -92,7 +105,7 @@ function collectPython(node: TSNode): InheritanceSite[] {
   if (!args) {
     return [];
   }
-  const sites: InheritanceSite[] = [];
+  const sites: RawInheritanceSite[] = [];
   for (const child of args.namedChildren) {
     const name = normalizeTypeName(child);
     if (!name || isLanguageBuiltin("python", name)) {
@@ -107,8 +120,8 @@ function collectPython(node: TSNode): InheritanceSite[] {
   return sites;
 }
 
-function collectJava(node: TSNode): InheritanceSite[] {
-  const sites: InheritanceSite[] = [];
+function collectJava(node: TSNode): RawInheritanceSite[] {
+  const sites: RawInheritanceSite[] = [];
   if (node.type === "class_declaration" || node.type === "enum_declaration") {
     const superclass =
       node.childForFieldName("superclass") ??
@@ -141,7 +154,7 @@ function collectJava(node: TSNode): InheritanceSite[] {
   return sites;
 }
 
-function collectCpp(node: TSNode): InheritanceSite[] {
+function collectCpp(node: TSNode): RawInheritanceSite[] {
   if (node.type !== "class_specifier" && node.type !== "struct_specifier") {
     return [];
   }
@@ -149,7 +162,7 @@ function collectCpp(node: TSNode): InheritanceSite[] {
   if (!clause) {
     return [];
   }
-  const sites: InheritanceSite[] = [];
+  const sites: RawInheritanceSite[] = [];
   for (const child of clause.namedChildren) {
     if (
       child.type === "access_specifier" ||
@@ -170,7 +183,7 @@ function collectCpp(node: TSNode): InheritanceSite[] {
   return sites;
 }
 
-function collectRust(node: TSNode): InheritanceSite[] {
+function collectRust(node: TSNode): RawInheritanceSite[] {
   if (node.type !== "impl_item") {
     return [];
   }
@@ -191,7 +204,7 @@ function collectRust(node: TSNode): InheritanceSite[] {
   ];
 }
 
-function collectGo(node: TSNode): InheritanceSite[] {
+function collectGo(node: TSNode): RawInheritanceSite[] {
   if (node.type !== "type_spec") {
     return [];
   }
@@ -199,7 +212,7 @@ function collectGo(node: TSNode): InheritanceSite[] {
   if (!typeNode) {
     return [];
   }
-  const sites: InheritanceSite[] = [];
+  const sites: RawInheritanceSite[] = [];
 
   if (typeNode.type === "struct_type") {
     const fields = typeNode.namedChildren.find(
@@ -250,7 +263,7 @@ function collectGo(node: TSNode): InheritanceSite[] {
 }
 
 function pushTypeChildren(
-  sites: InheritanceSite[],
+  sites: RawInheritanceSite[],
   clause: TSNode,
   kind: "extends" | "implements",
   skipKeyword: boolean,
