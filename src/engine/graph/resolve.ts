@@ -38,7 +38,7 @@ export function resolveRef(
         ? hierarchyContainerIds
         : ["__unresolved_container__"]
       : [];
-  const hit = names.lookup(
+  const hit = names.lookupWithEvidence(
     plan.lookupName,
     ref.src_file,
     plan.preferredFileIds,
@@ -60,5 +60,10 @@ export function resolveRef(
         ? "CALLS"
         : "REFS";
 
-  return { status: "resolved", dst: hit.id, edgeKind };
+  return {
+    status: "resolved",
+    dst: hit.entry.id,
+    edgeKind,
+    evidence: hit.evidence,
+  };
 }

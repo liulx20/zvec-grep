@@ -46,6 +46,12 @@ export type SymContext = {
 export type GraphEdgeKind =
   "CALLS" | "REFS" | "INHERITS" | "CONTAINS" | "DEFINES" | "IMPORTS" | "INSTANTIATES";
 
+export type ResolutionEvidence =
+  | "same_file"
+  | "preferred_file"
+  | "container_scope"
+  | "workspace_unique";
+
 /** A persisted graph edge with its original relation metadata intact. */
 export type GraphEdge = {
   src: string;
@@ -166,7 +172,12 @@ export type PendingRef = {
 };
 
 export type RefResolveResult =
-  | { status: "resolved"; dst: string; edgeKind: "CALLS" | "REFS" | "INHERITS" }
+  | {
+      status: "resolved";
+      dst: string;
+      edgeKind: "CALLS" | "REFS" | "INHERITS";
+      evidence: ResolutionEvidence;
+    }
   | { status: "resolved_import"; dstFileId: string }
   | { status: "external" }
   | { status: "failed" };

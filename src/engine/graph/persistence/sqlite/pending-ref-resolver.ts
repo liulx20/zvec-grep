@@ -230,7 +230,11 @@ export class SqlitePendingRefResolver {
       });
       return;
     }
-    this.insertSymbolEdge(ref, result.dst, result.edgeKind);
+    this.insertSymbolEdge(ref, result.dst, result.edgeKind, {
+      provenance: "static",
+      confidence: 1,
+      evidence: result.evidence,
+    });
   }
 
   private heuristicCandidate(

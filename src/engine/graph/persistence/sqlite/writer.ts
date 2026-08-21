@@ -136,8 +136,8 @@ export class SqliteGraphWriter {
       `INSERT OR REPLACE INTO edges(
          id,src_id,dst_id,src_is_file,dst_is_file,kind,rel,count,first_line,
          ref_name,source_language,receiver_kind,receiver_name,member_name,
-         resolution_hints,provenance,confidence
-       ) VALUES(?,?,?,0,0,?,?,?,?,?,?,?,?,?,?,'static',1)`,
+         resolution_hints,provenance,confidence,evidence
+       ) VALUES(?,?,?,0,0,?,?,?,?,?,?,?,?,?,?,'static',1,'same_file')`,
     ).run(
       edge.id ?? (edge.kind === "INSTANTIATES"
         ? `${sourceEdgeId}:instantiates`
@@ -163,9 +163,12 @@ export class SqliteGraphWriter {
        WHERE edge.kind<>'INSTANTIATES' AND (
          (target.file_id=? AND (source.file_id IS NULL OR source.file_id<>?))
          OR (edge.dst_is_file=1 AND edge.dst_id=? AND edge.src_id<>?)
-         OR ((source.file_id IS NULL OR source.file_id<>?) AND ?<>'[]' AND (
-           edge.member_name IN (SELECT value FROM json_each(?))
-           OR edge.ref_name IN (SELECT value FROM json_each(?))
+         OR ((source.file_id IS NULL OR source.file_id<>?)
+           AND ?<>'[]' AND (
+           (edge.evidence='workspace_unique' AND (
+             edge.member_name IN (SELECT value FROM json_each(?))
+             OR edge.ref_name IN (SELECT value FROM json_each(?))
+           ))
            OR json_extract(edge.resolution_hints,'$.receiverType')
                 IN (SELECT value FROM json_each(?))
            OR EXISTS(

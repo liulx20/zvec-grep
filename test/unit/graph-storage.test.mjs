@@ -299,6 +299,12 @@ test("new same-name symbols invalidate ordinary resolved projections", async () 
   );
   await graph.resolvePending();
   assert.deepEqual(graph.callees("caller", 1, 10).map((item) => item.id), ["target-a"]);
+  assert.equal(
+    graph.database.db.prepare(
+      "SELECT evidence FROM edges WHERE src_id='caller' AND kind='CALLS'",
+    ).get().evidence,
+    "workspace_unique",
+  );
 
   graph.upsertFileGraph(
     "second-target",
@@ -310,6 +316,41 @@ test("new same-name symbols invalidate ordinary resolved projections", async () 
 
   assert.deepEqual(graph.callees("caller", 1, 10), []);
   assert.equal(graph.stats().refCount, 1);
+  graph.close();
+});
+
+test("new same-name symbols preserve same-file resolved projections", async () => {
+  const graph = new SqliteGraphStorage("", { inMemory: true });
+  graph.upsertFileGraph(
+    "local-file",
+    [
+      { id: "local-caller", kind: "function", is_exported: false, name: "caller" },
+      { id: "local-target", kind: "function", is_exported: false, name: "target" },
+    ],
+    [edge("local-caller", "local-target", "CALLS", "call")],
+    [],
+  );
+
+  assert.equal(
+    graph.database.db.prepare(
+      "SELECT evidence FROM edges WHERE src_id='local-caller' AND kind='CALLS'",
+    ).get().evidence,
+    "same_file",
+  );
+
+  graph.upsertFileGraph(
+    "unrelated-file",
+    [{ id: "unrelated-target", kind: "function", is_exported: true, name: "target" }],
+    [],
+    [],
+  );
+  await graph.resolvePending();
+
+  assert.deepEqual(
+    graph.callees("local-caller", 1, 10).map((item) => item.id),
+    ["local-target"],
+  );
+  assert.equal(graph.stats().refCount, 0);
   graph.close();
 });
 

@@ -1,4 +1,5 @@
 import { bareName } from "./builtins.js";
+import type { ResolutionEvidence } from "./types.js";
 
 export type NameEntry = {
   id: string;
@@ -7,6 +8,11 @@ export type NameEntry = {
   kind: string;
   containerName?: string;
   containerId?: string;
+};
+
+export type NameLookupResult = {
+  entry: NameEntry;
+  evidence: ResolutionEvidence;
 };
 
 /** Exact / bare-name lookup used by resolvePending. */
@@ -51,6 +57,24 @@ export class NameIndex {
     containerNames: readonly string[] = [],
     containerIds: readonly string[] = [],
   ): NameEntry | null {
+    return this.lookupWithEvidence(
+      refName,
+      srcFile,
+      preferredFileIds,
+      allowBareFallback,
+      containerNames,
+      containerIds,
+    )?.entry ?? null;
+  }
+
+  lookupWithEvidence(
+    refName: string,
+    srcFile: string,
+    preferredFileIds: readonly string[] = [],
+    allowBareFallback = true,
+    containerNames: readonly string[] = [],
+    containerIds: readonly string[] = [],
+  ): NameLookupResult | null {
     let candidates =
       this.byName.get(refName) ??
       (allowBareFallback ? this.byName.get(bareName(refName)) : undefined) ??
@@ -68,7 +92,8 @@ export class NameIndex {
         const scoped = candidates.filter(
           (candidate) => candidate.containerId === containerId,
         );
-        if (scoped.length === 1) return scoped[0] ?? null;
+        if (scoped.length === 1)
+          return { entry: scoped[0]!, evidence: "container_scope" };
         if (scoped.length > 1) return null;
       }
       return null;
@@ -78,17 +103,17 @@ export class NameIndex {
     }
     const sameFile = candidates.filter((c) => c.fileId === srcFile);
     if (sameFile.length === 1) {
-      return sameFile[0] ?? null;
+      return { entry: sameFile[0]!, evidence: "same_file" };
     }
     if (preferredFileIds.length > 0) {
       const preferred = new Set(preferredFileIds);
       const imported = candidates.filter((c) => preferred.has(c.fileId));
       if (imported.length === 1) {
-        return imported[0] ?? null;
+        return { entry: imported[0]!, evidence: "preferred_file" };
       }
     }
     if (candidates.length === 1) {
-      return candidates[0] ?? null;
+      return { entry: candidates[0]!, evidence: "workspace_unique" };
     }
     // Ambiguous across files: leave unresolved (failed).
     return null;
