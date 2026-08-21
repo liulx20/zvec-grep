@@ -757,6 +757,39 @@ test("occurrence edges are grouped before traversal limits are applied", async (
   graph.close();
 });
 
+test("mixed directional queries reserve budget per edge kind and refill unused quota", () => {
+  const graph = new SqliteGraphStorage("", { inMemory: true });
+  graph.upsertFileGraph(
+    "mixed",
+    [
+      { id: "a", kind: "class", is_exported: true, name: "A" },
+      { id: "b", kind: "function", is_exported: true, name: "b" },
+      { id: "c", kind: "function", is_exported: true, name: "c" },
+      { id: "d", kind: "function", is_exported: true, name: "d" },
+      { id: "member", kind: "method", is_exported: true, name: "member" },
+    ],
+    [
+      edge("a", "b", "CALLS", "call"),
+      edge("a", "c", "CALLS", "call"),
+      edge("a", "d", "CALLS", "call"),
+      edge("a", "member", "CONTAINS", "contains"),
+    ],
+    [],
+  );
+
+  assert.deepEqual(
+    graph.outgoingEdges(["a"], ["CALLS", "CONTAINS"], 2)
+      .map((item) => item.kind),
+    ["CALLS", "CONTAINS"],
+  );
+  assert.equal(
+    graph.outgoingEdges(["a"], ["CALLS", "REFS"], 3).length,
+    3,
+    "unused REFS quota should be refilled from CALLS",
+  );
+  graph.close();
+});
+
 test("reprojecting a local constructor keeps one instantiation fact", async () => {
   class InspectableGraph extends SqliteGraphStorage {
     instantiationRows() {

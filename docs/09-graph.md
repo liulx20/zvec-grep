@@ -272,7 +272,8 @@ pending occurrence，以便再次解析。import binding 的 `local_name`、`imp
    查询该层节点的邻接边，将剩余节点预算作为稳定排序后的 SQL `LIMIT` 下推，再批量读取目标节点类型，
    避免逐节点 N+1 查询和高扇入/扇出节点的无界物化。
    `expandSeeds()` 和 `expandFileNeighbors()` 的 limit 则按输入 seed 独立执行，避免高扇出 seed
-   占满其他 seed 的结果窗口。
+   占满其他 seed 的结果窗口。混合关系遍历先给每种 edge kind 分配基础配额，再把空类型的剩余预算
+   轮转补给仍有结果的类型，避免 `CALLS` 长期挤掉 `IMPORTS` 或 `INSTANTIATES`。
 4. Explore 只把预算内局部子图放进内存并运行 RWR，内存占用与查询子图规模相关，而不是与完整
    仓库图规模相关。
 5. `upsertFileGraph()` 按文件事务增量替换数据，`checkpoint()` 只推进 WAL；WAL 和

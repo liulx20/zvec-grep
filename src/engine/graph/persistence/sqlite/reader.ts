@@ -621,109 +621,79 @@ export class SqliteGraphReader {
     limit: number,
   ): GraphEdge[] {
     if (!idsInput.length || limit <= 0) return [];
-    const ids = JSON.stringify([...new Set(idsInput)]),
-      out: GraphEdge[] = [];
-    const rel = kinds.filter((k) => REL_KINDS.has(k));
-    if (rel.length) {
-      const p = rel.map(() => "?").join(",");
-      const sides = [direction === "outgoing" ? "src_id" : "dst_id"];
-      for (const side of sides) {
-        const remaining = limit - out.length;
-        if (remaining <= 0) break;
-        out.push(
-          ...this.all<EdgeRow>(
-            `SELECT src_id,dst_id,kind,rel,SUM(count) AS count,
-                    MIN(first_line) AS first_line,MIN(ref_name) AS ref_name,
-                    CASE WHEN MAX(provenance)='static' THEN 'static' ELSE 'heuristic' END AS provenance,
-                    MAX(confidence) AS confidence,
-                    CASE WHEN MAX(provenance)='static' THEN NULL ELSE MIN(evidence) END AS evidence
-             FROM edges
-             WHERE ${side} IN(SELECT value FROM json_each(?))
-               AND src_is_file=0 AND dst_is_file=0 AND kind IN(${p})
-             GROUP BY src_id,dst_id,kind,rel
-             ORDER BY ${side},kind,src_id,dst_id,rel LIMIT ?`,
-            ids,
-            ...rel,
-            remaining,
-          ).map(toGraphEdge),
-        );
-      }
+    const ids = JSON.stringify([...new Set(idsInput)]);
+    const requested = [...new Set(kinds)];
+    if (requested.length === 0) return [];
+    const quota = Math.max(1, Math.ceil(limit / requested.length));
+    const buckets = new Map<GraphEdgeKind, GraphEdge[]>();
+    const exhausted = new Set<GraphEdgeKind>();
+    for (const kind of requested) {
+      const rows = this.queryDirectionalEdgeKind(ids, kind, direction, quota, 0);
+      buckets.set(kind, rows);
+      if (rows.length < quota) exhausted.add(kind);
     }
-    if (kinds.includes("CONTAINS")) {
-      const sides = [direction === "outgoing" ? "parent_id" : "child_id"];
-      for (const side of sides) {
-        const remaining = limit - out.length;
-        if (remaining <= 0) break;
-        out.push(
-          ...this.all<{ parent_id: string; child_id: string }>(
-            `SELECT * FROM contains WHERE ${side} IN(SELECT value FROM json_each(?)) ORDER BY ${side},parent_id,child_id LIMIT ?`,
-            ids,
-            remaining,
-          ).map((r) =>
-            structuralEdge(r.parent_id, r.child_id, "CONTAINS", "contains"),
-          ),
+    let out = roundRobinEdges(requested, buckets, limit);
+    while (out.length < limit) {
+      let progressed = false;
+      for (const kind of requested) {
+        if (exhausted.has(kind)) continue;
+        const bucket = buckets.get(kind)!;
+        const rows = this.queryDirectionalEdgeKind(
+          ids, kind, direction, quota, bucket.length,
         );
+        bucket.push(...rows);
+        progressed ||= rows.length > 0;
+        if (rows.length < quota) exhausted.add(kind);
       }
+      out = roundRobinEdges(requested, buckets, limit);
+      if (!progressed) break;
     }
-    if (kinds.includes("DEFINES")) {
-      const sides = [direction === "outgoing" ? "file_id" : "id"];
-      for (const side of sides) {
-        const remaining = limit - out.length;
-        if (remaining <= 0) break;
-        out.push(
-          ...this.all<{ file_id: string; id: string }>(
-            `SELECT file_id,id FROM symbols WHERE ${side} IN(SELECT value FROM json_each(?)) ORDER BY ${side},file_id,id LIMIT ?`,
-            ids,
-            remaining,
-          ).map((r) => structuralEdge(r.file_id, r.id, "DEFINES", "defines")),
-        );
-      }
-    }
-    if (kinds.includes("IMPORTS")) {
-      const sides = [direction === "outgoing" ? "src_id" : "dst_id"];
-      for (const side of sides) {
-        const remaining = limit - out.length;
-        if (remaining <= 0) break;
-        out.push(
-          ...this.all<EdgeRow>(
-            `SELECT src_id,dst_id,kind,rel,SUM(count) AS count,
-                    MIN(first_line) AS first_line,MIN(ref_name) AS ref_name,
-                    CASE WHEN MAX(provenance)='static' THEN 'static' ELSE 'heuristic' END AS provenance,
-                    MAX(confidence) AS confidence,
-                    CASE WHEN MAX(provenance)='static' THEN NULL ELSE MIN(evidence) END AS evidence
-             FROM edges WHERE kind='IMPORTS' AND src_is_file=1 AND dst_is_file=1
-               AND ${side} IN(SELECT value FROM json_each(?))
-             GROUP BY src_id,dst_id,kind,rel
-             ORDER BY ${side},src_id,dst_id,rel LIMIT ?`,
-            ids,
-            remaining,
-          ).map(toGraphEdge),
-        );
-      }
-    }
-    if (kinds.includes("INSTANTIATES")) {
+    return out;
+  }
+
+  private queryDirectionalEdgeKind(
+    ids: string,
+    kind: GraphEdgeKind,
+    direction: "outgoing" | "incoming",
+    limit: number,
+    offset: number,
+  ): GraphEdge[] {
+    if (REL_KINDS.has(kind) || kind === "INSTANTIATES" || kind === "IMPORTS") {
       const side = direction === "outgoing" ? "src_id" : "dst_id";
-      const remaining = limit - out.length;
-      if (remaining > 0) {
-        out.push(
-          ...this.all<EdgeRow>(
-            `SELECT src_id,dst_id,kind,rel,SUM(count) AS count,
-                    MIN(first_line) AS first_line,MIN(ref_name) AS ref_name,
-                    CASE WHEN MAX(provenance)='static' THEN 'static' ELSE 'heuristic' END AS provenance,
-                    MAX(confidence) AS confidence,
-                    CASE WHEN MAX(provenance)='static' THEN NULL ELSE MIN(evidence) END AS evidence
-             FROM edges WHERE kind='INSTANTIATES'
-               AND src_is_file=0 AND dst_is_file=0
-               AND ${side} IN(SELECT value FROM json_each(?))
-             GROUP BY src_id,dst_id,kind,rel
-             ORDER BY ${side},src_id,dst_id,rel LIMIT ?`,
-            ids,
-            remaining,
-          ).map(toGraphEdge),
-        );
-      }
+      const fileFlags = kind === "IMPORTS"
+        ? "src_is_file=1 AND dst_is_file=1"
+        : "src_is_file=0 AND dst_is_file=0";
+      return this.all<EdgeRow>(
+        `SELECT src_id,dst_id,kind,rel,SUM(count) AS count,
+                MIN(first_line) AS first_line,MIN(ref_name) AS ref_name,
+                CASE WHEN MAX(provenance)='static' THEN 'static' ELSE 'heuristic' END AS provenance,
+                MAX(confidence) AS confidence,
+                CASE WHEN MAX(provenance)='static' THEN NULL ELSE MIN(evidence) END AS evidence
+         FROM edges WHERE kind=? AND ${fileFlags}
+           AND ${side} IN(SELECT value FROM json_each(?))
+         GROUP BY src_id,dst_id,kind,rel
+         ORDER BY ${side},src_id,dst_id,rel LIMIT ? OFFSET ?`,
+        kind, ids, limit, offset,
+      ).map(toGraphEdge);
     }
-    return dedupeEdges(out).slice(0, limit);
+    if (kind === "CONTAINS") {
+      const side = direction === "outgoing" ? "parent_id" : "child_id";
+      return this.all<{ parent_id: string; child_id: string }>(
+        `SELECT parent_id,child_id FROM contains
+         WHERE ${side} IN(SELECT value FROM json_each(?))
+         ORDER BY ${side},parent_id,child_id LIMIT ? OFFSET ?`,
+        ids, limit, offset,
+      ).map((row) => structuralEdge(
+        row.parent_id, row.child_id, "CONTAINS", "contains",
+      ));
+    }
+    const side = direction === "outgoing" ? "file_id" : "id";
+    return this.all<{ file_id: string; id: string }>(
+      `SELECT file_id,id FROM symbols
+       WHERE ${side} IN(SELECT value FROM json_each(?))
+       ORDER BY ${side},file_id,id LIMIT ? OFFSET ?`,
+      ids, limit, offset,
+    ).map((row) => structuralEdge(row.file_id, row.id, "DEFINES", "defines"));
   }
 
   private edgeOccurrenceCount(kind: "CALLS" | "REFS" | "INHERITS"): number {
@@ -830,6 +800,25 @@ function dedupeEdges(edges: readonly GraphEdge[]): GraphEdge[] {
     seen.add(k);
     return true;
   });
+}
+function roundRobinEdges(
+  kinds: readonly GraphEdgeKind[],
+  buckets: ReadonlyMap<GraphEdgeKind, readonly GraphEdge[]>,
+  limit: number,
+): GraphEdge[] {
+  const out: GraphEdge[] = [];
+  for (let index = 0; out.length < limit; index++) {
+    let added = false;
+    for (const kind of kinds) {
+      const edge = buckets.get(kind)?.[index];
+      if (!edge) continue;
+      out.push(edge);
+      added = true;
+      if (out.length >= limit) break;
+    }
+    if (!added) break;
+  }
+  return out;
 }
 function adjacentTargets(
   edge: GraphEdge,
