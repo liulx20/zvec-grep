@@ -9,6 +9,7 @@ import type { PendingRef, ResolvePendingOptions } from "../../types.js";
 import { type RefRow, type SymbolRow } from "./reader.js";
 import type { SqliteGraphDatabase } from "./database.js";
 import { SemanticCandidateRepository } from "./candidate-repository.js";
+import { bareName } from "../../builtins.js";
 
 const PER_NAME_CEILING = 500;
 type ResolvePhase = "imports" | "inheritance" | "symbols";
@@ -45,7 +46,12 @@ export class SqlitePendingRefResolver {
   }
   async resolvePending(options: ResolvePendingOptions = {}): Promise<void> {
     this.assertWritable();
+    const resolvable = this.one<{ count: number }>(
+      "SELECT COUNT(*) AS count FROM unresolved_refs WHERE status IN ('pending','failed')",
+    )?.count ?? 0;
+    if (resolvable === 0) return;
     const names = new NameIndex();
+    const lookupNames = this.pendingSymbolNames();
     names.load(
       this.all<
         SymbolRow & {
@@ -58,7 +64,8 @@ export class SqlitePendingRefResolver {
          FROM symbols s
          LEFT JOIN contains c ON c.child_id=s.id
          LEFT JOIN symbols p ON p.id=c.parent_id
-         WHERE s.name IS NOT NULL`,
+         WHERE s.name IN (SELECT value FROM json_each(?))`,
+        JSON.stringify(lookupNames),
       ).map((row) => ({
         id: row.id,
         fileId: row.file_id,
@@ -82,6 +89,38 @@ export class SqlitePendingRefResolver {
     this.drainPhase("symbols", attempt, (ref) =>
       this.resolveSymbol(ref, names, attempt, hierarchyCache),
     );
+  }
+
+  private pendingSymbolNames(): string[] {
+    const rows = this.all<{
+      ref_name: string;
+      member_name: string | null;
+      imported_name: string | null;
+    }>(
+      `SELECT ref_name,member_name,imported_name FROM unresolved_refs
+       WHERE status IN ('pending','failed')`,
+    );
+    const names = new Set<string>();
+    for (const row of rows) {
+      for (const value of [row.ref_name, row.member_name, row.imported_name]) {
+        if (!value) continue;
+        names.add(value);
+        const bare = bareName(value);
+        if (bare) names.add(bare);
+      }
+    }
+    for (const row of this.all<{ imported_name: string }>(
+      `SELECT DISTINCT imports.imported_name FROM unresolved_refs unresolved
+       JOIN symbols owner ON owner.id=unresolved.owner_id
+       JOIN edges imports ON imports.src_id=owner.file_id
+         AND imports.src_is_file=1 AND imports.kind='IMPORTS'
+       WHERE unresolved.owner_is_file=0
+         AND unresolved.status IN ('pending','failed')
+         AND imports.imported_name IS NOT NULL`,
+    )) {
+      if (row.imported_name !== "*") names.add(row.imported_name);
+    }
+    return [...names];
   }
 
   private drainPhase(
@@ -160,8 +199,8 @@ export class SqlitePendingRefResolver {
       ref.ref_name,
     );
     const target = pending.target!;
-    const semanticCandidates = target.hints?.receiverType
-      ? this.candidates.find({
+    const semanticResolution = target.hints?.receiverType
+      ? this.candidates.resolve({
           sourceId: ref.owner_id,
           sourceLanguage: ref.source_language ?? undefined,
           typeNames: target.hints.candidateTypes ?? [target.hints.receiverType],
@@ -169,8 +208,10 @@ export class SqlitePendingRefResolver {
           callArity: target.hints.callArity,
           limit: 65,
         })
-      : [];
-    if (semanticCandidates.length === 1) {
+      : { candidates: [], abstractDispatch: false, rtaActive: false };
+    const semanticCandidates = semanticResolution.candidates;
+    if (semanticCandidates.length === 1 &&
+        (!semanticResolution.abstractDispatch || semanticResolution.rtaActive)) {
       this.insertSymbolEdge(
         ref,
         semanticCandidates[0]!,
@@ -183,7 +224,9 @@ export class SqlitePendingRefResolver {
       );
       return;
     }
-    if (semanticCandidates.length > 1) {
+    if ((semanticResolution.abstractDispatch && !semanticResolution.rtaActive) ||
+        semanticCandidates.length > 1 ||
+        (semanticCandidates.length === 0 && target.hints?.dispatch)) {
       this.persistDynamicCall(ref, target, semanticCandidates);
       return;
     }

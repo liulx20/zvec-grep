@@ -80,15 +80,49 @@ test("exploreSubgraph bounds failed call-path attempts and edge reads", () => {
   const rootIds = Array.from({ length: 32 }, (_, index) => `isolated-${index}`);
   const storage = storageFrom(rootIds.map((id) => entity(id, id, `${id}.ts`)));
 
-  exploreSubgraph(graph, storage, {
+  const result = exploreSubgraph(graph, storage, {
     seedIds: rootIds,
     traversalDepth: 3,
     maxNodes: 16,
     includeCallPaths: true,
   });
 
+  assert.equal(result.rootIds.length, 16);
+  assert.ok(result.rootIds.every((id) => result.nodes.some((node) => node.id === id)));
   assert.equal(graph.pathAttempts, 32);
   assert.ok(graph.edgeBudget <= 20_000);
+  graph.close();
+});
+
+test("explore reports truncated dynamic boundary output", () => {
+  class BoundaryGraph extends SqliteGraphStorage {
+    dynamicBoundaries(_ids, limit) {
+      return Array.from({ length: limit }, (_, index) => ({
+        sourceId: "root",
+        target: { raw: `value.run${index}`, member: `run${index}` },
+        reason: "polymorphic_dispatch",
+        candidates: [],
+        candidatesTruncated: false,
+        candidateDetails: [],
+      }));
+    }
+  }
+  const graph = new BoundaryGraph("", { inMemory: true });
+  graph.upsertFileGraph(
+    "root-file",
+    [{ id: "root", kind: "function", is_exported: true, name: "root" }],
+    [],
+    [],
+  );
+  const storage = storageFrom([entity("root", "root", "root.ts")]);
+
+  const result = exploreGraph(graph, storage, {
+    query: "root",
+    maxNodes: 16,
+  });
+
+  assert.equal(result.dynamicBoundaries.length, 16);
+  assert.equal(result.dynamicBoundariesTruncated, true);
   graph.close();
 });
 

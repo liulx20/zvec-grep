@@ -700,12 +700,12 @@ func invoke[T Runner](value T) { value.Run() }
   const candidateNames = boundaries[0].candidates
     .map((id) => input.nodes.find((node) => node.id === id)?.name)
     .filter(Boolean);
-  assert.deepEqual(candidateNames, ["Run", "Run", "Run"]);
+  assert.deepEqual(candidateNames, ["Run", "Run"]);
   assert.equal(graph.stats().refCount, 0);
   assert.equal(graph.stats().pendingRefCount, 0);
   assert.equal(graph.stats().failedRefCount, 0);
   assert.equal(graph.stats().dynamicBoundaryCount, 1);
-  assert.equal(boundaries[0].candidateDetails.length, 3);
+  assert.equal(boundaries[0].candidateDetails.length, 2);
   await graph.resolvePending();
   assert.equal(graph.dynamicBoundaries([invoke.id], 10).length, 1);
   graph.close();
@@ -991,7 +991,35 @@ class Use { void invoke(Runner value) { value.run(); } }
   assert.equal(boundary.reason, "polymorphic_dispatch");
   assert.equal(boundary.target.hints?.receiverType, "Runner");
   assert.equal(boundary.target.hints?.dispatch, "virtual");
-  assert.equal(boundary.candidates.length, 2);
+  assert.equal(boundary.candidates.length, 1);
+  graph.close();
+});
+
+test("abstract interface targets remain dynamic without concrete implementations", async () => {
+  const file = { ...codeFile("AbstractDispatch.java"), format: "java" };
+  const source = {
+    kind: "text",
+    file,
+    text: `interface Runner { void run(); }
+class Use { void invoke(Runner value) { value.run(); } }
+`,
+  };
+  const input = await extractFileGraph(
+    source,
+    await new CodeExtractor().extract(source),
+  );
+  const invoke = input.nodes.find((node) => node.name === "invoke");
+  assert.ok(invoke);
+  const graph = new SqliteGraphStorage("", { inMemory: true });
+  graph.upsertFileGraph(file.id, input.nodes, input.edges, input.refs);
+  await graph.resolvePending();
+
+  assert.deepEqual(graph.callees(invoke.id, 1, 10), []);
+  const boundary = graph.dynamicBoundaries([invoke.id], 10)[0];
+  assert.ok(boundary);
+  assert.equal(boundary.reason, "polymorphic_dispatch");
+  assert.deepEqual(boundary.candidates, []);
+  assert.equal(boundary.candidatesTruncated, false);
   graph.close();
 });
 

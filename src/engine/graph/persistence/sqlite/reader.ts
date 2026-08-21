@@ -112,15 +112,16 @@ export class SqliteGraphReader {
       ...ids,
       limit,
     ).map((row): DynamicBoundary => {
-      const details = this.all<{
+      const candidateRows = this.all<{
         target_id: string;
         reason: "hierarchy" | "generic_bound" | "method_set";
         confidence: number;
       }>(
         `SELECT target_id,reason,confidence FROM edge_candidates
-         WHERE edge_id=? ORDER BY confidence DESC,target_id LIMIT 64`,
+         WHERE edge_id=? ORDER BY confidence DESC,target_id LIMIT 65`,
         row.id,
-      ).map((candidate) => ({
+      );
+      const details = candidateRows.slice(0, 64).map((candidate) => ({
         targetId: candidate.target_id,
         reason: candidate.reason,
         confidence: candidate.confidence,
@@ -137,6 +138,7 @@ export class SqliteGraphReader {
         },
         reason: row.reason,
         candidates: details.map((candidate) => candidate.targetId),
+        candidatesTruncated: candidateRows.length > 64,
         candidateDetails: details,
       };
     });
@@ -160,15 +162,17 @@ export class SqliteGraphReader {
           : undefined,
         ...resolutionHintsField(row.resolution_hints),
       } as DynamicBoundary["target"];
-      const candidates = hints?.receiverType
-        ? this.candidates.find({
+      const candidateRows = hints?.receiverType
+        ? this.candidates.findConcrete({
             sourceId: row.owner_id,
             sourceLanguage: row.source_language ?? undefined,
             typeNames: hints.candidateTypes ?? [hints.receiverType],
             memberName: target.member,
             callArity: hints.callArity,
+            limit: 65,
           })
         : [];
+      const candidates = candidateRows.slice(0, 64);
       return {
         sourceId: row.owner_id,
         target,
@@ -178,6 +182,7 @@ export class SqliteGraphReader {
             ? "polymorphic_dispatch"
             : "unknown_receiver_type",
         candidates,
+        candidatesTruncated: candidateRows.length > 64,
         candidateDetails: candidates.map((targetId) => ({
           targetId,
           reason: hints?.genericBounds?.length

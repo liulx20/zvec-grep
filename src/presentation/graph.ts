@@ -70,10 +70,13 @@ function exploreLines(result: ExploreOutput): string[] {
   }
 
   if ((result.dynamicBoundaries?.length ?? 0) > 0) {
-    lines.push("", "dynamic boundaries:");
+    lines.push(
+      "",
+      `dynamic boundaries:${result.dynamicBoundariesTruncated ? " (truncated)" : ""}`,
+    );
     for (const boundary of result.dynamicBoundaries ?? []) {
       lines.push(
-        `- ${shortName(result, boundary.sourceId)} -> ${boundary.target.raw} (${boundary.reason}${boundary.candidateDetails.length > 0 ? `; candidates=${boundary.candidateDetails.map((candidate) => `${shortName(result, candidate.targetId)}@${candidate.confidence.toFixed(2)}`).join(",")}` : ""})`,
+        `- ${shortName(result, boundary.sourceId)} -> ${boundary.target.raw} (${boundary.reason}${boundary.candidateDetails.length > 0 ? `; candidates=${boundary.candidateDetails.map((candidate) => `${shortName(result, candidate.targetId)}@${candidate.confidence.toFixed(2)}`).join(",")}${boundary.candidatesTruncated ? ",..." : ""}` : ""})`,
       );
     }
   }

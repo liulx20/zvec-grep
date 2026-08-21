@@ -93,10 +93,14 @@ export function exploreGraph(
     includeCallPaths: true,
   });
   const { nodes, edges, edgesTruncated, callPaths } = subgraph;
-  const dynamicBoundaries = graph.dynamicBoundaries?.(
+  const dynamicBoundaryLimit = Math.min(100, maxNodes);
+  const dynamicBoundaryRows = graph.dynamicBoundaries?.(
     nodes.map((node) => node.id),
-    Math.min(100, maxNodes),
+    dynamicBoundaryLimit + 1,
   ) ?? [];
+  const dynamicBoundaries = dynamicBoundaryRows.slice(0, dynamicBoundaryLimit);
+  const dynamicBoundariesTruncated =
+    dynamicBoundaryRows.length > dynamicBoundaryLimit;
   const blastRadius = collectBlastRadius(
     graph,
     storage,
@@ -146,6 +150,7 @@ export function exploreGraph(
       blastRadius,
       changeSurface,
       dynamicBoundaries,
+      dynamicBoundariesTruncated,
       files: [],
       emptyReason: "no_context",
     };
@@ -162,6 +167,7 @@ export function exploreGraph(
     blastRadius,
     changeSurface,
     dynamicBoundaries,
+    dynamicBoundariesTruncated,
     files,
   };
 }
@@ -185,9 +191,9 @@ export function exploreSubgraph(
     8,
   );
   const maxNodes = clampInt(options.maxNodes ?? DEFAULT_MAX_NODES, 16, 2_000);
-  const rootIds = [...new Set(options.seedIds)].filter((id) =>
-    Boolean(storage.getEntity(id)),
-  );
+  const rootIds = [...new Set(options.seedIds)]
+    .filter((id) => Boolean(storage.getEntity(id)))
+    .slice(0, maxNodes);
   if (rootIds.length === 0) {
     return emptySubgraph(true);
   }
@@ -589,6 +595,7 @@ function emptyResult(
     blastRadius: [],
     changeSurface: [],
     dynamicBoundaries: [],
+    dynamicBoundariesTruncated: false,
     files: [],
     emptyReason,
   };

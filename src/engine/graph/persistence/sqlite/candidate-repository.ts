@@ -9,13 +9,50 @@ export type SemanticCandidateQuery = {
   limit?: number;
 };
 
+export type SemanticCandidate = {
+  id: string;
+  containerKind: string;
+  abstractDispatch: boolean;
+  rtaActive: boolean;
+};
+
+export type SemanticCandidateResolution = {
+  candidates: string[];
+  abstractDispatch: boolean;
+  rtaActive: boolean;
+};
+
 /** Shared semantic-member lookup used by projection and read models. */
 export class SemanticCandidateRepository {
   constructor(private readonly database: SqliteGraphDatabase) {}
 
   find(query: SemanticCandidateQuery): string[] {
+    return this.findDetailed(query).map((candidate) => candidate.id);
+  }
+
+  findConcrete(query: SemanticCandidateQuery): string[] {
+    return this.resolve(query).candidates;
+  }
+
+  resolve(query: SemanticCandidateQuery): SemanticCandidateResolution {
+    const detailed = this.findDetailed(query);
+    return {
+      candidates: detailed
+      .filter((candidate) => !isAbstractContainerKind(candidate.containerKind))
+        .map((candidate) => candidate.id),
+      abstractDispatch: detailed.some((candidate) => candidate.abstractDispatch),
+      rtaActive: detailed.some((candidate) => candidate.rtaActive),
+    };
+  }
+
+  private findDetailed(query: SemanticCandidateQuery): SemanticCandidate[] {
     const policy = candidatePolicy(query.sourceLanguage);
-    return this.database.all<{ id: string }>(
+    return this.database.all<{
+      id: string;
+      container_kind: string;
+      abstract_dispatch: number;
+      rta_active: number;
+    }>(
       `WITH RECURSIVE visible(file_id) AS (
          SELECT file_id FROM symbols WHERE id=?
          UNION SELECT imports.dst_id FROM edges imports
@@ -66,14 +103,23 @@ export class SemanticCandidateRepository {
                         OR provided.arity=required.arity)
                )
            )
-       ), candidate_members(id,container_id) AS (
-         SELECT DISTINCT member.id,scope.id
+       ), candidate_members(id,container_id,container_kind) AS (
+         SELECT DISTINCT member.id,scope.id,scope_symbol.kind
          FROM candidate_containers scope
+         JOIN symbols scope_symbol ON scope_symbol.id=scope.id
          JOIN contains owned ON owned.parent_id=scope.id
          JOIN symbols member ON member.id=owned.child_id
          WHERE member.name=? AND (?<0 OR member.arity IS NULL OR member.arity=?)
        )
-       SELECT id FROM candidate_members
+       SELECT id,container_kind,
+         EXISTS(SELECT 1 FROM roots WHERE kind IN ('interface','trait'))
+           AS abstract_dispatch,
+         EXISTS(
+           SELECT 1 FROM candidate_members candidate
+           JOIN edges made ON made.dst_id=candidate.container_id
+           WHERE made.kind='INSTANTIATES' AND made.dst_is_file=0
+         ) AS rta_active
+       FROM candidate_members
        WHERE NOT EXISTS(
          SELECT 1 FROM candidate_members candidate
          JOIN edges made ON made.dst_id=candidate.container_id
@@ -95,8 +141,17 @@ export class SemanticCandidateRepository {
       query.callArity ?? -1,
       query.callArity ?? -1,
       query.limit ?? 64,
-    ).map((row) => row.id);
+    ).map((row) => ({
+      id: row.id,
+      containerKind: row.container_kind,
+      abstractDispatch: row.abstract_dispatch === 1,
+      rtaActive: row.rta_active === 1,
+    }));
   }
+}
+
+function isAbstractContainerKind(kind: string): boolean {
+  return kind === "interface" || kind === "trait";
 }
 
 function candidatePolicy(language?: string): {

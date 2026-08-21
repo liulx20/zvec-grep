@@ -1115,10 +1115,12 @@ async function exploreOpenWorkspaceIndex(
       },
       reason: boundary.reason,
       candidates: [...boundary.candidates],
+      candidatesTruncated: boundary.candidatesTruncated,
       candidateDetails: boundary.candidateDetails.map((candidate) => ({
         ...candidate,
       })),
     })),
+    dynamicBoundariesTruncated: result.dynamicBoundariesTruncated,
     files: result.files.map((bundle) => ({
       file: mapGraphFile(bundle.file),
       score: bundle.score,

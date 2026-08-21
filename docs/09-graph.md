@@ -553,10 +553,12 @@ type ExploreResult = {
   roots: ExploreNode[];
   nodes: ExploreNode[];
   edges: ExploreEdge[];
+  edgesTruncated: boolean;
   callPaths: ExploreCallPath[];
   blastRadius: ExploreBlastRadius[];
   changeSurface: ExploreChangeSurfaceRef[];
   dynamicBoundaries: DynamicBoundary[];
+  dynamicBoundariesTruncated: boolean;
   files: ExploreFileBundle[];
   emptyReason?: "graph_unavailable" | "no_seeds" | "no_context";
 };
@@ -582,7 +584,8 @@ type ExploreEdge = {
 
 `dynamicBoundaries` 不是另一种边。它记录子图节点仍未确定的 receiver 调用，例如动态对象、接口分派或
 无法确定接收者类型的 `obj.method()`，让 Agent 知道静态图在这里断开，而不是把“没有边”误读成
-“没有调用”。每个 boundary 同时返回预算内的 `candidates`。
+"没有调用"。每个 boundary 同时返回预算内的 `candidates`；单条 boundary 的
+`candidatesTruncated` 和结果级 `dynamicBoundariesTruncated` 会明确指出候选或边界列表是否被预算截断。
 
 结构化 target 的 `receiverType`、`candidateTypes`、`genericBounds` 和 `dispatch` 由语言 AST 提取：
 Go 支持方法 receiver、参数类型和类型参数 constraint；Rust 支持参数类型和 trait bound；Java 支持参数

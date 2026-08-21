@@ -97,6 +97,7 @@ export type ExploreResult = {
   blastRadius: ExploreBlastRadius[];
   changeSurface: ExploreChangeSurfaceRef[];
   dynamicBoundaries: DynamicBoundary[];
+  dynamicBoundariesTruncated: boolean;
   files: ExploreFileBundle[];
   emptyReason?: "graph_unavailable" | "no_seeds" | "no_context";
 };

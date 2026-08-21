@@ -175,6 +175,7 @@ test("qualified unresolved calls become explicit heuristic edges or dynamic boun
       },
       reason: "unknown_receiver_type",
       candidates: [],
+      candidatesTruncated: false,
       candidateDetails: [],
     },
   ]);

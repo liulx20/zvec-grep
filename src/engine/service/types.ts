@@ -237,12 +237,14 @@ export type ZvecGrepExploreResult = {
     };
     reason: "unknown_receiver_type" | "polymorphic_dispatch";
     candidates: string[];
+    candidatesTruncated: boolean;
     candidateDetails: {
       targetId: string;
       reason: "hierarchy" | "generic_bound" | "method_set";
       confidence: number;
     }[];
   }[];
+  dynamicBoundariesTruncated: boolean;
   files: ZvecGrepExploreFileBundle[];
   emptyReason?: "graph_unavailable" | "no_seeds" | "no_context";
 };
