@@ -10,6 +10,7 @@ import {
   withProgressHeartbeat,
 } from "../mcp/progress-heartbeat.js";
 import { EMBEDDING_ENVIRONMENT_META_KEY } from "../mcp/request-metadata.js";
+import { ZVEC_GREP_CLI_CONTRACT_ID } from "../mcp/cli-contract.js";
 
 type DaemonToolCallOptions = {
   onProgress?: (progress: Progress) => void;
@@ -28,6 +29,7 @@ export class DaemonClient {
       home?: string;
       tokenFile?: string;
       allowRemote?: boolean;
+      expectedServerVersion?: string;
     },
   ) {}
 
@@ -158,7 +160,13 @@ export class DaemonClient {
     );
     try {
       await client.connect(transport);
-      if (callOptions.toolContract) {
+      if (
+        callOptions.toolContract &&
+        !serverVersionMatchesBundledContract(
+          client.getServerVersion(),
+          this.options.expectedServerVersion,
+        )
+      ) {
         const listed = await client.listTools();
         const tool = listed.tools.find((candidate) => candidate.name === name);
         if (!toolSatisfiesContract(tool, callOptions.toolContract)) {
@@ -210,6 +218,18 @@ export class DaemonClient {
       await client.close().catch(() => undefined);
     }
   }
+}
+
+export function serverVersionMatchesBundledContract(
+  server: { name: string; version: string; title?: string } | undefined,
+  expectedVersion: string | undefined,
+): boolean {
+  return (
+    expectedVersion !== undefined &&
+    server?.name === "zvec-grep" &&
+    server.version === expectedVersion &&
+    server.title === ZVEC_GREP_CLI_CONTRACT_ID
+  );
 }
 
 export function toolSatisfiesContract(

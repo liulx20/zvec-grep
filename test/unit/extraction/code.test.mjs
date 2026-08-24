@@ -100,6 +100,128 @@ test("code extractor preserves TypeScript metadata, scope, and source ranges", a
   );
 });
 
+test("code extractor finds actions returned by an exported object factory", async () => {
+  const extractor = new CodeExtractor();
+  const fragments = await extractor.extract(
+    codeSource(
+      "typescript",
+      `export const useStore = create((set, get) => ({
+  value: 0,
+  fetchUser: async () => { get().reset(); },
+  reset: () => set({ value: 0 }),
+}));`,
+      "store.ts",
+    ),
+  );
+  const actions = fragments.filter(
+    (fragment) =>
+      fragment.metadata.kind === "code" &&
+      fragment.metadata.symbolType === "function",
+  );
+  assert.deepEqual(
+    actions.map((fragment) => fragment.metadata.symbolName).sort(),
+    ["fetchUser", "reset"],
+  );
+  assert.equal(
+    actions.every((fragment) => fragment.metadata.scope === "useStore"),
+    true,
+  );
+
+  const local = await extractor.extract(
+    codeSource(
+      "typescript",
+      "const local = create(() => ({ hidden: () => 1 }));",
+      "local.ts",
+    ),
+  );
+  assert.equal(
+    local.some(
+      (fragment) =>
+        fragment.metadata.kind === "code" &&
+        fragment.metadata.symbolName === "hidden",
+    ),
+    false,
+  );
+
+  const nested = await extractor.extract(
+    codeSource(
+      "typescript",
+      `export const useStore = defineStore({
+  getters: {
+    upperName: (state) => state.name.toUpperCase(),
+  },
+  actions: {
+    async fetchMenu() { return loadMenu(); },
+    reset: () => clearMenu(),
+  },
+});`,
+      "nested-store.ts",
+    ),
+  );
+  assert.deepEqual(
+    nested
+      .filter(
+        (fragment) =>
+          fragment.metadata.kind === "code" &&
+          fragment.metadata.symbolType === "function",
+      )
+      .map((fragment) => fragment.metadata.symbolName)
+      .sort(),
+    ["fetchMenu", "reset", "upperName"],
+  );
+
+  const exportedBindings = await extractor.extract(
+    codeSource(
+      "javascript",
+      `const mutations = { SET_TOKEN(state, token) { state.token = token; } };
+const actions = { login() { persistToken(); } };
+const unrelated = { hidden() {} };
+export default { namespaced: true, mutations, commands: actions };`,
+      "module.js",
+    ),
+  );
+  assert.deepEqual(
+    exportedBindings
+      .filter(
+        (fragment) =>
+          fragment.metadata.kind === "code" &&
+          fragment.metadata.symbolType === "function",
+      )
+      .map((fragment) => fragment.metadata.symbolName)
+      .sort(),
+    ["SET_TOKEN", "login"],
+  );
+
+  const setupStore = await extractor.extract(
+    codeSource(
+      "typescript",
+      `export const useChatStore = defineStore("chat", () => {
+  const list = reactive([]);
+  const getList = async () => fetchList();
+  function pushItem(item: string) { list.push(item); }
+  const hidden = () => false;
+  return { list, getList, pushItem };
+});`,
+      "setup-store.ts",
+    ),
+  );
+  const setupActions = setupStore.filter(
+    (fragment) =>
+      fragment.metadata.kind === "code" &&
+      fragment.metadata.symbolType === "function",
+  );
+  assert.deepEqual(
+    setupActions.map((fragment) => fragment.metadata.symbolName).sort(),
+    ["getList", "pushItem"],
+  );
+  assert.equal(
+    setupActions.every(
+      (fragment) => fragment.metadata.scope === "useChatStore",
+    ),
+    true,
+  );
+});
+
 test("code extractor preserves language-specific symbols and scopes", async () => {
   const extractor = new CodeExtractor();
   const c = await extractor.extract(
@@ -173,6 +295,73 @@ test("code extractor preserves language-specific symbols and scopes", async () =
     doc: null,
     modifiers: ["async", "static"],
   });
+});
+
+test("Python ABC, Protocol, and abstract methods retain abstract semantics", async () => {
+  const fragments = await new CodeExtractor().extract(
+    codeSource(
+      "python",
+      [
+        "from abc import ABC, abstractmethod",
+        "from typing import Protocol",
+        "class Driver(ABC):",
+        "    @abstractmethod",
+        "    def run(self) -> None: ...",
+        "    def stop(self) -> None:",
+        "        raise NotImplementedError",
+        "class Shape(Protocol):",
+        "    def area(self) -> float: ...",
+        "class MetaDriver(metaclass=ABCMeta):",
+        "    pass",
+      ].join("\n"),
+      "abstracts.py",
+    ),
+  );
+
+  assert.ok(
+    fragmentNamed(fragments, "Driver").metadata.modifiers.includes("abstract"),
+  );
+  assert.ok(
+    fragmentNamed(fragments, "run").metadata.modifiers.includes("abstract"),
+  );
+  assert.ok(
+    fragmentNamed(fragments, "stop").metadata.modifiers.includes("abstract"),
+  );
+  assert.ok(
+    fragmentNamed(fragments, "Shape").metadata.modifiers.includes("abstract"),
+  );
+  assert.ok(
+    fragmentNamed(fragments, "area").metadata.modifiers.includes("abstract"),
+  );
+  assert.ok(
+    fragmentNamed(fragments, "MetaDriver").metadata.modifiers.includes(
+      "abstract",
+    ),
+  );
+});
+
+test("C field-shaped API declarations with pointer parameters remain functions", async () => {
+  const fragments = await new CodeExtractor().extract(
+    codeSource(
+      "c",
+      [
+        "struct parser_recovery_scope {",
+        "  UV_EXTERN void uv_close(uv_handle_t* handle, uv_close_cb close_cb);",
+        "  void (*on_close)(int code);",
+        "};",
+      ].join("\n"),
+      "include/api.h",
+    ),
+  );
+
+  assert.equal(
+    fragmentNamed(fragments, "uv_close").metadata.symbolType,
+    "function",
+  );
+  assert.equal(
+    fragmentNamed(fragments, "on_close").metadata.symbolType,
+    "value",
+  );
 });
 
 test("large code entities emit searchable outlines and grouped source windows", async () => {
@@ -315,8 +504,10 @@ test("component script extraction remaps multiple blocks and preserves fallbacks
   );
   const [plain] = await extractor.extract(plainSource);
   assertSourceBackedFragment(plainSource, plain);
-  assert.equal(plain.metadata, undefined);
-  assert.equal(plain.content.text, "\n// no declarations\n");
+  assert.equal(plain.metadata?.kind, "code");
+  assert.equal(plain.metadata?.symbolType, "component");
+  assert.equal(plain.metadata?.symbolName, "plain");
+  assert.equal(plain.content.text, plainSource.text);
 
   const noScriptSource = codeSource(
     "svelte",
@@ -325,8 +516,21 @@ test("component script extraction remaps multiple blocks and preserves fallbacks
   );
   const [noScript] = await extractor.extract(noScriptSource);
   assertSourceBackedFragment(noScriptSource, noScript);
-  assert.equal(noScript.metadata, undefined);
+  assert.equal(noScript.metadata?.kind, "code");
+  assert.equal(noScript.metadata?.symbolType, "component");
+  assert.equal(noScript.metadata?.symbolName, "no-script");
   assert.equal(noScript.content.text, noScriptSource.text);
+
+  for (const format of ["vue", "svelte"]) {
+    const indexSource = codeSource(
+      format,
+      "<h1>Directory component</h1>",
+      `components/ArticleList/index.${format}`,
+    );
+    const [indexComponent] = await extractor.extract(indexSource);
+    assert.equal(indexComponent.metadata?.symbolType, "component");
+    assert.equal(indexComponent.metadata?.symbolName, "ArticleList");
+  }
 });
 
 test("code chunk boundaries never split Unicode surrogate pairs", async () => {

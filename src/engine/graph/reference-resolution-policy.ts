@@ -1,4 +1,9 @@
-import { bareName, isExternalRefName } from "./builtins.js";
+import {
+  bareName,
+  isExternalReceiverName,
+  isExternalReceiverType,
+  isExternalRefName,
+} from "./builtins.js";
 import type {
   ReferenceResolutionHints,
   ReferenceTarget,
@@ -40,13 +45,17 @@ export type ReferenceLookupPlan = {
   containerScope:
     | { kind: "none" }
     | { kind: "owner-hierarchy"; includeOwner: boolean }
+    | { kind: "owner-preferred" }
     | { kind: "named"; name: string };
 };
 
 export type LocalReferenceLookupPlan = Pick<
   ReferenceLookupPlan,
   "lookupName" | "containerScope"
->;
+> & {
+  /** Full language-level name, used before receiver/container fallback. */
+  qualifiedLookupName?: string;
+};
 
 /** Owns reference receiver, binding and scope semantics for every resolver. */
 export class ReferenceResolutionPolicy {
@@ -99,13 +108,19 @@ export class ReferenceResolutionPolicy {
     if (reference.receiver.kind === "qualified") {
       return {
         lookupName: reference.bareName,
+        qualifiedLookupName: reference.name,
         containerScope: {
           kind: "named",
           name: reference.hints?.receiverType ?? reference.receiver.name,
         },
       };
     }
-    return { lookupName: reference.name, containerScope: { kind: "none" } };
+    return {
+      lookupName: reference.name,
+      containerScope: ownerContainerName
+        ? { kind: "owner-preferred" }
+        : { kind: "none" },
+    };
   }
 
   createContext(
@@ -136,8 +151,15 @@ export class ReferenceResolutionPolicy {
     if (binding) {
       const receiverAccess = binding.kind === "receiver";
       return {
-        lookupName: receiverAccess ? reference.bareName : binding.importedName,
-        preferredFileIds: [binding.fileId],
+        lookupName: receiverAccess
+          ? reference.bareName
+          : binding.importedName === "*"
+            ? reference.name
+            : binding.importedName,
+        preferredFileIds: [
+          binding.fileId,
+          ...preferredFileIds.filter((fileId) => fileId !== binding.fileId),
+        ],
         allowBareFallback: false,
         containerScope:
           receiverAccess && binding.importedName !== "*"
@@ -160,9 +182,20 @@ export class ReferenceResolutionPolicy {
     }
     if (receiver.kind === "qualified") {
       return {
-        lookupName: reference.bareName,
+        // Preserve the full language-level identity, but do not degrade
+        // `client.create()` to a workspace-wide lookup for `create`: an
+        // untyped SDK/client receiver is not evidence that an unrelated local
+        // method is its target. NameIndex normalizes `::`/`.` spellings for
+        // real namespace/static members; imported namespaces use the binding
+        // branch above.
+        lookupName: reference.name,
         preferredFileIds: [owner.fileId, ...preferredFileIds],
-        allowBareFallback: false,
+        // `::` is also the canonical namespace/static separator in the
+        // persisted C++/Rust symbol identity. Permit its scoped member lookup;
+        // NameIndex still requires the named container and therefore cannot
+        // borrow an unrelated local method. Chained object receivers using
+        // `.`/`->` remain strict when their declared type is unknown.
+        allowBareFallback: reference.name.includes("::"),
         containerScope: {
           kind: "named",
           name: reference.hints?.receiverType ?? receiver.name,
@@ -173,12 +206,26 @@ export class ReferenceResolutionPolicy {
       lookupName: reference.name,
       preferredFileIds: [...preferredFileIds],
       allowBareFallback: true,
-      containerScope: { kind: "none" },
+      containerScope: owner.containerName
+        ? { kind: "owner-preferred" }
+        : { kind: "none" },
     };
   }
 
   isExternal(reference: AnalyzedReference): boolean {
     return isExternalRefName(reference.name, reference.language);
+  }
+
+  isExternalReceiver(reference: AnalyzedReference): boolean {
+    return (
+      reference.receiver.kind === "qualified" &&
+      ((typeof reference.hints?.receiverType === "string" &&
+        isExternalReceiverType(
+          reference.hints.receiverType,
+          reference.language,
+        )) ||
+        isExternalReceiverName(reference.receiver.name, reference.language))
+    );
   }
 }
 

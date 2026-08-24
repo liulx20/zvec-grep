@@ -51,8 +51,25 @@ export function contextText(result: ZvecGrepContextResult): string {
   if (result.relationships && result.relationships.length > 0) {
     lines.push("", "relationships:");
     for (const relation of result.relationships) {
+      const srcDetails = [relation.srcKind, relation.srcFile]
+        .filter(Boolean)
+        .join(", ");
+      const dstDetails = [relation.dstKind, relation.dstFile]
+        .filter(Boolean)
+        .join(", ");
+      const evidence = [
+        relation.rel && relation.rel.toUpperCase() !== relation.kind
+          ? `rel=${relation.rel}`
+          : undefined,
+        relation.count && relation.count > 1
+          ? `count=${relation.count}`
+          : undefined,
+        relation.provenance === "heuristic"
+          ? `heuristic confidence=${relation.confidence ?? "?"}`
+          : undefined,
+      ].filter(Boolean);
       lines.push(
-        `- ${relation.srcLabel} --${relation.kind}--> ${relation.dstLabel}`,
+        `- ${relation.srcLabel}${srcDetails ? ` (${srcDetails})` : ""} --${relation.kind}--> ${relation.dstLabel}${dstDetails ? ` (${dstDetails})` : ""}${evidence.length > 0 ? ` [${evidence.join(", ")}]` : ""}`,
       );
     }
   }

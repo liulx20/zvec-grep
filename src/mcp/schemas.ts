@@ -32,6 +32,7 @@ export const timeInputSchema = z
   .optional();
 export const codeSymbolTypeSchema = z.enum([
   "module",
+  "component",
   "class",
   "interface",
   "function",
@@ -147,7 +148,7 @@ const searchFields = {
     .describe("Prefer exact indexed symbols when query names a symbol."),
   symbolTypes: z
     .array(codeSymbolTypeSchema)
-    .max(6)
+    .max(7)
     .default([])
     .describe("Restrict indexed results to symbol types."),
   modifiedAfter: timeInputSchema.describe(
@@ -411,8 +412,24 @@ const searchResultSchema = z.object({
         dstId: z.string(),
         srcLabel: z.string(),
         dstLabel: z.string(),
-        kind: z.enum(["CALLS", "REFS", "INHERITS", "CONTAINS", "IMPORTS"]),
+        kind: z.enum([
+          "CALLS",
+          "REFS",
+          "INHERITS",
+          "CONTAINS",
+          "IMPORTS",
+          "INSTANTIATES",
+        ]),
         scope: z.enum(["symbol", "file"]),
+        srcKind: z.string().optional(),
+        dstKind: z.string().optional(),
+        srcFile: z.string().optional(),
+        dstFile: z.string().optional(),
+        rel: z.string().optional(),
+        count: z.number().int().positive().optional(),
+        provenance: z.enum(["static", "heuristic"]).optional(),
+        confidence: z.number().min(0).max(1).optional(),
+        evidence: z.string().optional(),
       }),
     )
     .optional(),
@@ -654,13 +671,21 @@ export const zvecGrepGraphNeighborhoodInputSchema = {
     .max(256)
     .optional()
     .describe("Disambiguate when multiple symbols match the query."),
+  file: z
+    .string()
+    .min(1)
+    .max(1024)
+    .optional()
+    .describe(
+      "Narrow same-named definitions to a relative or absolute source path.",
+    ),
   depth: z
     .number()
     .int()
     .positive()
     .max(10)
     .optional()
-    .describe("Traversal depth (default 1)."),
+    .describe("Traversal depth (default 1 for callers/callees, 2 for impact)."),
   limit: z
     .number()
     .int()

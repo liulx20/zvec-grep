@@ -52,6 +52,8 @@ export type ExploreCallPath = {
 export type ExploreImpactRef = {
   id: string;
   entity: StoredEntity | null;
+  /** Direct executable dependency on the root, rather than transitive impact. */
+  directCall?: boolean;
 };
 
 export type ExploreBlastRadius = {
@@ -66,6 +68,8 @@ export type ExploreChangeSurfaceRef = {
   rel: "type" | "return";
   entity: StoredEntity;
   rescued: boolean;
+  /** Reached through a root container's internal state/type holder. */
+  structural?: boolean;
 };
 
 export type ExploreFileBundle = {
@@ -73,6 +77,8 @@ export type ExploreFileBundle = {
   score: number;
   isCentral: boolean;
   isChangeSurface: boolean;
+  /** Compact explanation of why this file survived graph ranking. */
+  reasons: string[];
   symbols: ExploreSymbolSnippet[];
   /** Zvec-layer assembled text for this file (entity content, clustered). */
   text: string;
@@ -84,11 +90,15 @@ export type ExploreSymbolSnippet = {
   kind?: string;
   range: Range;
   content: string;
+  signature?: string;
 };
 
 export type ExploreResult = {
   available: boolean;
   query: string;
+  /** Exact query matched multiple independent owner-qualified symbols. */
+  ambiguous?: boolean;
+  seedCandidates?: ExploreNode[];
   roots: ExploreNode[];
   nodes: ExploreNode[];
   edges: ExploreEdge[];

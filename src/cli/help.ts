@@ -133,8 +133,10 @@ Result options:
   --preview <none|short|full>       Indexed preview size (default: none; --human: full)
   --debug                           Print diagnostics to stderr
   --trace                           Include per-hit indexed search trace
-  --refresh <background|wait|off>   Refresh policy (defaults: server=background, direct=off)
-                                    In direct mode, background warns and falls back to off
+  --refresh <background|check|wait|off>
+                                    Refresh policy (defaults: server=background, direct=check)
+                                    off reads the current snapshot without a freshness scan
+                                    In direct mode, background warns and falls back to check
   --mode <direct|server|auto>       Select indexed query transport (default: auto)
 
 Indexed results are shown by query group, preserving each group's own rank.
@@ -153,7 +155,7 @@ File filters:
   -T, --type-not <type>             Exclude a ripgrep file type; repeatable
   --modified-after <time>           Only files modified after a date or epoch milliseconds
   --modified-before <time>          Only files modified before a date or epoch milliseconds
-  --symbol-type <type>              module, class, interface, function, value, alias
+  --symbol-type <type>              module, component, class, interface, function, value, alias
   --prefer-symbol                   Prefer exact indexed symbols
 
 Managed --rg supports common ripgrep matching, context, engine, encoding,
@@ -196,8 +198,9 @@ Requires a built index (zg index). Neighbors are resolved by exact symbol name.
 Uses the nearest workspace index from the current directory.
 
 Options:
-  --depth <n>                       Traversal depth (default 1)
+  --depth <n>                       Traversal depth (default ${topic === "impact" ? 2 : 1})
   --limit <n>                       Max neighbors (default 20)
+  --file <relative-path>            Narrow same-named definitions by source file
   --seed-id <id>                    Disambiguate when multiple symbols match`;
     case "index":
       return `Usage:

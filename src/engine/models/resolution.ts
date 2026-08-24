@@ -5,7 +5,7 @@ export type ResolveEmbeddingReferenceOptions = {
   explicit?: string;
   existing?: string;
   globalDefault?: string;
-  environment?: NodeJS.ProcessEnv;
+  environment?: Readonly<Record<string, string | undefined>>;
   fallback?: string;
 };
 

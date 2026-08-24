@@ -4,8 +4,12 @@ import type { ResolutionEvidence } from "./types.js";
 export type NameEntry = {
   id: string;
   fileId: string;
+  filePath?: string;
   name: string;
+  qualifiedName?: string;
   kind: string;
+  isExported?: boolean;
+  signature?: string;
   containerName?: string;
   containerId?: string;
 };
@@ -37,9 +41,11 @@ export class NameIndex {
     for (const entry of entries) {
       this.removeId(entry.id);
       this.byId.set(entry.id, entry);
-      const list = this.byName.get(entry.name) ?? [];
-      list.push(entry);
-      this.byName.set(entry.name, list);
+      for (const key of entryLookupKeys(entry)) {
+        const list = this.byName.get(key) ?? [];
+        list.push(entry);
+        this.byName.set(key, list);
+      }
       const bare = bareName(entry.name);
       if (bare && bare !== entry.name) {
         const bareList = this.byName.get(bare) ?? [];
@@ -76,18 +82,50 @@ export class NameIndex {
     allowBareFallback = true,
     containerNames: readonly string[] = [],
     containerIds: readonly string[] = [],
+    allowedKinds: ReadonlySet<string> | undefined = undefined,
   ): NameLookupResult | null {
+    const exactCandidates = this.byName.get(refName);
     let candidates =
-      this.byName.get(refName) ??
+      exactCandidates ??
       (allowBareFallback ? this.byName.get(bareName(refName)) : undefined) ??
       [];
+    if (allowedKinds) {
+      candidates = candidates.filter((candidate) =>
+        allowedKinds.has(candidate.kind),
+      );
+    }
     if (containerNames.length > 0) {
       const containers = new Set(containerNames);
-      candidates = candidates.filter(
+      const scoped = candidates.filter(
         (candidate) =>
           candidate.containerName !== undefined &&
           containers.has(candidate.containerName),
       );
+      // A fully qualified symbol name already supplies equivalent scope
+      // evidence for languages where namespaces/modules are not graph nodes.
+      if (scoped.length === 1)
+        return { entry: scoped[0]!, evidence: "container_scope" };
+      if (scoped.length > 1) {
+        const preferred = new Set(preferredFileIds);
+        const visibleScoped = scoped.filter((candidate) =>
+          preferred.has(candidate.fileId),
+        );
+        if (visibleScoped.length === 1)
+          return { entry: visibleScoped[0]!, evidence: "preferred_file" };
+        const counterpart =
+          crossFileDeclarationDefinitionGroup(visibleScoped) ??
+          equivalentDeclarationGroup(visibleScoped);
+        return counterpart
+          ? { entry: counterpart, evidence: "container_scope" }
+          : null;
+      }
+      // Keep an unscoped exact hit only when the lookup itself carried a
+      // qualified identity (for example `ns::Type`). When the resolver asks
+      // for bare member `new` inside container `Cursor`, a same-file
+      // `Connection::new` is not an exact scoped match and must not leak
+      // through the later same-file fallback.
+      if (exactCandidates === undefined || bareName(refName) === refName)
+        candidates = [];
     }
     if (containerIds.length > 0) {
       for (const containerId of containerIds) {
@@ -107,15 +145,35 @@ export class NameIndex {
     if (sameFile.length === 1) {
       return { entry: sameFile[0]!, evidence: "same_file" };
     }
+    const sameFileLogical = equivalentDeclarationGroup(sameFile);
+    if (sameFileLogical) {
+      return { entry: sameFileLogical, evidence: "same_file" };
+    }
     if (preferredFileIds.length > 0) {
       const preferred = new Set(preferredFileIds);
       const imported = candidates.filter((c) => preferred.has(c.fileId));
       if (imported.length === 1) {
         return { entry: imported[0]!, evidence: "preferred_file" };
       }
+      const importedType = primaryTypeDeclaration(imported);
+      if (importedType) {
+        return { entry: importedType, evidence: "preferred_file" };
+      }
     }
-    if (candidates.length === 1) {
-      return { entry: candidates[0]!, evidence: "workspace_unique" };
+    // An unqualified cross-file reference may fall back to a unique global
+    // symbol, but never to a class member from an unrelated container. The
+    // latter caused calls such as Python packaging.Version() to bind to a C++
+    // NeugDB::Version method merely because it was unique in the workspace.
+    const workspaceGlobals = candidates.filter(
+      (candidate) => candidate.containerId === undefined,
+    );
+    if (workspaceGlobals.length === 1) {
+      return { entry: workspaceGlobals[0]!, evidence: "workspace_unique" };
+    }
+    const declarationDefinition =
+      crossFileDeclarationDefinitionGroup(workspaceGlobals);
+    if (declarationDefinition) {
+      return { entry: declarationDefinition, evidence: "workspace_unique" };
     }
     // Ambiguous across files: leave unresolved (failed).
     return null;
@@ -126,6 +184,44 @@ export class NameIndex {
     return [...(this.byName.get(name) ?? [])]
       .filter((entry) => allowed.has(entry.fileId))
       .sort((a, b) => a.id.localeCompare(b.id));
+  }
+
+  uniqueTopLevelCandidate(
+    name: string,
+    fileId: string,
+    allowedKinds?: ReadonlySet<string>,
+  ): NameEntry | null {
+    const candidates = (this.byName.get(name) ?? []).filter(
+      (entry) =>
+        entry.fileId === fileId &&
+        entry.containerId === undefined &&
+        (!allowedKinds || allowedKinds.has(entry.kind)),
+    );
+    if (candidates.length === 1) return candidates[0]!;
+    return equivalentDeclarationGroup(candidates) ?? null;
+  }
+
+  defaultExport(
+    fileId: string,
+    allowedKinds?: ReadonlySet<string>,
+  ): NameEntry | null {
+    const topLevel = [...this.byId.values()].filter(
+      (entry) =>
+        entry.fileId === fileId &&
+        entry.containerId === undefined &&
+        (!allowedKinds || allowedKinds.has(entry.kind)),
+    );
+    const components = topLevel.filter((entry) => entry.kind === "component");
+    if (components.length === 1) return components[0]!;
+    const exported = topLevel.filter((entry) => entry.isExported);
+    return exported.length === 1 ? exported[0]! : null;
+  }
+
+  has(name: string): boolean {
+    return (
+      (this.byName.get(name)?.length ?? 0) > 0 ||
+      (this.byName.get(bareName(name))?.length ?? 0) > 0
+    );
   }
 
   snapshot(): NameEntry[] {
@@ -143,7 +239,7 @@ export class NameIndex {
       return;
     }
     this.byId.delete(id);
-    for (const key of [existing.name, bareName(existing.name)]) {
+    for (const key of [...entryLookupKeys(existing), bareName(existing.name)]) {
       if (!key) {
         continue;
       }
@@ -159,4 +255,98 @@ export class NameIndex {
       }
     }
   }
+}
+
+const TYPE_KINDS = new Set([
+  "class",
+  "interface",
+  "trait",
+  "abstract_class",
+  "struct",
+  "enum",
+  "type",
+]);
+
+function primaryTypeDeclaration(
+  candidates: readonly NameEntry[],
+): NameEntry | undefined {
+  if (
+    candidates.length < 2 ||
+    !candidates.every((candidate) => TYPE_KINDS.has(candidate.kind))
+  )
+    return undefined;
+  // Rust models each impl block as a type-like container so its methods retain
+  // stable ownership. For a type import, however, those containers are not
+  // competing declarations: select the sole struct/enum/trait declaration.
+  const declarations = candidates.filter(
+    (candidate) => !/^\s*impl(?:\s|<)/.test(candidate.signature ?? ""),
+  );
+  return declarations.length === 1 ? declarations[0] : undefined;
+}
+
+function crossFileDeclarationDefinitionGroup(
+  candidates: readonly NameEntry[],
+): NameEntry | undefined {
+  if (candidates.length < 2) return undefined;
+  const first = candidates[0]!;
+  const identity = first.qualifiedName ?? first.name;
+  if (
+    !candidates.every(
+      (candidate) => (candidate.qualifiedName ?? candidate.name) === identity,
+    )
+  )
+    return undefined;
+  const declarations = candidates.filter((candidate) =>
+    isHeaderPath(candidate.filePath),
+  );
+  const definitions = candidates.filter(
+    (candidate) => candidate.filePath && !isHeaderPath(candidate.filePath),
+  );
+  if (declarations.length === 1 && definitions.length === 1)
+    return definitions[0];
+  if (!first.signature) return undefined;
+  // Multiple overloads may share one qualified name. Only collapse that
+  // larger group when every declaration and definition has the same stored
+  // signature; otherwise ambiguity is real.
+  return declarations.length > 0 &&
+    definitions.length === 1 &&
+    candidates.every((candidate) => candidate.signature === first.signature)
+    ? definitions[0]
+    : undefined;
+}
+
+function isHeaderPath(path: string | undefined): boolean {
+  return Boolean(path && /\.(?:h|hh|hpp|hxx)$/i.test(path));
+}
+
+function equivalentDeclarationGroup(
+  candidates: readonly NameEntry[],
+): NameEntry | undefined {
+  if (candidates.length < 2) return undefined;
+  const first = candidates[0]!;
+  if (!first.signature) return undefined;
+  const identity = first.qualifiedName ?? first.name;
+  if (
+    !candidates.every(
+      (candidate) =>
+        (candidate.qualifiedName ?? candidate.name) === identity &&
+        candidate.signature === first.signature,
+    )
+  )
+    return undefined;
+  // Insertion follows source order. A C-family forward declaration precedes
+  // its body-bearing definition, so the last equivalent symbol is preferred.
+  return candidates.at(-1);
+}
+
+function entryLookupKeys(entry: NameEntry): string[] {
+  return [
+    ...new Set(
+      [
+        entry.name,
+        entry.qualifiedName,
+        entry.qualifiedName?.replaceAll("::", "."),
+      ].filter((value): value is string => Boolean(value)),
+    ),
+  ];
 }

@@ -26,6 +26,7 @@ export type {
   ZvecGrepExploreResult,
   ZvecGrepGraphNeighborhoodOptions,
   ZvecGrepGraphNeighborhoodResult,
+  ZvecGrepGraphNeighborhoodGroup,
   ZvecGrepGraphDirection,
   ZvecGrepGraphEdge,
   ZvecGrepGraphEdgeKind,

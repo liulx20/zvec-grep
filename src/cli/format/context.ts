@@ -203,13 +203,32 @@ function agentContextLines(
   if (result.relationships && result.relationships.length > 0) {
     lines.push("", "relationships:");
     for (const relation of result.relationships) {
-      lines.push(
-        `- ${relation.srcLabel} --${relation.kind}--> ${relation.dstLabel}`,
-      );
+      lines.push(`- ${formatContextRelationship(relation)}`);
     }
   }
 
   return lines;
+}
+
+function formatContextRelationship(
+  relation: NonNullable<ZvecGrepContextResult["relationships"]>[number],
+): string {
+  const endpoint = (label: string, kind?: string, file?: string): string => {
+    const details = [kind, file].filter(Boolean).join(", ");
+    return details ? `${label} (${details})` : label;
+  };
+  const evidence = [
+    relation.rel && relation.rel.toUpperCase() !== relation.kind
+      ? `rel=${relation.rel}`
+      : undefined,
+    relation.count && relation.count > 1
+      ? `count=${relation.count}`
+      : undefined,
+    relation.provenance === "heuristic"
+      ? `heuristic confidence=${relation.confidence ?? "?"}`
+      : undefined,
+  ].filter(Boolean);
+  return `${endpoint(relation.srcLabel, relation.srcKind, relation.srcFile)} --${relation.kind}--> ${endpoint(relation.dstLabel, relation.dstKind, relation.dstFile)}${evidence.length > 0 ? ` [${evidence.join(", ")}]` : ""}`;
 }
 
 function agentRankedItemHeader(

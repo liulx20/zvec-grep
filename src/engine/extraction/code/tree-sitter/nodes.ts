@@ -27,7 +27,10 @@ export function findIdentifierLeaf(node: TSNode): TSNode | null {
     }
 
     if (wrappers.has(current.type)) {
-      current = current.childForFieldName("declarator");
+      current =
+        current.childForFieldName("declarator") ??
+        current.namedChildren[0] ??
+        null;
       continue;
     }
 

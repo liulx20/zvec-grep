@@ -53,6 +53,7 @@ export type {
   EnrichedSymRef,
   GraphNeighborhoodOptions,
   GraphNeighborhoodResult,
+  GraphNeighborhoodGroup,
   GraphQueryDirection,
   GraphQueryStorage,
   GraphSeedMatch,

@@ -1,6 +1,8 @@
 import { makeRefId } from "../../ref-id.js";
 import type { LocalEdge, RawRef, SymNode } from "../../types.js";
 import type { SqliteGraphDatabase } from "./database.js";
+import { FUNCTION_POINTER_ARRAY_CONTAINER } from "../../../reference-target.js";
+import type { FileInfo } from "../../../types.js";
 
 type StoredEdgeFact = {
   id: string;
@@ -28,6 +30,11 @@ type DispatchDependencyTypes = {
   names: string[];
 };
 
+type FunctionPointerRegistrationKey = {
+  containerType: string;
+  field: string;
+};
+
 /** File-scoped graph mutations and resolved-edge invalidation. */
 export class SqliteGraphWriter {
   constructor(private readonly database: SqliteGraphDatabase) {}
@@ -52,10 +59,89 @@ export class SqliteGraphWriter {
     nodes: readonly SymNode[],
     edges: readonly LocalEdge[],
     refs: readonly RawRef[],
+    file?: FileInfo,
   ): void {
     this.database.assertWritable();
-    const oldIds = this.symbolIdsForFile(fileId);
-    const oldNames = this.symbolNamesForFile(fileId);
+    const oldIds = this.database.isBulkLoad()
+      ? []
+      : this.symbolIdsForFile(fileId);
+    const oldNames = this.database.isBulkLoad()
+      ? []
+      : this.symbolNamesForFile(fileId);
+    const affected =
+      !this.database.isBulkLoad() && this.database.hasResolvedProjections()
+        ? this.affectedProjectionIds(fileId, oldNames, nodes, edges, refs)
+        : [];
+    this.database.transaction(() => {
+      if (!this.database.isBulkLoad()) {
+        this.restoreEdgesToUnresolved(affected);
+        this.deleteOwnedFacts(fileId, oldIds);
+      }
+      this.database
+        .prepare(
+          `INSERT INTO files(
+             id,absolute_path,relative_path,root_path,size_bytes,
+             last_modified_time,kind,format
+           ) VALUES(?,?,?,?,?,?,?,?)
+           ON CONFLICT(id) DO UPDATE SET
+             absolute_path=excluded.absolute_path,
+             relative_path=excluded.relative_path,
+             root_path=excluded.root_path,
+             size_bytes=excluded.size_bytes,
+             last_modified_time=excluded.last_modified_time,
+             kind=excluded.kind,
+             format=excluded.format`,
+        )
+        .run(
+          fileId,
+          file?.absolutePath ?? null,
+          file?.relativePath ?? null,
+          file?.rootPath ?? null,
+          file?.sizeBytes ?? null,
+          file?.lastModifiedTime ?? null,
+          file?.kind ?? null,
+          file?.format ?? null,
+        );
+      if (!this.database.isBulkLoad()) {
+        this.database
+          .prepare("DELETE FROM symbols WHERE file_id=?")
+          .run(fileId);
+      }
+      const insert = this.database.prepare(
+        `INSERT INTO symbols(
+           id,file_id,name,qualified_name,kind,is_exported,signature,arity,
+           return_type,range_json,scope,node_type,modifiers_json
+         ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      );
+      for (const node of nodes) {
+        insert.run(
+          node.id,
+          fileId,
+          node.name ?? null,
+          node.qualifiedName ?? node.name ?? null,
+          node.kind,
+          node.is_exported ? 1 : 0,
+          node.signature ?? null,
+          node.arity ?? null,
+          node.returnType ?? null,
+          node.range ? JSON.stringify(node.range) : null,
+          node.scope ?? null,
+          node.nodeType ?? null,
+          node.modifiers ? JSON.stringify(node.modifiers) : null,
+        );
+      }
+      for (const edge of edges) this.insertLocalEdge(edge);
+      for (const ref of refs) this.insertRef(ref, fileId);
+    });
+  }
+
+  private affectedProjectionIds(
+    fileId: string,
+    oldNames: readonly string[],
+    nodes: readonly SymNode[],
+    edges: readonly LocalEdge[],
+    refs: readonly RawRef[],
+  ): string[] {
     const changedInstantiationTypes = this.changedInstantiationTypes(
       fileId,
       nodes,
@@ -70,31 +156,18 @@ export class SqliteGraphWriter {
       ...this.changedSemanticNames(nodes, edges, refs),
     ]);
     affected.push(
+      ...this.affectedFunctionPointerProjectionIds(
+        [
+          ...this.functionPointerRegistrationKeysForFile(fileId),
+          ...this.functionPointerRegistrationKeysForRefs(refs),
+        ],
+        fileId,
+      ),
+    );
+    affected.push(
       ...this.affectedInstantiationProjectionIds(affectedDispatchTypes),
     );
-    this.database.transaction(() => {
-      this.restoreEdgesToUnresolved(affected);
-      this.deleteOwnedFacts(fileId, oldIds);
-      this.db.prepare("INSERT OR IGNORE INTO files(id) VALUES(?)").run(fileId);
-      this.db.prepare("DELETE FROM symbols WHERE file_id=?").run(fileId);
-      const insert = this.db.prepare(
-        "INSERT INTO symbols(id,file_id,name,kind,is_exported,signature,arity,return_type) VALUES(?,?,?,?,?,?,?,?)",
-      );
-      for (const node of nodes) {
-        insert.run(
-          node.id,
-          fileId,
-          node.name ?? null,
-          node.kind,
-          node.is_exported ? 1 : 0,
-          node.signature ?? null,
-          node.arity ?? null,
-          node.returnType ?? null,
-        );
-      }
-      for (const edge of edges) this.insertLocalEdge(edge);
-      for (const ref of refs) this.insertRef(ref, fileId);
-    });
+    return affected;
   }
 
   deleteFileGraph(fileId: string): void {
@@ -114,17 +187,23 @@ export class SqliteGraphWriter {
       this.symbolNamesForFile(fileId),
     );
     affected.push(
+      ...this.affectedFunctionPointerProjectionIds(
+        this.functionPointerRegistrationKeysForFile(fileId),
+        fileId,
+      ),
+    );
+    affected.push(
       ...this.affectedInstantiationProjectionIds(affectedDispatchTypes),
     );
     this.database.transaction(() => {
       this.restoreEdgesToUnresolved(affected);
       this.deleteOwnedFacts(fileId, oldIds);
-      this.db.prepare("DELETE FROM files WHERE id=?").run(fileId);
+      this.database.prepare("DELETE FROM files WHERE id=?").run(fileId);
     });
   }
 
   protected insertRef(ref: RawRef, fallbackOwner: string): void {
-    this.db
+    this.database
       .prepare(
         `INSERT OR REPLACE INTO unresolved_refs(
          id,owner_id,owner_is_file,ref_name,ref_kind,member_name,line,
@@ -140,22 +219,24 @@ export class SqliteGraphWriter {
         ref.ref_kind,
         ref.type === "symbol" ? ref.target.member : null,
         ref.line,
-        ref.type === "symbol" || ref.type === "import_binding"
-          ? (ref.source_language ?? null)
-          : null,
+        ref.source_language ?? null,
         ref.type === "import_binding" ? ref.imported_name : null,
         ref.type === "import_binding" ? ref.local_name : null,
         ref.type === "symbol" ? (ref.target.receiver?.kind ?? null) : null,
         ref.type === "symbol" ? (ref.target.receiver?.name ?? null) : null,
         ref.type === "symbol" && ref.target.hints
           ? JSON.stringify(ref.target.hints)
-          : null,
+          : ref.type !== "symbol" && ref.rust_inline_module_depth
+            ? JSON.stringify({
+                rustInlineModuleDepth: ref.rust_inline_module_depth,
+              })
+            : null,
       );
   }
 
   private insertLocalEdge(edge: LocalEdge): void {
     if (edge.kind === "CONTAINS") {
-      this.db
+      this.database
         .prepare(
           "INSERT OR REPLACE INTO contains(parent_id,child_id) VALUES(?,?)",
         )
@@ -170,7 +251,7 @@ export class SqliteGraphWriter {
         edge.kind === "INSTANTIATES" ? "new" : edge.rel,
         edge.first_line,
       )}`;
-    this.db
+    this.database
       .prepare(
         `INSERT OR REPLACE INTO edges(
          id,src_id,dst_id,src_is_file,dst_is_file,kind,rel,count,first_line,
@@ -204,7 +285,17 @@ export class SqliteGraphWriter {
   ): string[] {
     const names = JSON.stringify([...new Set(changedNames)]);
     return this.all<{ id: string }>(
-      `SELECT DISTINCT edge.id FROM edges edge
+      `WITH RECURSIVE affected_importers(file_id) AS (
+         SELECT ?
+         UNION
+         SELECT imported_file.src_id FROM edges imported_file
+         JOIN affected_importers imported
+           ON imported.file_id=imported_file.dst_id
+         WHERE imported_file.kind='IMPORTS'
+           AND imported_file.src_is_file=1
+           AND imported_file.dst_is_file=1
+       )
+       SELECT DISTINCT edge.id FROM edges edge
        LEFT JOIN symbols source ON source.id=edge.src_id AND edge.src_is_file=0
        LEFT JOIN symbols target ON target.id=edge.dst_id AND edge.dst_is_file=0
        WHERE edge.kind<>'INSTANTIATES' AND (
@@ -219,14 +310,7 @@ export class SqliteGraphWriter {
            OR (edge.evidence='preferred_file' AND (
              edge.member_name IN (SELECT value FROM json_each(?))
              OR edge.ref_name IN (SELECT value FROM json_each(?))
-           ) AND EXISTS(
-             SELECT 1 FROM edges imported_file
-             WHERE imported_file.kind='IMPORTS'
-               AND imported_file.src_is_file=1
-               AND imported_file.dst_is_file=1
-               AND imported_file.src_id=source.file_id
-               AND imported_file.dst_id=?
-           ))
+           ) AND source.file_id IN (SELECT file_id FROM affected_importers))
            OR json_extract(edge.resolution_hints,'$.receiverType')
                 IN (SELECT value FROM json_each(?))
            OR EXISTS(
@@ -242,12 +326,17 @@ export class SqliteGraphWriter {
        SELECT DISTINCT unresolved.id FROM unresolved_refs unresolved
        LEFT JOIN edge_candidates candidate ON candidate.edge_id=unresolved.id
        LEFT JOIN symbols target ON target.id=candidate.target_id
+       LEFT JOIN symbols unresolved_source
+         ON unresolved_source.id=unresolved.owner_id AND unresolved.owner_is_file=0
        LEFT JOIN contains ownership ON ownership.child_id=candidate.target_id
        LEFT JOIN symbols container ON container.id=ownership.parent_id
        WHERE target.file_id=? OR (?<>'[]' AND (
          container.name IN (SELECT value FROM json_each(?))
-         OR unresolved.member_name IN (SELECT value FROM json_each(?))
-         OR unresolved.ref_name IN (SELECT value FROM json_each(?))
+         OR ((unresolved.member_name IN (SELECT value FROM json_each(?))
+              OR unresolved.ref_name IN (SELECT value FROM json_each(?)))
+             AND unresolved_source.file_id IN (
+               SELECT file_id FROM affected_importers
+             ))
          OR json_extract(unresolved.resolution_hints,'$.receiverType')
               IN (SELECT value FROM json_each(?))
          OR EXISTS(
@@ -262,12 +351,12 @@ export class SqliteGraphWriter {
       fileId,
       fileId,
       fileId,
-      names,
-      names,
-      names,
-      names,
-      names,
       fileId,
+      names,
+      names,
+      names,
+      names,
+      names,
       names,
       names,
       fileId,
@@ -332,6 +421,89 @@ export class SqliteGraphWriter {
       names,
       names,
     ).map((row) => row.id);
+  }
+
+  /**
+   * Function-pointer dispatch depends on an exact `(container type, field)`
+   * registration slot. Requeue only projections for slots whose registration
+   * facts were replaced; changing an unrelated handler or field must not fan
+   * out to every indirect call in the workspace.
+   */
+  private affectedFunctionPointerProjectionIds(
+    keys: readonly FunctionPointerRegistrationKey[],
+    changedFileId: string,
+  ): string[] {
+    const unique = [
+      ...new Map(
+        keys.map((key) => [`${key.containerType}\0${key.field}`, key]),
+      ).values(),
+    ];
+    if (unique.length === 0) return [];
+    const encoded = JSON.stringify(unique);
+    return this.all<{ id: string }>(
+      `WITH changed AS (
+         SELECT json_extract(value,'$.containerType') AS container_type,
+                json_extract(value,'$.field') AS field
+         FROM json_each(?)
+       ), projections AS (
+         SELECT id,owner_id,member_name,receiver_name,resolution_hints
+         FROM unresolved_refs
+         WHERE status='dynamic'
+         UNION ALL
+         SELECT id,src_id,member_name,receiver_name,resolution_hints FROM edges
+         WHERE kind='CALLS' AND provenance='heuristic'
+       )
+       SELECT DISTINCT projection.id
+       FROM projections projection
+       JOIN symbols owner ON owner.id=projection.owner_id
+       JOIN changed slot ON (
+         (slot.container_type='${FUNCTION_POINTER_ARRAY_CONTAINER}'
+          AND projection.receiver_name=slot.field
+          AND owner.file_id=?)
+         OR slot.field=projection.member_name
+       )
+       WHERE (slot.container_type='${FUNCTION_POINTER_ARRAY_CONTAINER}'
+              AND projection.receiver_name=slot.field)
+          OR json_extract(projection.resolution_hints,'$.receiverType')
+               =slot.container_type
+          OR EXISTS(
+            SELECT 1 FROM json_each(COALESCE(
+              json_extract(projection.resolution_hints,'$.candidateTypes'),'[]'
+            )) candidate_type
+            WHERE candidate_type.value=slot.container_type
+          )`,
+      encoded,
+      changedFileId,
+    ).map((row) => row.id);
+  }
+
+  private functionPointerRegistrationKeysForFile(
+    fileId: string,
+  ): FunctionPointerRegistrationKey[] {
+    return this.all<FunctionPointerRegistrationKey>(
+      `SELECT DISTINCT
+         json_extract(edge.resolution_hints,
+                      '$.functionPointerRegistration.containerType')
+           AS containerType,
+         json_extract(edge.resolution_hints,
+                      '$.functionPointerRegistration.field') AS field
+       FROM edges edge
+       JOIN symbols source ON source.id=edge.src_id AND edge.src_is_file=0
+       WHERE source.file_id=?
+         AND json_type(edge.resolution_hints,
+                       '$.functionPointerRegistration')='object'`,
+      fileId,
+    );
+  }
+
+  private functionPointerRegistrationKeysForRefs(
+    refs: readonly RawRef[],
+  ): FunctionPointerRegistrationKey[] {
+    return refs.flatMap((ref) => {
+      if (ref.type !== "symbol") return [];
+      const registration = ref.target.hints?.functionPointerRegistration;
+      return registration ? [registration] : [];
+    });
   }
 
   /** Include every nominal base/interface whose dispatch can depend on RTA. */
@@ -457,7 +629,7 @@ export class SqliteGraphWriter {
        FROM edges WHERE id IN(SELECT value FROM json_each(?))`,
       ids,
     );
-    const insert = this.db.prepare(
+    const insert = this.database.prepare(
       `INSERT OR REPLACE INTO unresolved_refs(
          id,owner_id,owner_is_file,ref_name,ref_kind,member_name,line,
          source_language,imported_name,local_name,receiver_kind,receiver_name,
@@ -480,17 +652,17 @@ export class SqliteGraphWriter {
         fact.receiver_name,
         fact.resolution_hints,
       );
-      this.db
+      this.database
         .prepare("DELETE FROM edges WHERE id IN (?,?)")
         .run(fact.id, `${fact.id}:instantiates`);
     }
-    this.db
+    this.database
       .prepare(
         `UPDATE unresolved_refs SET status='pending',last_attempt=0,dynamic_reason=NULL
        WHERE id IN(SELECT value FROM json_each(?))`,
       )
       .run(ids);
-    this.db
+    this.database
       .prepare(
         "DELETE FROM edge_candidates WHERE edge_id IN(SELECT value FROM json_each(?))",
       )
@@ -498,22 +670,22 @@ export class SqliteGraphWriter {
   }
 
   private deleteOwnedFacts(fileId: string, symbolIds: readonly string[]): void {
-    this.db
+    this.database
       .prepare(
         "DELETE FROM unresolved_refs WHERE owner_is_file=1 AND owner_id=?",
       )
       .run(fileId);
-    this.db
+    this.database
       .prepare("DELETE FROM edges WHERE src_is_file=1 AND src_id=?")
       .run(fileId);
     if (symbolIds.length === 0) return;
     const ids = JSON.stringify(symbolIds);
-    this.db
+    this.database
       .prepare(
         "DELETE FROM unresolved_refs WHERE owner_is_file=0 AND owner_id IN(SELECT value FROM json_each(?))",
       )
       .run(ids);
-    this.db
+    this.database
       .prepare(
         "DELETE FROM edges WHERE src_is_file=0 AND src_id IN(SELECT value FROM json_each(?))",
       )

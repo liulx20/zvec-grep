@@ -5,6 +5,21 @@ import {
 } from "../reference-target.js";
 import { makeRefId } from "./ref-id.js";
 import type { LocalEdge, RawRef, SymNode } from "./types.js";
+import { extractCallableReturnType } from "../extraction/index.js";
+
+const SCOPE_CONTAINER_KINDS: ReadonlySet<string> = new Set([
+  "class",
+  "abstract_class",
+  "interface",
+  "struct",
+  "trait",
+  "protocol",
+  "module",
+  "namespace",
+  "enum",
+  "union",
+  "component",
+]);
 
 export type FileGraphInput = {
   nodes: SymNode[];
@@ -23,6 +38,7 @@ export function fileGraphFromFragments(
     parentStartOffset: number;
     childStartOffset: number;
   }[] = [],
+  sourceFormat?: string,
 ): FileGraphInput {
   const publicFragments = uniquePublicCodeFragments(fragments);
   const nodes: SymNode[] = publicFragments.map((fragment) => {
@@ -37,7 +53,11 @@ export function fileGraphFromFragments(
       (metadata.nodeType === "abstract_class_declaration" ||
         metadata.modifiers.includes("abstract"))
         ? "abstract_class"
-        : baseKind;
+        : metadata?.kind === "code" &&
+            metadata.modifiers.includes("abstract") &&
+            baseKind === "function"
+          ? "abstract_method"
+          : baseKind;
     const name =
       metadata?.kind === "code"
         ? metadata.symbolName
@@ -48,18 +68,38 @@ export function fileGraphFromFragments(
       metadata?.kind === "code"
         ? metadata.modifiers.includes("exported")
         : false;
+    const scope =
+      metadata?.kind === "code" ? metadata.scope?.trim() : undefined;
+    const qualifiedName = name
+      ? scope
+        ? `${scope}::${name}`
+        : name
+      : undefined;
     return {
       id: publicEntityId(fragment),
       kind,
       is_exported: isExported,
       name: name ?? undefined,
+      qualifiedName,
+      range: fragment.range,
+      ...(metadata?.kind === "code"
+        ? {
+            scope: metadata.scope ?? undefined,
+            nodeType: metadata.nodeType ?? undefined,
+            modifiers: metadata.modifiers,
+          }
+        : {}),
       ...(metadata?.kind === "code" && metadata.signature
         ? {
             signature: metadata.signature,
             ...(metadata.arity === null || metadata.arity === undefined
               ? {}
               : { arity: metadata.arity }),
-            returnType: signatureReturnType(metadata.signature),
+            returnType: extractCallableReturnType(
+              metadata.signature,
+              metadata.symbolName ?? undefined,
+              sourceFormat,
+            ),
           }
         : {}),
     };
@@ -67,7 +107,7 @@ export function fileGraphFromFragments(
 
   const byName = new Map<string, string[]>();
   for (const node of nodes) {
-    if (!node.name) {
+    if (!node.name || !SCOPE_CONTAINER_KINDS.has(node.kind)) {
       continue;
     }
     const list = byName.get(node.name) ?? [];
@@ -163,13 +203,6 @@ function containsEdge(
   };
 }
 
-function signatureReturnType(signature: string): string | undefined {
-  const match = signature.match(
-    /\)\s*(?::|->)?\s*([A-Za-z_][^\s{]*)\s*(?:\{|$)/,
-  );
-  return match?.[1];
-}
-
 /** Test / extractor helper for pending cross-file refs. */
 export function rawRef(
   input:
@@ -189,6 +222,8 @@ export function rawRef(
         refName: string;
         line: number;
         occurrence?: number;
+        sourceLanguage?: string;
+        rustInlineModuleDepth?: number;
       }
     | {
         type: "import_binding";
@@ -199,6 +234,7 @@ export function rawRef(
         importedName: string;
         localName: string;
         sourceLanguage: string;
+        rustInlineModuleDepth?: number;
       },
 ): RawRef {
   const refKind =
@@ -226,9 +262,16 @@ export function rawRef(
       imported_name: input.importedName,
       local_name: input.localName,
       source_language: input.sourceLanguage,
+      rust_inline_module_depth: input.rustInlineModuleDepth,
     };
   if (input.type === "import")
-    return { ...base, type: "import", ref_kind: "import" };
+    return {
+      ...base,
+      type: "import",
+      ref_kind: "import",
+      source_language: input.sourceLanguage,
+      rust_inline_module_depth: input.rustInlineModuleDepth,
+    };
   return {
     ...base,
     type: "symbol",

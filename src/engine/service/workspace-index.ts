@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+
 import {
   workspaceIndexDetail,
   detail,
@@ -5,14 +7,9 @@ import {
   errorDetails,
 } from "../errors.js";
 import type { EmbeddingModel } from "../models/index.js";
-import {
-  getWorkspaceIndexStatus,
-  indexWorkspace,
-  indexWorkspacePaths,
-} from "../pipeline/indexing/index.js";
 import { searchWorkspaceIndex } from "../pipeline/search/index.js";
-import type { GraphReader, GraphStorage } from "../graph/index.js";
-import { openGraphStorage } from "../graph/index.js";
+import type { GraphReader, GraphStorage } from "../graph/public-types.js";
+import { openGraphStorage } from "../graph/open.js";
 import {
   createWorkspaceIndexStorage,
   resolveWorkspaceIndexLayout,
@@ -20,12 +17,17 @@ import {
   type StorageSearchHit,
   type WorkspaceIndexStorage,
 } from "../storage/index.js";
+import {
+  matchesExactSymbolQuery,
+  symbolLookupLeaf,
+} from "../graph/symbol-lookup.js";
 import type {
   WorkspaceIndexEmbeddingSchema,
   WorkspaceIndexStatus,
   WorkspaceIndexInfo,
   IndexOptions,
   IndexResult,
+  FileInfo,
   SearchPlan,
   SearchPlanResult,
 } from "../types.js";
@@ -82,7 +84,7 @@ export class WorkspaceIndex {
     return this.info.name;
   }
 
-  index(options: IndexOptions = {}): Promise<IndexResult> {
+  async index(options: IndexOptions = {}): Promise<IndexResult> {
     if (this.storage.readOnly) {
       throw new EngineError("Cannot update a read-only workspace index", {
         code: "ZVEC_GREP.ENGINE.WORKSPACE_INDEX.READ_ONLY",
@@ -101,12 +103,16 @@ export class WorkspaceIndex {
       onProgress: options.onProgress,
       signal: options.signal,
     };
+    const { indexWorkspace, indexWorkspacePaths } =
+      await import("../pipeline/indexing/index.js");
     return options.changedPaths && options.changedPaths.length > 0
       ? indexWorkspacePaths(context, options.changedPaths)
       : indexWorkspace(context);
   }
 
-  status(): Promise<WorkspaceIndexStatus> {
+  async status(): Promise<WorkspaceIndexStatus> {
+    const { getWorkspaceIndexStatus } =
+      await import("../pipeline/indexing/status.js");
     return getWorkspaceIndexStatus(this.info, this.storage.listFiles());
   }
 
@@ -133,11 +139,31 @@ export class WorkspaceIndex {
   findSymbolsByName(name: string, limit = 20) {
     const trimmed = name.trim();
     if (!trimmed || limit <= 0) return [];
-    return uniqueStoredEntities(
-      this.storage.searchFts(trimmed, limit, { symbolNames: [trimmed] }),
-      this.storage,
-      false,
+    const leaf = symbolLookupLeaf(trimmed);
+    const candidates = this.storage.findSymbolsByNames
+      ? this.storage.findSymbolsByNames([leaf], Math.max(limit * 4, 100))
+      : this.storage.searchFts(leaf, Math.max(limit * 4, 100), {
+          symbolNames: [leaf],
+        });
+    const graphEntities = this.graphStorage
+      .findSymbolIdsByName(leaf, Math.max(limit * 4, 100))
+      .map((id) => this.storage.getEntity(id))
+      .filter((item): item is StoredEntity => item !== null);
+    const lexicalFallback = this.storage.searchFts(
+      leaf,
+      Math.max(limit * 4, 100),
     );
+    return [
+      ...new Map(
+        [
+          ...graphEntities,
+          ...uniqueStoredEntities(candidates, this.storage, false),
+          ...uniqueStoredEntities(lexicalFallback, this.storage, false),
+        ].map((item) => [item.entity.id, item]),
+      ).values(),
+    ]
+      .filter((item) => matchesExactSymbolQuery(item, trimmed))
+      .slice(0, limit);
   }
 
   findSymbolsByQuery(query: string, limit = 40) {
@@ -148,6 +174,14 @@ export class WorkspaceIndex {
       this.storage,
       true,
     );
+  }
+
+  readFileText(file: FileInfo): string | null {
+    try {
+      return readFileSync(file.absolutePath, "utf8");
+    } catch {
+      return null;
+    }
   }
 
   close(): void {

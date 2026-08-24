@@ -38,8 +38,13 @@ import type {
 } from "../types.js";
 import { CURRENT_INDEX_VERSION } from "../types.js";
 import { indexStatusNeedsRefresh } from "../index-status.js";
-import { exploreGraph, queryGraphNeighborhood } from "../graph/index.js";
+import { exploreGraph } from "../graph/explore.js";
+import { openGraphStorage } from "../graph/open.js";
+import type { GraphReader } from "../graph/public-types.js";
+import { queryGraphNeighborhood } from "../graph/query.js";
+import type { GraphQueryStorage } from "../graph/ports.js";
 import type { StoredEntity } from "../storage/index.js";
+import { resolveWorkspaceIndexLayout } from "../storage/layout.js";
 import {
   workspaceIndexInfoFromManifest,
   CURRENT_MANIFEST_VERSION,
@@ -66,6 +71,7 @@ import {
 } from "../utils/lock.js";
 import { assertDaemonWriteAllowed } from "../utils/daemon-lease.js";
 import { TimingCollector } from "../utils/timing.js";
+import { ReadHandleCache } from "../../utils/read-handle-cache.js";
 import type {
   CreateZvecGrepOptions,
   ZvecGrep,
@@ -81,7 +87,6 @@ import type {
   ZvecGrepInfoResult,
   ZvecGrepIndexOptions,
 } from "./types.js";
-import { enrichLexicalItemsWithStructure } from "./structure-enrichment.js";
 import { remoteEmbeddingAuthorizationGuard } from "../../authorization/operation.js";
 import { RemoteEmbeddingAuthorizationStore } from "../../authorization/store.js";
 
@@ -196,16 +201,20 @@ export function openWorkspaceGraphReadSession(
     );
   }
 
-  // Graph reads need the persisted entity store and SQLite only. Do not pass
-  // an embedding model or involve the daemon model pool.
-  const workspaceIndex = new WorkspaceIndex(info, { mode: "read" });
+  // The graph database carries a lightweight entity/file projection for
+  // presentation. Graph-only reads therefore do not open either Zvec
+  // collection or involve the daemon model pool.
+  const graph = openGraphStorage(
+    resolveWorkspaceIndexLayout(info.path).graphPath,
+    { readOnly: true },
+  );
   let closed = false;
   return {
     root: location.root,
     async explore(options) {
       assertReadSessionOpen(closed);
       return await withHomeReadLock(location.home, "daemon.explore", () =>
-        exploreOpenWorkspaceIndex(location.root, workspaceIndex, options),
+        exploreOpenWorkspaceIndex(location.root, graph, graph, options),
       );
     },
     async graphNeighborhood(options) {
@@ -216,14 +225,15 @@ export function openWorkspaceGraphReadSession(
         () =>
           graphNeighborhoodOpenWorkspaceIndex(
             location.root,
-            workspaceIndex,
+            graph,
+            graph,
             options,
           ),
       );
     },
     async close() {
       if (closed) return;
-      workspaceIndex.close();
+      graph.close();
       closed = true;
     },
   };
@@ -260,6 +270,11 @@ class ZvecGrepService implements ZvecGrep {
   private readonly recoveredEmbeddingModels = new Map<string, EmbeddingModel>();
   private readonly retiredEmbeddingModels = new Set<EmbeddingModel>();
   private activeEmbeddingModelOperations = 0;
+  private readonly readIndexCaches = new Map<
+    string,
+    ReadHandleCache<WorkspaceIndex>
+  >();
+  private readonly retiredReadCacheClosures = new Set<Promise<void>>();
   private closed = false;
 
   constructor(private readonly options: CreateZvecGrepOptions) {
@@ -281,6 +296,7 @@ class ZvecGrepService implements ZvecGrep {
           location.home,
           options.rebuild ? "index.rebuild" : "index",
           async () => {
+            await this.closeReadIndexCaches();
             const existing = readWorkspaceManifest(location.home);
             if (!options.rebuild) {
               assertWorkspaceIndexVersionMatchesCurrent(existing);
@@ -420,6 +436,7 @@ class ZvecGrepService implements ZvecGrep {
       }
 
       return await withHomeWriteLock(location.home, "index.drop", async () => {
+        await this.closeReadIndexCaches();
         resetWorkspaceIndex(location);
         return true;
       });
@@ -440,6 +457,7 @@ class ZvecGrepService implements ZvecGrep {
     const location = workspaceIndexLocation(root);
     try {
       await withHomeWriteLock(location.home, "index.disable", async () => {
+        await this.closeReadIndexCaches();
         const existing = readWorkspaceManifest(location.home);
         const now = Date.now();
         writeWorkspaceManifest(location.home, {
@@ -483,8 +501,7 @@ class ZvecGrepService implements ZvecGrep {
     return await this.withGraphWorkspace(
       options.root ?? this.root,
       "explore",
-      (root, workspaceIndex) =>
-        exploreOpenWorkspaceIndex(root, workspaceIndex, options),
+      (root, graph) => exploreOpenWorkspaceIndex(root, graph, graph, options),
     );
   }
 
@@ -495,15 +512,18 @@ class ZvecGrepService implements ZvecGrep {
     return await this.withGraphWorkspace(
       options.root ?? this.root,
       "graph-neighborhood",
-      (root, workspaceIndex) =>
-        graphNeighborhoodOpenWorkspaceIndex(root, workspaceIndex, options),
+      (root, graph) =>
+        graphNeighborhoodOpenWorkspaceIndex(root, graph, graph, options),
     );
   }
 
   private async withGraphWorkspace<T>(
     startRoot: string,
     operation: string,
-    fn: (root: string, workspaceIndex: WorkspaceIndex) => T | Promise<T>,
+    fn: (
+      root: string,
+      graph: ReturnType<typeof openGraphStorage>,
+    ) => T | Promise<T>,
   ): Promise<T> {
     const start = resolveZvecGrepRoot(startRoot);
     assertNearestWorkspaceHomeUnlocked(start, operation);
@@ -518,11 +538,14 @@ class ZvecGrepService implements ZvecGrep {
         info.indexPolicy ?? "enabled",
       );
     return await withHomeReadLock(location.home, operation, async () => {
-      const workspaceIndex = new WorkspaceIndex(info, { mode: "read" });
+      const graph = openGraphStorage(
+        resolveWorkspaceIndexLayout(info.path).graphPath,
+        { readOnly: true },
+      );
       try {
-        return await fn(location.root, workspaceIndex);
+        return await fn(location.root, graph);
       } finally {
-        workspaceIndex.close();
+        graph.close();
       }
     });
   }
@@ -613,6 +636,7 @@ class ZvecGrepService implements ZvecGrep {
   }
 
   async close(): Promise<void> {
+    await this.closeReadIndexCaches();
     const models = new Set<EmbeddingModel>([
       ...(this.embeddingModel &&
       this.options.embeddingModelOwnership !== "borrowed"
@@ -637,29 +661,50 @@ class ZvecGrepService implements ZvecGrep {
     options: ZvecGrepContextOptions,
     timings: TimingCollector,
   ): Promise<ZvecGrepContextResult> {
-    const info = readWorkspaceManifest(location.home);
+    const info = timings.timeSync("workspace_manifest", () =>
+      readWorkspaceManifest(location.home),
+    );
     if (!info) {
       throw new EngineError("Workspace index manifest not found", {
         code: "ZVEC_GREP.ENGINE.MANIFEST.NOT_FOUND",
       });
     }
 
-    const workspaceIndex = this.openWorkspaceIndexForSearch(
+    const cacheKey = readIndexCacheKey(
       info,
       request,
+      this.options,
       info.embeddingRuntime,
     );
-    try {
-      return await contextFromOpenWorkspaceIndex({
+    this.retireSupersededReadIndexCaches(
+      info.path,
+      readIndexGenerationKey(info),
+      cacheKey,
+    );
+    let cache = this.readIndexCaches.get(cacheKey);
+    const cacheHit = cache !== undefined && cache.snapshot().open;
+    cache ??= new ReadHandleCache({
+      open: () =>
+        timings.timeSync("workspace_open", () =>
+          this.openWorkspaceIndexForSearch(
+            info,
+            request,
+            info.embeddingRuntime,
+          ),
+        ),
+      serializeOperations: true,
+    });
+    this.readIndexCaches.set(cacheKey, cache);
+    timings.add(cacheHit ? "workspace_cache_hit" : "workspace_cache_miss", 0);
+    return await cache.withRead((workspaceIndex) =>
+      contextFromOpenWorkspaceIndex({
         root: location.root,
         request,
         workspaceIndex,
         options,
         timings,
-      });
-    } finally {
-      workspaceIndex.close();
-    }
+      }),
+    );
   }
 
   private async refreshWorkspaceIndexForContext(
@@ -688,6 +733,7 @@ class ZvecGrepService implements ZvecGrep {
 
       await timings.time("auto_update", () =>
         withHomeWriteLock(location.home, "context.refresh", async () => {
+          await this.closeReadIndexCaches();
           const existing = readWorkspaceManifest(location.home);
           if (!existing) {
             return;
@@ -803,6 +849,8 @@ class ZvecGrepService implements ZvecGrep {
       });
     }
 
+    const { enrichLexicalItemsWithStructure } =
+      await import("./structure-enrichment.js");
     const structuralEnrichment = await timings.time(
       "structure_enrichment",
       () =>
@@ -847,6 +895,44 @@ class ZvecGrepService implements ZvecGrep {
         info,
       ),
     });
+  }
+
+  private retireSupersededReadIndexCaches(
+    indexPath: string,
+    generationKey: string,
+    keepKey: string,
+  ): void {
+    const prefix = `${indexPath}\0`;
+    const keepIsModelFree = keepKey.endsWith("\0model-free");
+    const stale = [...this.readIndexCaches.entries()].filter(
+      ([key]) =>
+        key.startsWith(prefix) &&
+        (!key.startsWith(generationKey) ||
+          (!keepIsModelFree &&
+            key !== keepKey &&
+            !key.endsWith("\0model-free"))),
+    );
+    for (const [key, cache] of stale) {
+      this.readIndexCaches.delete(key);
+      this.trackRetiredReadCache(cache.close());
+    }
+  }
+
+  private trackRetiredReadCache(closing: Promise<void>): void {
+    this.retiredReadCacheClosures.add(closing);
+    void closing.then(
+      () => this.retiredReadCacheClosures.delete(closing),
+      () => undefined,
+    );
+  }
+
+  private async closeReadIndexCaches(): Promise<void> {
+    const caches = [...this.readIndexCaches.values()];
+    this.readIndexCaches.clear();
+    await Promise.all([
+      ...caches.map((cache) => cache.close()),
+      ...this.retiredReadCacheClosures,
+    ]);
   }
 
   private embeddingModelForSearch(
@@ -1059,17 +1145,18 @@ function assertReadSessionOpen(closed: boolean): void {
 
 async function exploreOpenWorkspaceIndex(
   root: string,
-  workspaceIndex: WorkspaceIndex,
+  graph: GraphReader,
+  storage: GraphQueryStorage,
   options: ZvecGrepExploreOptions,
 ): Promise<ZvecGrepExploreResult> {
-  const result = exploreGraph(workspaceIndex.graph, workspaceIndex, options);
+  const result = exploreGraph(graph, storage, options);
   return {
     root,
     available: result.available,
-    unavailableReason: result.available
-      ? undefined
-      : workspaceIndex.graph.unavailableReason,
+    unavailableReason: result.available ? undefined : graph.unavailableReason,
     query: result.query,
+    ambiguous: result.ambiguous,
+    seedCandidates: result.seedCandidates?.map(mapExploreNode),
     roots: result.roots.map(mapExploreNode),
     nodes: result.nodes.map(mapExploreNode),
     edges: result.edges.map((edge) => ({ ...edge })),
@@ -1103,12 +1190,17 @@ async function exploreOpenWorkspaceIndex(
           : undefined,
         hints: boundary.target.hints
           ? {
-              ...boundary.target.hints,
+              receiverType: boundary.target.hints.receiverType,
               candidateTypes: boundary.target.hints.candidateTypes
                 ? [...boundary.target.hints.candidateTypes]
                 : undefined,
               genericBounds: boundary.target.hints.genericBounds
                 ? [...boundary.target.hints.genericBounds]
+                : undefined,
+              dispatch: boundary.target.hints.dispatch,
+              callArity: boundary.target.hints.callArity,
+              dynamicDispatch: boundary.target.hints.dynamicDispatch
+                ? { ...boundary.target.hints.dynamicDispatch }
                 : undefined,
             }
           : undefined,
@@ -1116,9 +1208,14 @@ async function exploreOpenWorkspaceIndex(
       reason: boundary.reason,
       candidates: [...boundary.candidates],
       candidatesTruncated: boundary.candidatesTruncated,
-      candidateDetails: boundary.candidateDetails.map((candidate) => ({
-        ...candidate,
-      })),
+      occurrenceCount: boundary.occurrenceCount,
+      candidateDetails: boundary.candidateDetails.map((candidate) => {
+        const entity = storage.getEntity(candidate.targetId);
+        return {
+          ...candidate,
+          filePath: entity?.file.relativePath,
+        };
+      }),
     })),
     dynamicBoundariesTruncated: result.dynamicBoundariesTruncated,
     files: result.files.map((bundle) => ({
@@ -1126,6 +1223,7 @@ async function exploreOpenWorkspaceIndex(
       score: bundle.score,
       isCentral: bundle.isCentral,
       isChangeSurface: bundle.isChangeSurface,
+      reasons: [...bundle.reasons],
       symbols: bundle.symbols.map((symbol) => ({
         ...symbol,
         range: copyRange(symbol.range),
@@ -1138,20 +1236,15 @@ async function exploreOpenWorkspaceIndex(
 
 async function graphNeighborhoodOpenWorkspaceIndex(
   root: string,
-  workspaceIndex: WorkspaceIndex,
+  graph: GraphReader,
+  storage: GraphQueryStorage,
   options: ZvecGrepGraphNeighborhoodOptions,
 ): Promise<ZvecGrepGraphNeighborhoodResult> {
-  const result = queryGraphNeighborhood(
-    workspaceIndex.graph,
-    workspaceIndex,
-    options,
-  );
+  const result = queryGraphNeighborhood(graph, storage, options);
   return {
     root,
     available: result.available,
-    unavailableReason: result.available
-      ? undefined
-      : workspaceIndex.graph.unavailableReason,
+    unavailableReason: result.available ? undefined : graph.unavailableReason,
     direction: result.direction,
     query: result.query,
     depth: result.depth,
@@ -1161,6 +1254,26 @@ async function graphNeighborhoodOpenWorkspaceIndex(
       entity: mapGraphEntity(seed.entity)!,
     })),
     ambiguous: result.ambiguous,
+    groups: result.groups?.map((group) => ({
+      seed: {
+        id: group.seed.id,
+        entity: mapGraphEntity(group.seed.entity)!,
+      },
+      members: group.members.map((member) => ({
+        id: member.id,
+        entity: mapGraphEntity(member.entity)!,
+      })),
+      truncated: group.truncated,
+      neighbors: group.neighbors.map((neighbor) => ({
+        id: neighbor.id,
+        kind: neighbor.kind,
+        count: neighbor.count,
+        entity: mapGraphEntity(neighbor.entity),
+      })),
+    })),
+    groupsTruncated: result.groupsTruncated,
+    fileFilterMismatch: result.fileFilterMismatch,
+    truncated: result.truncated,
     seed: result.seed
       ? { id: result.seed.id, entity: mapGraphEntity(result.seed.entity)! }
       : undefined,
@@ -1199,6 +1312,8 @@ function mapGraphEntity(
         ? (metadata.symbolName ?? undefined)
         : (metadata?.heading ?? undefined),
     kind: metadata?.kind === "code" ? metadata.symbolType : metadata?.kind,
+    scope:
+      metadata?.kind === "code" ? (metadata.scope ?? undefined) : undefined,
     file: mapGraphFile(stored.file),
     range: copyRange(stored.entity.range),
   };
@@ -2051,6 +2166,31 @@ type NormalizedContextRequest = {
   routes: SearchPlan["routes"];
   groups: NormalizedContextGroup[];
 };
+
+function readIndexCacheKey(
+  info: WorkspaceIndexInfo,
+  request: NormalizedContextRequest,
+  options: CreateZvecGrepOptions,
+  workspaceRuntime: EmbeddingRuntimeConfig,
+): string {
+  const needsEmbedding = request.routes.some(
+    (route) => route.mode === "vector",
+  );
+  let modelKey = "model-free";
+  if (needsEmbedding) {
+    const schema = indexedEmbeddingSchema(info);
+    modelKey = embeddingModelPoolKeyForIdentity(
+      { provider: schema.provider, name: schema.model },
+      options,
+      workspaceRuntime,
+    );
+  }
+  return `${readIndexGenerationKey(info)}${modelKey}`;
+}
+
+function readIndexGenerationKey(info: WorkspaceIndexInfo): string {
+  return [info.path, info.id, String(info.updatedTime), ""].join("\0");
+}
 
 type NormalizedContextGroup = {
   id: string;

@@ -128,6 +128,8 @@ export type ZvecGrepGraphNeighborhoodOptions = {
   direction: ZvecGrepGraphDirection;
   query: string;
   seedId?: string;
+  /** Narrow same-named definitions to this relative or absolute source path. */
+  file?: string;
   depth?: number;
   limit?: number;
 };
@@ -145,6 +147,8 @@ export type ZvecGrepGraphEntity = {
   entityId: string;
   name?: string;
   kind?: string;
+  /** Stable semantic owner/namespace emitted by language extraction. */
+  scope?: string;
   file: ZvecGrepGraphFile;
   range: Range;
 };
@@ -190,11 +194,19 @@ export type ZvecGrepGraphNeighbor = {
   entity: ZvecGrepGraphEntity | null;
 };
 
+export type ZvecGrepGraphNeighborhoodGroup = {
+  seed: ZvecGrepGraphSeed;
+  members: ZvecGrepGraphSeed[];
+  truncated?: boolean;
+  neighbors: ZvecGrepGraphNeighbor[];
+};
+
 export type ZvecGrepExploreFileBundle = {
   file: ZvecGrepGraphFile;
   score: number;
   isCentral: boolean;
   isChangeSurface: boolean;
+  reasons: string[];
   symbols: {
     id: string;
     name: string;
@@ -210,6 +222,8 @@ export type ZvecGrepExploreResult = {
   available: boolean;
   unavailableReason?: string;
   query: string;
+  ambiguous?: boolean;
+  seedCandidates?: ZvecGrepGraphNode[];
   roots: ZvecGrepGraphNode[];
   nodes: ZvecGrepGraphNode[];
   edges: ZvecGrepGraphEdge[];
@@ -239,14 +253,25 @@ export type ZvecGrepExploreResult = {
         genericBounds?: string[];
         dispatch?: "static" | "virtual" | "interface" | "trait" | "dynamic";
         callArity?: number;
+        dynamicDispatch?: {
+          form: "computed_member" | "getattr" | "reflection";
+          key?: string;
+        };
       };
     };
-    reason: "unknown_receiver_type" | "polymorphic_dispatch";
+    reason:
+      | "unknown_receiver_type"
+      | "polymorphic_dispatch"
+      | "lexical_dispatch"
+      | "runtime_dispatch";
     candidates: string[];
     candidatesTruncated: boolean;
+    occurrenceCount?: number;
     candidateDetails: {
       targetId: string;
-      reason: "hierarchy" | "generic_bound" | "method_set";
+      displayName?: string;
+      filePath?: string;
+      reason: "hierarchy" | "generic_bound" | "method_set" | "function_pointer";
       confidence: number;
     }[];
   }[];
@@ -265,6 +290,10 @@ export type ZvecGrepGraphNeighborhoodResult = {
   limit: number;
   seeds: ZvecGrepGraphSeed[];
   ambiguous?: boolean;
+  groups?: ZvecGrepGraphNeighborhoodGroup[];
+  groupsTruncated?: boolean;
+  fileFilterMismatch?: string;
+  truncated?: boolean;
   seed?: ZvecGrepGraphSeed;
   neighbors: ZvecGrepGraphNeighbor[];
 };
@@ -350,6 +379,15 @@ export type ZvecGrepGraphRelationship = {
   dstLabel: string;
   kind: "CALLS" | "REFS" | "INHERITS" | "CONTAINS" | "IMPORTS" | "INSTANTIATES";
   scope: "symbol" | "file";
+  srcKind?: string;
+  dstKind?: string;
+  srcFile?: string;
+  dstFile?: string;
+  rel?: string;
+  count?: number;
+  provenance?: "static" | "heuristic";
+  confidence?: number;
+  evidence?: string;
 };
 
 export type ZvecGrepRgDiagnostics = {

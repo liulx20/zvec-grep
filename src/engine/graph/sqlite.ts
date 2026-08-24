@@ -5,6 +5,7 @@ import type {
   ResolvePendingOptions,
   SymNode,
 } from "./types.js";
+import type { FileInfo } from "../types.js";
 import { SqlitePendingRefResolver } from "./persistence/sqlite/pending-ref-resolver.js";
 import { SqliteGraphReader } from "./persistence/sqlite/reader.js";
 import { SqliteGraphWriter } from "./persistence/sqlite/writer.js";
@@ -35,8 +36,9 @@ export class SqliteGraphStorage
     nodes: readonly SymNode[],
     edges: readonly LocalEdge[],
     refs: readonly RawRef[],
+    file?: FileInfo,
   ): void {
-    this.writer.upsertFileGraph(fileId, nodes, edges, refs);
+    this.writer.upsertFileGraph(fileId, nodes, edges, refs, file);
   }
 
   deleteFileGraph(fileId: string): void {

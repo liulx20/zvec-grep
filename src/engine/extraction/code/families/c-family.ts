@@ -24,11 +24,32 @@ export function createCFamilyAdapter(
   entityTypes: readonly string[],
   scopeTypes: readonly string[] = [],
 ): LanguageAdapter {
+  const scopes = new Set(scopeTypes);
+  // tree-sitter-cpp parses `class EXPORT_API Name { ... }` as a
+  // function_definition because the unknown export macro sits between the
+  // class keyword and name. Treat only that recognizable shape as a scope;
+  // ordinary function definitions remain leaves.
+  if (format === "cpp") scopes.add("function_definition");
   return {
     format,
     entityTypes: new Set(entityTypes),
-    scopeTypes: new Set(scopeTypes),
+    scopeTypes: scopes,
+    shouldEnterScope(node) {
+      return (
+        node.type !== "function_definition" || Boolean(exportedClass(node))
+      );
+    },
     shouldIndexEntity(node) {
+      if (
+        [
+          "class_specifier",
+          "struct_specifier",
+          "union_specifier",
+          "enum_specifier",
+        ].includes(node.type) &&
+        !node.childForFieldName("body")
+      )
+        return false;
       if (!C_FAMILY_FUNCTION_DECLARATION_TYPES.has(node.type)) {
         if (node.type === "macro_type_specifier") {
           return extractCFunctionName(node.text) !== undefined;
@@ -36,13 +57,22 @@ export function createCFamilyAdapter(
 
         return true;
       }
-
-      return findDescendantByType(node, "function_declarator") !== null;
+      return (
+        findDescendantByType(node, "function_declarator") !== null ||
+        isModuleValueDeclaration(node)
+      );
+    },
+    resolveEntities(node) {
+      if (!isModuleValueDeclaration(node)) return [node];
+      return node.namedChildren.filter(
+        (child) => child.type === "init_declarator",
+      );
     },
     extractName(node) {
+      const exported = exportedClass(node);
+      if (exported) return exported.name;
       if (C_FAMILY_FUNCTION_TYPES.has(node.type)) {
         const name = extractRawCFunctionName(node);
-
         return name ? lastQualifiedPart(name) : undefined;
       }
 
@@ -52,6 +82,11 @@ export function createCFamilyAdapter(
       }
 
       if (node.type === "type_definition") {
+        const declarator = node.childForFieldName("declarator");
+        return declarator ? findIdentifierLeaf(declarator)?.text : undefined;
+      }
+
+      if (node.type === "init_declarator") {
         const declarator = node.childForFieldName("declarator");
         return declarator ? findIdentifierLeaf(declarator)?.text : undefined;
       }
@@ -90,6 +125,8 @@ function cFamilyScopeBreadcrumb(
 }
 
 function classifyCFamilyNode(node: TSNode): CodeSymbolType | undefined {
+  if (node.type === "init_declarator") return "value";
+  if (exportedClass(node)) return "class";
   if (node.type === "type_definition") {
     return typedefWrapsClassLikeBody(node) ? "class" : "alias";
   }
@@ -102,10 +139,59 @@ function classifyCFamilyNode(node: TSNode): CodeSymbolType | undefined {
     node.type === "field_declaration" &&
     findDescendantByType(node, "function_declarator")
   ) {
-    return "function";
+    return isFunctionPointerDeclaration(node) ? "value" : "function";
   }
 
   return undefined;
+}
+
+function isModuleValueDeclaration(node: TSNode): boolean {
+  if (node.type !== "declaration") return false;
+  if (!node.namedChildren.some((child) => child.type === "init_declarator"))
+    return false;
+  let parent = node.parent;
+  while (parent) {
+    if (/function|method|class|struct|union/.test(parent.type)) return false;
+    parent = parent.parent;
+  }
+  return true;
+}
+
+function isFunctionPointerDeclaration(node: TSNode): boolean {
+  const declarator = findDescendantByType(node, "function_declarator");
+  // Only the function's own declarator determines whether this is a function
+  // pointer. Searching the complete function_declarator also sees pointer
+  // parameters (`void close(handle_t* h, close_cb cb)`) and incorrectly turns
+  // the enclosing API declaration into a value.
+  let current = declarator?.childForFieldName("declarator") ?? null;
+  for (let depth = 0; current && depth < 12; depth += 1) {
+    if (current.type === "pointer_declarator") return true;
+    if (
+      current.type !== "parenthesized_declarator" &&
+      current.type !== "reference_declarator" &&
+      current.type !== "array_declarator"
+    )
+      return false;
+    current =
+      current.childForFieldName("declarator") ??
+      current.namedChildren[0] ??
+      null;
+  }
+  return false;
+}
+
+function exportedClass(
+  node: TSNode,
+): { kind: "class" | "struct" | "union"; name: string } | undefined {
+  if (node.type !== "function_definition") return undefined;
+  const match = node.text.match(
+    /^\s*(?:template\s*<[^>{}]*>\s*)?(class|struct|union)\s+(?:(?:[A-Z_][A-Z0-9_]*(?:\([^)]*\))?|__declspec\s*\([^)]*\))\s+)*([A-Za-z_][A-Za-z0-9_]*)\s*(?:final\s*)?(?=[:{])/s,
+  );
+  if (!match) return undefined;
+  return {
+    kind: match[1] as "class" | "struct" | "union",
+    name: match[2],
+  };
 }
 
 function extractRawCFunctionName(node: TSNode): string | undefined {

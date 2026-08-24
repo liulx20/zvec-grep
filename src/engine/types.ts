@@ -142,7 +142,13 @@ export type Range =
   | PageRegionRange;
 
 export type CodeSymbolType =
-  "module" | "class" | "interface" | "function" | "value" | "alias";
+  | "module"
+  | "component"
+  | "class"
+  | "interface"
+  | "function"
+  | "value"
+  | "alias";
 
 export type CodeEntityModifier =
   | "exported"
@@ -306,6 +312,15 @@ export type SearchGraphRelation = {
   dstLabel: string;
   kind: "CALLS" | "REFS" | "INHERITS" | "CONTAINS" | "IMPORTS" | "INSTANTIATES";
   scope: "symbol" | "file";
+  srcKind?: string;
+  dstKind?: string;
+  srcFile?: string;
+  dstFile?: string;
+  rel?: string;
+  count?: number;
+  provenance?: "static" | "heuristic";
+  confidence?: number;
+  evidence?: string;
 };
 
 export type SearchRecallTrace = {

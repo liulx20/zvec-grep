@@ -450,19 +450,24 @@ export function parseArgs(args: readonly string[]): ParsedArgs {
       options.rgOptions = appendRgExtraArgs(options.rgOptions, [arg]);
       markRgCompatibilityOption(options, arg);
     } else if (isLongOptionWithValue(arg, "--file")) {
-      options.rgOptions = appendRgPatternFile(
-        options.rgOptions,
-        valueFromLongOption(arg),
-        "--file",
-      );
-      markRgCompatibilityOption(options, "--file");
+      if (isGraphNeighborhoodCommand(commandInput.command)) {
+        options.definitionFile = valueFromLongOption(arg);
+      } else {
+        options.rgOptions = appendRgPatternFile(
+          options.rgOptions,
+          valueFromLongOption(arg),
+          "--file",
+        );
+        markRgCompatibilityOption(options, "--file");
+      }
     } else if (arg === "--file") {
-      options.rgOptions = appendRgPatternFile(
-        options.rgOptions,
-        readOptionValue(args, ++index, arg),
-        arg,
-      );
-      markRgCompatibilityOption(options, arg);
+      const value = readOptionValue(args, ++index, arg);
+      if (isGraphNeighborhoodCommand(commandInput.command)) {
+        options.definitionFile = value;
+      } else {
+        options.rgOptions = appendRgPatternFile(options.rgOptions, value, arg);
+        markRgCompatibilityOption(options, arg);
+      }
     } else if (isRgFlagWithValue(arg)) {
       const option = optionNameFromLong(arg);
       options.rgOptions = appendRgExtraArgs(options.rgOptions, [
@@ -697,6 +702,7 @@ function validateCliShape(
     [options.depth, "--depth"],
     [options.maxFiles, "--max-files"],
     [options.seedId, "--seed-id"],
+    [options.definitionFile, "--file"],
   ]);
   if (graphOnly && !graphCommand) {
     throw new Error(
@@ -705,6 +711,12 @@ function validateCliShape(
   }
   if (options.maxFiles !== undefined && command !== "explore") {
     throw new Error("--max-files can only be used with zg explore");
+  }
+  if (
+    options.definitionFile !== undefined &&
+    !isGraphNeighborhoodCommand(command)
+  ) {
+    throw new Error("--file can only narrow callers/callees/impact symbols");
   }
   if (graphCommand && positionals.length !== 1) {
     throw new Error(`zg ${command} requires exactly one query`);
@@ -1013,6 +1025,10 @@ function validateCliShape(
   }
 }
 
+function isGraphNeighborhoodCommand(command: CliCommand): boolean {
+  return command === "callers" || command === "callees" || command === "impact";
+}
+
 function firstEnabledOption(
   candidates: readonly (readonly [unknown, string])[],
 ): string | undefined {
@@ -1028,10 +1044,15 @@ function parseClientMode(value: string): "direct" | "server" | "auto" {
 }
 
 function parseQueryRefreshMode(value: string): QueryRefreshMode {
-  if (value === "background" || value === "wait" || value === "off") {
+  if (
+    value === "background" ||
+    value === "check" ||
+    value === "wait" ||
+    value === "off"
+  ) {
     return value;
   }
-  throw new Error("--refresh must be background, wait, or off");
+  throw new Error("--refresh must be background, check, wait, or off");
 }
 
 function allowRemoteValueError(): Error {

@@ -14,6 +14,7 @@
 | --- | --- | --- | --- |
 | [BrowseComp-Plus](browse-comp-plus/README_CN.md) | 在固定的大规模语料库上评测多文档证据检索和回答准确率 | Codex | 80 个样例 |
 | [SWE-QA-Bench](swe-qa-bench/README_CN.md) | 评测代码仓库级、跨文件、多跳的软件工程问答 | OpenCode | 20 个任务 |
+| [Explore 质量](explore-quality/README_CN.md) | Explore roots、路径、文件和源码覆盖的确定性跨语言回归 | 离线 | 6 种语言 |
 
 ## 评测协议
 

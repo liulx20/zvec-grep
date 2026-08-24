@@ -324,6 +324,11 @@ test("CLI parser covers utility commands, provider controls, routes, and equals 
     parseArgs(["callers", "foo", "--limit", "10"]).options.limit,
     10,
   );
+  assert.equal(
+    parseArgs(["callers", "Service", "--file", "apps/api/service.ts"]).options
+      .definitionFile,
+    "apps/api/service.ts",
+  );
   assert.equal(parseArgs(["impact", "bar", "--depth", "3"]).command, "impact");
   assert.throws(() => parseArgs(["explore"]), /exactly one query/);
   assert.throws(

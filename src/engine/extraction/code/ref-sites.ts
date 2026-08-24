@@ -13,8 +13,8 @@ export type RefSite = {
   target: ReferenceTarget;
   /** 1-based source line. */
   line: number;
-  /** REFS rel: type | return | member | decorates */
-  kind: "type" | "return" | "member" | "decorates";
+  /** REFS rel: type | return | member | decorates | value | function */
+  kind: "type" | "return" | "member" | "decorates" | "value" | "function";
 };
 
 const MAX_REF_NAME_CHARS = 180;
@@ -73,6 +73,7 @@ const HERITAGE_CONTEXTS = new Set([
   "extends_interfaces",
   "base_class_clause",
 ]);
+const C_FAMILY_DECLARATIONS = new Set(["declaration", "field_declaration"]);
 
 /**
  * Walk an entity node for type / member / decorator references.
@@ -89,11 +90,15 @@ export function collectRefSites(
 
   const push = (
     site: Omit<RefSite, "target"> & { target?: ReferenceTarget },
+    origin: TSNode,
   ): void => {
     if (!site.name || isNoiseName(site.name, language)) {
       return;
     }
-    const key = `${site.kind}\0${site.name}\0${site.line}`;
+    // Different occurrences on one source line are distinct graph facts.
+    // Range-based de-duplication still collapses overlapping extraction
+    // branches that report the same AST node.
+    const key = `${site.kind}\0${site.name}\0${origin.startIndex}\0${origin.endIndex}`;
     if (seen.has(key)) {
       return;
     }
@@ -112,7 +117,8 @@ export function collectRefSites(
     if (
       !skipSelfEntity &&
       entityTypes?.has(current.type) &&
-      adapter?.shouldIndexEntity?.(current) !== false
+      adapter?.shouldIndexEntity?.(current) !== false &&
+      !isWrappedRootDeclaration(node, current)
     ) {
       return;
     }
@@ -121,23 +127,153 @@ export function collectRefSites(
     if (current.type === "decorator") {
       const name = decoratorName(current);
       if (name) {
-        push({
-          name,
-          line: current.startPosition.row + 1,
-          kind: "decorates",
-        });
+        push(
+          {
+            name,
+            line: current.startPosition.row + 1,
+            kind: "decorates",
+          },
+          current,
+        );
       }
       // Still walk children for nested type args.
     }
 
+    if (current.type === "annotation" || current.type === "marker_annotation") {
+      const nameNode =
+        current.childForFieldName("name") ?? current.namedChildren[0];
+      const name = nameNode ? normalizeRefName(nameNode.text) : undefined;
+      if (name) {
+        push(
+          {
+            name,
+            line: current.startPosition.row + 1,
+            kind: "decorates",
+          },
+          current,
+        );
+      }
+    }
+
     if (current.type === "type_annotation" || current.type === "type") {
       const kind = isReturnTypeAnnotation(current) ? "return" : "type";
-      for (const name of typeNamesIn(current, language)) {
+      for (const occurrence of typeNamesIn(current, language)) {
         if (!inHeritageContext(current)) {
-          push({ name, line: current.startPosition.row + 1, kind });
+          push(
+            {
+              name: occurrence.name,
+              line: occurrence.node.startPosition.row + 1,
+              kind,
+            },
+            occurrence.node,
+          );
         }
       }
       // Children walked below for nested structures.
+    }
+
+    // Java, C/C++, Go and Rust expose many parameter/return types directly as
+    // type_identifier nodes rather than wrapping them in `type` or
+    // `type_annotation`. Capture those nodes only when their AST position is
+    // type-bearing; this avoids turning declaration names and expressions into
+    // type references.
+    if (isDirectTypeReference(current)) {
+      for (const occurrence of typeNamesIn(current, language)) {
+        if (!inHeritageContext(current)) {
+          push(
+            {
+              name: occurrence.name,
+              line: occurrence.node.startPosition.row + 1,
+              kind: isReturnTypePosition(current) ? "return" : "type",
+            },
+            occurrence.node,
+          );
+        }
+      }
+    }
+
+    if (
+      (language === "c" || language === "cpp") &&
+      C_FAMILY_DECLARATIONS.has(current.type)
+    ) {
+      const typeNode = current.childForFieldName("type");
+      if (typeNode) {
+        for (const occurrence of typeNamesIn(typeNode, language)) {
+          push(
+            {
+              name: occurrence.name,
+              line: occurrence.node.startPosition.row + 1,
+              kind: "type",
+            },
+            occurrence.node,
+          );
+        }
+      }
+    }
+
+    // C represents `struct Name` / `enum Name` type uses as a complete
+    // specifier node rather than a standalone type_identifier. A specifier
+    // without a body is a reference to an existing tag; a body-bearing one is
+    // the declaration itself and must not create a self-reference.
+    if (
+      (language === "c" || language === "cpp") &&
+      ["struct_specifier", "union_specifier", "enum_specifier"].includes(
+        current.type,
+      ) &&
+      !current.childForFieldName("body")
+    ) {
+      const name = current.childForFieldName("name");
+      if (name) {
+        push(
+          {
+            name: normalizeRefName(name.text) ?? "",
+            line: current.startPosition.row + 1,
+            kind: "type",
+          },
+          name,
+        );
+      }
+    }
+
+    // JSX component tags are executable symbol references. Intrinsic tags are
+    // lowercase by language convention and intentionally remain external.
+    if (
+      (language === "jsx" || language === "tsx") &&
+      (current.type === "jsx_opening_element" ||
+        current.type === "jsx_self_closing_element")
+    ) {
+      const name = current.childForFieldName("name");
+      const normalized = name ? (normalizeRefName(name.text) ?? "") : "";
+      if (/^[A-Z]/.test(normalized)) {
+        push(
+          {
+            name: normalized,
+            line: current.startPosition.row + 1,
+            kind: "member",
+          },
+          name ?? current,
+        );
+      }
+    }
+
+    // Component factories are also commonly passed through JSX props instead
+    // of appearing as a tag (`<Route component={Profile} />`). Preserve that
+    // direct value reference; nested member expressions are handled by the
+    // normal member-reference branch above.
+    if (
+      (language === "jsx" || language === "tsx") &&
+      current.type === "identifier" &&
+      current.parent?.type === "jsx_expression" &&
+      /^[A-Z]/.test(current.text)
+    ) {
+      push(
+        {
+          name: current.text,
+          line: current.startPosition.row + 1,
+          kind: "member",
+        },
+        current,
+      );
     }
 
     // Member / property access that is not a call callee.
@@ -146,16 +282,20 @@ export function collectRefSites(
         current.type === "attribute" ||
         current.type === "field_expression" ||
         current.type === "field_access") &&
-      !isCallCallee(current)
+      !isCallCallee(current) &&
+      !isAssignmentTarget(current)
     ) {
       const target = memberTarget(current);
       if (target) {
-        push({
-          name: target.raw,
-          target,
-          line: current.startPosition.row + 1,
-          kind: "member",
-        });
+        push(
+          {
+            name: target.raw,
+            target,
+            line: current.startPosition.row + 1,
+            kind: "member",
+          },
+          current,
+        );
       }
     }
 
@@ -176,17 +316,92 @@ export function collectRefSites(
       if (child.type === "decorator") {
         const name = decoratorName(child);
         if (name) {
-          push({
-            name,
-            line: child.startPosition.row + 1,
-            kind: "decorates",
-          });
+          push(
+            {
+              name,
+              line: child.startPosition.row + 1,
+              kind: "decorates",
+            },
+            child,
+          );
         }
       }
     }
   }
 
   return sites;
+}
+
+function isAssignmentTarget(node: TSNode): boolean {
+  const parent = node.parent;
+  if (!parent) return false;
+  if (
+    parent.type !== "assignment_expression" &&
+    parent.type !== "augmented_assignment_expression" &&
+    parent.type !== "assignment"
+  )
+    return false;
+  const left =
+    parent.childForFieldName("left") ?? parent.childForFieldName("target");
+  return sameNodeRange(left ?? undefined, node);
+}
+
+function isWrappedRootDeclaration(root: TSNode, current: TSNode): boolean {
+  return (
+    (root.type === "decorated_definition" ||
+      root.type === "export_statement") &&
+    current.parent?.startIndex === root.startIndex &&
+    current.parent?.endIndex === root.endIndex
+  );
+}
+
+function isDirectTypeReference(node: TSNode): boolean {
+  if (
+    node.type !== "type_identifier" &&
+    node.type !== "scoped_type_identifier" &&
+    node.type !== "qualified_type"
+  ) {
+    return false;
+  }
+  let current: TSNode = node;
+  for (let depth = 0; depth < 4; depth += 1) {
+    const parent = current.parent;
+    if (!parent) return false;
+    const name = parent.childForFieldName("name");
+    if (name && sameNodeRange(name, current)) return false;
+    if (
+      parent.type.includes("parameter") ||
+      parent.type.includes("declaration") ||
+      parent.type.includes("field") ||
+      parent.type.includes("return") ||
+      parent.type.includes("constraint") ||
+      parent.type.includes("type") ||
+      parent.type === "function_item" ||
+      parent.type === "function_definition" ||
+      parent.type === "method_declaration"
+    ) {
+      return true;
+    }
+    current = parent;
+  }
+  return false;
+}
+
+function isReturnTypePosition(node: TSNode): boolean {
+  const parent = node.parent;
+  if (!parent) return false;
+  const explicitReturn = parent.childForFieldName("return_type");
+  if (sameNodeRange(explicitReturn ?? undefined, node)) return true;
+  const genericType = parent.childForFieldName("type");
+  if (!sameNodeRange(genericType ?? undefined, node)) return false;
+  // In Java and C-family grammars `type` is also the field used by variable,
+  // field and parameter declarations. Treat it as a return type only when its
+  // owner is callable; otherwise class fields such as `Repository repo` become
+  // misleading `return` change-surface edges.
+  return (
+    !parent.type.includes("parameter") &&
+    /(?:method|function|callable|lambda)/.test(parent.type)
+  );
 }
 
 function isReturnTypeAnnotation(node: TSNode): boolean {
@@ -231,8 +446,10 @@ function isReturnTypeAnnotation(node: TSNode): boolean {
   return false;
 }
 
-function typeNamesIn(node: TSNode, language: string): string[] {
-  const out: string[] = [];
+type TypeNameOccurrence = { name: string; node: TSNode };
+
+function typeNamesIn(node: TSNode, language: string): TypeNameOccurrence[] {
+  const out: TypeNameOccurrence[] = [];
   const visit = (current: TSNode | null): void => {
     if (!current) {
       return;
@@ -249,6 +466,7 @@ function typeNamesIn(node: TSNode, language: string): string[] {
       current.type === "type_identifier" ||
       current.type === "identifier" ||
       current.type === "nested_type_identifier" ||
+      current.type === "qualified_identifier" ||
       current.type === "member_expression" ||
       current.type === "scoped_type_identifier" ||
       current.type === "qualified_type"
@@ -263,7 +481,7 @@ function typeNamesIn(node: TSNode, language: string): string[] {
       } else {
         const name = normalizeRefName(current.text);
         if (name && !isNoiseName(name, language)) {
-          out.push(name);
+          out.push({ name, node: current });
           return; // don't also collect nested pieces of qualified name
         }
       }
@@ -273,7 +491,7 @@ function typeNamesIn(node: TSNode, language: string): string[] {
         current.childForFieldName("name") ?? current.namedChildren[0];
       const name = nameNode ? normalizeRefName(nameNode.text) : undefined;
       if (name && !isNoiseName(name, language)) {
-        out.push(name);
+        out.push({ name, node: nameNode! });
       }
       // Still collect type arguments.
       for (const child of current.namedChildren ?? []) {
@@ -396,7 +614,9 @@ function normalizeRefName(value: string): string | undefined {
     text.length === 0 ||
     text.length > MAX_REF_NAME_CHARS ||
     /[\n\r]/.test(text) ||
-    !/^[A-Za-z_$][A-Za-z0-9_$.]*$/.test(text)
+    !/^[A-Za-z_$][A-Za-z0-9_$]*(?:(?:\.|::)[A-Za-z_$][A-Za-z0-9_$]*)*$/.test(
+      text,
+    )
   ) {
     return undefined;
   }
@@ -404,7 +624,7 @@ function normalizeRefName(value: string): string | undefined {
 }
 
 function isNoiseName(name: string, language: string): boolean {
-  const bare = name.split(".").pop() ?? name;
+  const bare = name.split(/\.|::/).pop() ?? name;
   if (bare.length <= 1 && bare !== "_") {
     // keep single-letter type params? drop them — too noisy
     return bare.length <= 1;

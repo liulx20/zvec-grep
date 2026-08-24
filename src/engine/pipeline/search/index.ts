@@ -6,11 +6,8 @@ import {
 } from "../../errors.js";
 import type { EmbeddingModel } from "../../models/index.js";
 import type { WorkspaceIndexStorage } from "../../storage/index.js";
-import {
-  exploreSubgraph,
-  type GraphEdgeKind,
-  type GraphReader,
-} from "../../graph/index.js";
+import { exploreSubgraph } from "../../graph/explore.js";
+import type { GraphEdgeKind, GraphReader } from "../../graph/public-types.js";
 import type {
   WorkspaceIndexInfo,
   Entity,
@@ -42,6 +39,11 @@ import {
   resolveFileTypePatterns,
   type FileTypePatterns,
 } from "../../utils/file-selection.js";
+import {
+  isLowValuePath,
+  isTestPath,
+  queryTargetsPath,
+} from "../../graph/path-policy.js";
 
 type SearchContext = {
   workspaceIndex: WorkspaceIndexInfo;
@@ -69,6 +71,7 @@ type Candidate = {
   evidence: InternalSearchEvidence[];
   score: number;
   rank: number;
+  selectionRank?: number;
   forced: boolean;
 };
 
@@ -128,6 +131,19 @@ export async function searchWorkspaceIndex(
     );
     const hasSearchableFiles = !filterMatchesNoFiles(filter);
     const candidates = new Map<string, Candidate>();
+    const rankingTerms = [
+      ...new Set(normalized.routes.map((route) => route.query.trim())),
+    ].filter(Boolean);
+    // A default hybrid search creates FTS and vector routes with the same
+    // query. Do not duplicate that text: exact-symbol detection must see
+    // `CounterStore`, not `CounterStore CounterStore`.
+    const rankingQuery = rankingTerms.join(" ");
+    const exactGraphCandidates = findExactGraphCandidates({
+      graph: ctx.graph,
+      query: rankingQuery,
+      filter,
+      limit,
+    });
     const vectorByRoute =
       hasSearchableFiles && planUsesVector(normalized)
         ? await timings.time("query_embedding", () =>
@@ -167,7 +183,16 @@ export async function searchWorkspaceIndex(
       );
     }
 
-    let fused = timings.timeSync("fusion", () => fuseCandidates(candidates));
+    timings.timeSync("graph_exact_seed", () =>
+      injectExactGraphCandidates({
+        storage: ctx.storage,
+        candidates,
+        matches: exactGraphCandidates,
+      }),
+    );
+    let fused = timings.timeSync("fusion", () =>
+      fuseCandidates(candidates, rankingQuery),
+    );
     const graphExpansion = timings.timeSync("graph_expand", () =>
       expandGraphNeighbors({
         graph: ctx.graph,
@@ -180,16 +205,23 @@ export async function searchWorkspaceIndex(
     );
     if (graphExpansion.rerankNeeded) {
       fused = timings.timeSync("fusion_graph", () =>
-        fuseCandidates(candidates),
+        fuseCandidates(candidates, rankingQuery),
       );
     }
 
-    const visible = fused.slice(0, limit);
+    const visible = selectVisibleCandidates(
+      fused,
+      limit,
+      graphExpansion.relations,
+      graphExpansion.seedIds,
+      rankingQuery,
+    );
     const relationships = selectGraphRelationships(
       graphExpansion.relations,
       visible,
       graphExpansion.seedIds,
       candidates,
+      rankingQuery,
     );
     const tracked = normalized.trackEntityId
       ? fused.find((candidate) => candidate.id === normalized.trackEntityId)
@@ -224,6 +256,166 @@ export async function searchWorkspaceIndex(
     ...result,
     timings: timings.entries(),
   };
+}
+
+export function selectVisibleCandidates(
+  fused: readonly Candidate[],
+  limit: number,
+  relations: readonly SearchGraphRelation[],
+  seedIds: readonly string[],
+  query = "",
+): Candidate[] {
+  const visible = selectDistinctSemanticCandidates(fused, limit, query);
+  if (limit < 2 || visible.length < limit || relations.length === 0)
+    return withVisibleRanks(visible);
+
+  const seeds = new Set(seedIds);
+  const protectedSeeds = new Set(seedIds.slice(0, 1));
+  const directNeighborIds = new Set<string>();
+  const directNeighborWeights = new Map<string, number>();
+  const seedPosition = new Map(seedIds.map((id, index) => [id, index]));
+  const relationWeight = (kind: SearchGraphRelation["kind"]): number =>
+    kind === "INHERITS"
+      ? 5
+      : kind === "CALLS" || kind === "INSTANTIATES"
+        ? 4
+        : kind === "REFS"
+          ? 3
+          : kind === "IMPORTS"
+            ? 2
+            : 1;
+  const recordNeighbor = (
+    neighborId: string,
+    seedId: string,
+    kind: SearchGraphRelation["kind"],
+  ) => {
+    directNeighborIds.add(neighborId);
+    const position = seedPosition.get(seedId) ?? seedIds.length;
+    // Preserve the retrieval ordering as the primary signal, then prefer
+    // structural/runtime relations over containment. A direct neighbor of the
+    // strongest semantic seed should not lose to a higher-fused neighbor of a
+    // weak lexical seed.
+    const weight = (seedIds.length - position) * 10 + relationWeight(kind);
+    directNeighborWeights.set(
+      neighborId,
+      Math.max(weight, directNeighborWeights.get(neighborId) ?? 0),
+    );
+  };
+  for (const relation of relations) {
+    if (relation.scope !== "symbol") continue;
+    if (seeds.has(relation.srcId))
+      recordNeighbor(relation.dstId, relation.srcId, relation.kind);
+    if (seeds.has(relation.dstId))
+      recordNeighbor(relation.srcId, relation.dstId, relation.kind);
+  }
+  if (directNeighborIds.size === 0) return withVisibleRanks(visible);
+
+  const visibleFiles = new Set(visible.map((candidate) => candidate.file.id));
+  const structural = fused
+    .filter(
+      (candidate) =>
+        !visible.some((item) => item.id === candidate.id) &&
+        directNeighborIds.has(candidate.id) &&
+        candidate.sources.has("graph") &&
+        !visibleFiles.has(candidate.file.id) &&
+        !isLowValuePath(candidate.file.relativePath),
+    )
+    .sort(
+      (left, right) =>
+        (directNeighborWeights.get(right.id) ?? 0) -
+          (directNeighborWeights.get(left.id) ?? 0) ||
+        left.rank - right.rank ||
+        left.id.localeCompare(right.id),
+    )[0];
+  if (!structural) return withVisibleRanks(visible);
+
+  const fileCounts = new Map<string, number>();
+  for (const candidate of visible)
+    fileCounts.set(
+      candidate.file.id,
+      (fileCounts.get(candidate.file.id) ?? 0) + 1,
+    );
+  for (let index = visible.length - 1; index >= 0; index--) {
+    const candidate = visible[index]!;
+    if (
+      protectedSeeds.has(candidate.id) ||
+      (fileCounts.get(candidate.file.id) ?? 0) < 2
+    )
+      continue;
+    const result = [...visible];
+    result[index] = { ...structural, forced: true };
+    return withVisibleRanks(result);
+  }
+  return withVisibleRanks(visible);
+}
+
+function withVisibleRanks(candidates: readonly Candidate[]): Candidate[] {
+  return candidates.map((candidate, index) => ({
+    ...candidate,
+    selectionRank: index + 1,
+  }));
+}
+
+/**
+ * Exact symbol searches commonly recall both a container and declarations
+ * nested inside it because the type name occurs in constructors, destructors,
+ * and signatures. Returning both spends the result budget on source that the
+ * container hit already covers, leaving less room for callers, implementations
+ * and referenced types. Keep the higher-ranked enclosing entity and continue
+ * down the fused list to fill the vacated slot.
+ *
+ * This is deliberately limited to identifier-like queries and strict source
+ * containment. Natural-language searches may intentionally rank a member and
+ * its owner for different evidence, so they retain the ordinary fused order.
+ */
+function selectDistinctSemanticCandidates(
+  fused: readonly Candidate[],
+  limit: number,
+  query: string,
+): Candidate[] {
+  if (!isExactSymbolQuery(query)) return fused.slice(0, limit);
+
+  const selected: Candidate[] = [];
+  for (const candidate of fused) {
+    const nestedInSelectedContainer = selected.some(
+      (parent) =>
+        parent.file.id === candidate.file.id &&
+        isContainerCandidate(parent) &&
+        containsEntityRange(parent.entity, candidate.entity),
+    );
+    if (nestedInSelectedContainer) continue;
+    selected.push(candidate);
+    if (selected.length >= limit) break;
+  }
+  return selected;
+}
+
+function isExactSymbolQuery(query: string): boolean {
+  return /^[A-Za-z_$~][A-Za-z0-9_$~]*(?:::[A-Za-z_$~][A-Za-z0-9_$~]*)*$/.test(
+    query.trim(),
+  );
+}
+
+function isContainerCandidate(candidate: Candidate): boolean {
+  const metadata = candidate.entity.metadata;
+  return (
+    metadata?.kind === "code" &&
+    (metadata.symbolType === "class" ||
+      metadata.symbolType === "interface" ||
+      metadata.symbolType === "component" ||
+      metadata.symbolType === "module")
+  );
+}
+
+function containsEntityRange(parent: Entity, child: Entity): boolean {
+  return (
+    parent.range.kind === "text" &&
+    child.range.kind === "text" &&
+    parent.range.startOffset <= child.range.startOffset &&
+    parent.range.endOffset >= child.range.endOffset &&
+    (parent.range.startOffset < child.range.startOffset ||
+      parent.range.endOffset > child.range.endOffset)
+  );
 }
 
 export async function diagnoseEntitySearch(
@@ -1191,7 +1383,10 @@ function normalizePathFilterPattern(pattern: string): string {
   return normalizePathPattern(pattern);
 }
 
-function fuseCandidates(candidates: Map<string, Candidate>): Candidate[] {
+function fuseCandidates(
+  candidates: Map<string, Candidate>,
+  query = "",
+): Candidate[] {
   for (const candidate of candidates.values()) {
     candidate.score = 0;
     candidate.forced = candidate.recall.some((trace) => trace.forced);
@@ -1201,6 +1396,9 @@ function fuseCandidates(candidates: Map<string, Candidate>): Candidate[] {
         candidate.score += 1 / (RRF_K + recall.rank);
       }
     }
+    candidate.score *=
+      searchIdentityFactor(candidate, query) *
+      searchPathValueFactor(candidate.file.relativePath, query);
   }
 
   const fused = [...candidates.values()].sort((left, right) => {
@@ -1218,6 +1416,50 @@ function fuseCandidates(candidates: Map<string, Candidate>): Candidate[] {
   return fused;
 }
 
+function searchIdentityFactor(candidate: Candidate, query: string): number {
+  const trimmed = query.trim();
+  if (
+    !/^[A-Za-z_$~][A-Za-z0-9_$~]*(?:::[A-Za-z_$~][A-Za-z0-9_$~]*)*$/.test(
+      trimmed,
+    )
+  )
+    return 1;
+  const requested = trimmed.split("::").at(-1)!;
+  const names = [
+    candidate.entity,
+    ...candidate.evidence.map((item) => item.fragment),
+  ]
+    .map((fragment) => fragment.metadata)
+    .filter((metadata) => metadata?.kind === "code")
+    .map((metadata) => metadata.symbolName)
+    .filter((name): name is string => typeof name === "string");
+  // Exact symbol queries are navigational: the declaration named by the user
+  // must outrank occurrences, similarly named locals, and semantic neighbours.
+  // Preserve a smaller case-insensitive boost for languages and callers whose
+  // casing conventions differ, but do not let `counterStore` displace the
+  // `CounterStore` component declaration.
+  if (names.includes(requested)) return 3;
+  return names.some((name) => name.toLowerCase() === requested.toLowerCase())
+    ? 1.5
+    : 1;
+}
+
+function searchPathValueFactor(path: string, query: string): number {
+  if (!isLowValuePath(path)) return 1;
+  const queryTerms = query.match(/[\p{L}\p{N}_-]+/gu) ?? [];
+  if (queryTargetsPath(path, queryTerms)) return 1;
+  if (
+    isTestPath(path) &&
+    /\b(?:test|tests|testing|spec|specs|fixture|fixtures|mock|mocks)\b/i.test(
+      query,
+    )
+  )
+    return 1;
+  if (/\b(?:docs?|documentation|readme|example|benchmark)\b/i.test(query))
+    return 1;
+  return isTestPath(path) ? 0.05 : 0.3;
+}
+
 function candidateToHit(
   candidate: Candidate,
   limit: number,
@@ -1227,7 +1469,7 @@ function candidateToHit(
     entity: candidate.entity,
     file: candidate.file,
     evidence: sortEvidence(candidate.evidence).map(evidenceToSearchHitEvidence),
-    rank: candidate.rank,
+    rank: candidate.selectionRank ?? candidate.rank,
     score: candidate.score,
     matchedBy: deriveMatchedBy(candidate.sources),
     trace: trace ? candidateToTrace(candidate, limit) : undefined,
@@ -1325,7 +1567,7 @@ async function chooseBestEntityInFile(
     ctx.storage,
   );
 
-  const [best] = fuseCandidates(candidates);
+  const [best] = fuseCandidates(candidates, query);
   if (best) {
     return best.id;
   }
@@ -1346,6 +1588,50 @@ function deriveMatchedBy(sources: Set<SearchSource>): SearchMatchedBy {
     return "vector";
   }
   return "graph";
+}
+
+function findExactGraphCandidates(input: {
+  graph: GraphReader | undefined;
+  query: string;
+  filter?: StorageSearchFilter;
+  limit: number;
+}): StoredEntity[] {
+  if (!input.graph?.available) return [];
+  const trimmed = input.query.trim();
+  if (
+    !/^[A-Za-z_$~][A-Za-z0-9_$~]*(?:::[A-Za-z_$~][A-Za-z0-9_$~]*)*$/.test(
+      trimmed,
+    )
+  )
+    return [];
+
+  const leaf = trimmed.split("::").at(-1)!;
+  return input.graph
+    .findSymbolsByName(leaf, Math.min(8, Math.max(1, input.limit)))
+    .filter(
+      (match) =>
+        matchesGraphFilter(match, input.filter) &&
+        (!match.file.relativePath ||
+          searchPathValueFactor(match.file.relativePath, input.query) >= 1),
+    );
+}
+
+function injectExactGraphCandidates(input: {
+  storage: WorkspaceIndexStorage;
+  candidates: Map<string, Candidate>;
+  matches: readonly StoredEntity[];
+}): void {
+  let rank = 1;
+  for (const match of input.matches) {
+    mergeGraphCandidate({
+      storage: input.storage,
+      candidates: input.candidates,
+      entityId: match.entity.id,
+      routeId: "graph.exact",
+      syntheticRank: rank++,
+      score: 1,
+    });
+  }
 }
 
 function expandGraphNeighbors(input: {
@@ -1419,7 +1705,7 @@ function expandGraphNeighbors(input: {
       return scoreDiff || a.id.localeCompare(b.id);
     });
   const relations = subgraph.edges
-    .map((edge) => symbolSearchRelation(input.storage, edge))
+    .map((edge) => symbolSearchRelation(input.storage, edge, input.filter))
     .filter((relation): relation is SearchGraphRelation => relation !== null);
 
   let neighborsAdded = 0;
@@ -1653,12 +1939,24 @@ function matchesGraphFilter(
 
 function symbolSearchRelation(
   storage: WorkspaceIndexStorage,
-  edge: { src: string; dst: string; kind: GraphEdgeKind },
+  edge: {
+    src: string;
+    dst: string;
+    kind: GraphEdgeKind;
+    rel: string;
+    count: number;
+    provenance: "static" | "heuristic";
+    confidence: number;
+    evidence?: string;
+  },
+  filter?: StorageSearchFilter,
 ): SearchGraphRelation | null {
   if (edge.kind === "IMPORTS" || edge.kind === "DEFINES") return null;
   const src = storage.getEntity(edge.src);
   const dst = storage.getEntity(edge.dst);
   if (!src || !dst) return null;
+  if (!matchesGraphFilter(src, filter) || !matchesGraphFilter(dst, filter))
+    return null;
   return {
     srcId: edge.src,
     dstId: edge.dst,
@@ -1666,7 +1964,21 @@ function symbolSearchRelation(
     dstLabel: storedEntityLabel(dst),
     kind: edge.kind,
     scope: "symbol",
+    srcKind: storedEntityKind(src),
+    dstKind: storedEntityKind(dst),
+    srcFile: src.file.relativePath,
+    dstFile: dst.file.relativePath,
+    rel: edge.rel,
+    count: edge.count,
+    provenance: edge.provenance,
+    confidence: edge.confidence,
+    ...(edge.evidence ? { evidence: edge.evidence } : {}),
   };
+}
+
+function storedEntityKind(stored: StoredEntity): string | undefined {
+  const metadata = stored.entity.metadata;
+  return metadata?.kind === "code" ? metadata.symbolType : metadata?.kind;
 }
 
 function storedEntityLabel(stored: StoredEntity): string {
@@ -1681,14 +1993,16 @@ function selectGraphRelationships(
   visible: readonly Candidate[],
   seedIds: readonly string[],
   candidates: ReadonlyMap<string, Candidate>,
+  query: string,
 ): SearchGraphRelation[] {
+  const totalLimit = 20;
   const visibleEntities = new Set(visible.map((candidate) => candidate.id));
   const visibleFiles = new Set(visible.map((candidate) => candidate.file.id));
-  const allowedEntities = new Set([...visibleEntities, ...seedIds]);
-  const allowedFiles = new Set(visibleFiles);
+  const anchorEntities = new Set([...visibleEntities, ...seedIds]);
+  const anchorFiles = new Set(visibleFiles);
   for (const id of seedIds) {
     const seed = candidates.get(id);
-    if (seed) allowedFiles.add(seed.file.id);
+    if (seed) anchorFiles.add(seed.file.id);
   }
   const seen = new Set<string>();
   const priority: Record<SearchGraphRelation["kind"], number> = {
@@ -1699,21 +2013,94 @@ function selectGraphRelationships(
     IMPORTS: 4,
     INSTANTIATES: 2,
   };
-  return relations
+  const eligible = relations
     .filter((relation) => {
-      const allowed =
-        relation.scope === "symbol" ? allowedEntities : allowedFiles;
-      const visibleSet =
-        relation.scope === "symbol" ? visibleEntities : visibleFiles;
-      if (!allowed.has(relation.srcId) || !allowed.has(relation.dstId))
+      const anchors =
+        relation.scope === "symbol" ? anchorEntities : anchorFiles;
+      if (!anchors.has(relation.srcId) && !anchors.has(relation.dstId))
         return false;
-      if (!visibleSet.has(relation.srcId) && !visibleSet.has(relation.dstId))
+      if (
+        relation.scope === "symbol" &&
+        relationIntroducesLowValueNode(
+          relation,
+          visibleEntities,
+          candidates,
+          query,
+        )
+      )
         return false;
       const key = `${relation.scope}\0${relation.srcId}\0${relation.dstId}\0${relation.kind}`;
       if (seen.has(key)) return false;
       seen.add(key);
       return true;
     })
-    .sort((a, b) => priority[a.kind] - priority[b.kind])
-    .slice(0, 20);
+    .sort(
+      (a, b) =>
+        relationAnchorRank(a, visibleEntities, visibleFiles) -
+          relationAnchorRank(b, visibleEntities, visibleFiles) ||
+        priority[a.kind] - priority[b.kind] ||
+        a.srcId.localeCompare(b.srcId) ||
+        a.dstId.localeCompare(b.dstId),
+    );
+
+  // Preserve structural diversity. A hot callable can easily contribute more
+  // than twenty CALLS edges by itself; applying the global limit directly
+  // would hide inheritance, construction and module context completely.
+  const byKind = new Map<SearchGraphRelation["kind"], SearchGraphRelation[]>();
+  for (const relation of eligible) {
+    const group = byKind.get(relation.kind) ?? [];
+    group.push(relation);
+    byKind.set(relation.kind, group);
+  }
+  const selected: SearchGraphRelation[] = [];
+  let round = 0;
+  while (selected.length < totalLimit) {
+    let progressed = false;
+    for (const kind of [
+      "CALLS",
+      "INHERITS",
+      "INSTANTIATES",
+      "REFS",
+      "CONTAINS",
+      "IMPORTS",
+    ] as const) {
+      const relation = byKind.get(kind)?.[round];
+      if (!relation) continue;
+      selected.push(relation);
+      progressed = true;
+      if (selected.length >= totalLimit) break;
+    }
+    if (!progressed) break;
+    round += 1;
+  }
+  return selected;
+}
+
+function relationIntroducesLowValueNode(
+  relation: SearchGraphRelation,
+  visibleEntities: ReadonlySet<string>,
+  candidates: ReadonlyMap<string, Candidate>,
+  query: string,
+): boolean {
+  for (const id of [relation.srcId, relation.dstId]) {
+    if (visibleEntities.has(id)) continue;
+    const candidate = candidates.get(id);
+    if (
+      candidate &&
+      searchPathValueFactor(candidate.file.relativePath, query) < 1
+    )
+      return true;
+  }
+  return false;
+}
+
+function relationAnchorRank(
+  relation: SearchGraphRelation,
+  visibleEntities: ReadonlySet<string>,
+  visibleFiles: ReadonlySet<string>,
+): number {
+  const visible = relation.scope === "symbol" ? visibleEntities : visibleFiles;
+  const endpoints =
+    Number(visible.has(relation.srcId)) + Number(visible.has(relation.dstId));
+  return 2 - endpoints;
 }

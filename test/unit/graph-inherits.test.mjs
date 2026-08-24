@@ -114,6 +114,119 @@ test("extractFileGraph resolves cross-file extends after second file indexed", a
   graph.close();
 });
 
+test("extractFileGraph handles C++ export macros between class keyword and name", async () => {
+  const graph = new SqliteGraphStorage("", { inMemory: true });
+  const baseFile = codeFile("cpp-base", "catalog.h", "cpp");
+  const childFile = codeFile("cpp-child", "g_catalog.h", "cpp");
+  const baseSource = {
+    kind: "text",
+    file: baseFile,
+    text: "class NEUG_API Catalog { public: virtual ~Catalog() = default; };",
+  };
+  const implementationFile = codeFile(
+    "cpp-base-implementation",
+    "catalog.cpp",
+    "cpp",
+  );
+  const implementationSource = {
+    kind: "text",
+    file: implementationFile,
+    text: "Catalog::Catalog() {}",
+  };
+  const childSource = {
+    kind: "text",
+    file: childFile,
+    text: "class GCatalog : public Catalog { public: GCatalog(); };",
+  };
+  const baseInput = await extractFileGraph(
+    baseSource,
+    await new CodeExtractor().extract(baseSource),
+  );
+  const childInput = await extractFileGraph(
+    childSource,
+    await new CodeExtractor().extract(childSource),
+  );
+  const implementationInput = await extractFileGraph(
+    implementationSource,
+    await new CodeExtractor().extract(implementationSource),
+  );
+  const base = baseInput.nodes.find(
+    (node) => node.name === "Catalog" && node.kind === "class",
+  );
+  const child = childInput.nodes.find((node) => node.name === "GCatalog");
+  assert.ok(base && child);
+  graph.upsertFileGraph(
+    baseFile.id,
+    baseInput.nodes,
+    baseInput.edges,
+    baseInput.refs,
+  );
+  graph.upsertFileGraph(
+    implementationFile.id,
+    implementationInput.nodes,
+    implementationInput.edges,
+    implementationInput.refs,
+  );
+  graph.upsertFileGraph(
+    childFile.id,
+    childInput.nodes,
+    childInput.edges,
+    childInput.refs,
+  );
+  await graph.resolvePending();
+  assert.deepEqual(
+    graph.hierarchy(child.id, "bases", 10).map((ref) => ref.id),
+    [base.id],
+  );
+  graph.close();
+});
+
+test("cross-file C++ inheritance resolves a pure-virtual abstract base", async () => {
+  const graph = new SqliteGraphStorage("", { inMemory: true });
+  const baseFile = codeFile("cpp-abstract-base", "runner.h", "cpp");
+  const childFile = codeFile("cpp-abstract-child", "worker.h", "cpp");
+  const baseSource = {
+    kind: "text",
+    file: baseFile,
+    text: "class Runner { public: virtual const char* run() = 0; };",
+  };
+  const childSource = {
+    kind: "text",
+    file: childFile,
+    text: '#include "runner.h"\nclass Worker : public Runner { public: const char* run() override { return "ok"; } };',
+  };
+  const baseInput = await extractFileGraph(
+    baseSource,
+    await new CodeExtractor().extract(baseSource),
+  );
+  const childInput = await extractFileGraph(
+    childSource,
+    await new CodeExtractor().extract(childSource),
+  );
+  const base = baseInput.nodes.find((node) => node.name === "Runner");
+  const child = childInput.nodes.find((node) => node.name === "Worker");
+  assert.equal(base?.kind, "abstract_class");
+  assert.ok(child);
+  graph.upsertFileGraph(
+    baseFile.id,
+    baseInput.nodes,
+    baseInput.edges,
+    baseInput.refs,
+  );
+  graph.upsertFileGraph(
+    childFile.id,
+    childInput.nodes,
+    childInput.edges,
+    childInput.refs,
+  );
+  await graph.resolvePending({ files: [baseFile, childFile] });
+  assert.deepEqual(
+    graph.hierarchy(child.id, "bases", 10).map((ref) => ref.id),
+    [base.id],
+  );
+  graph.close();
+});
+
 test("extractFileGraph collects python bases and drops object", async () => {
   const file = codeFile("py", "mod.py", "python");
   const text = `

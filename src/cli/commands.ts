@@ -11,6 +11,7 @@ import {
   type ZvecGrep,
   type ZvecGrepInfoResult,
 } from "../index.js";
+import { openWorkspaceGraphReadSession } from "../engine/service/zvec-grep.js";
 import { globalConfigPath, updateGlobalConfig } from "../engine/config.js";
 import { listEmbeddingModels } from "../engine/models/index.js";
 import { DaemonClient } from "../client/daemon-client.js";
@@ -60,6 +61,7 @@ import {
   parseServerSearchResponse,
 } from "./server-search.js";
 import { runInstall, runUninstall } from "./install.js";
+import { readPackageVersion } from "./version.js";
 import {
   runAuth,
   authorizationStore,
@@ -605,9 +607,7 @@ async function runExplore(parsed: ParsedArgs): Promise<void> {
       );
     },
     direct: async () => {
-      const service = await createZvecGrep(
-        createServiceOptions(parsed.options, root),
-      );
+      const service = openWorkspaceGraphReadSession(root);
       try {
         printExploreResult(await service.explore(input));
       } finally {
@@ -634,6 +634,7 @@ async function runGraphNeighborhood(parsed: ParsedArgs): Promise<void> {
     depth: parsed.options.depth,
     limit: parsed.options.limit,
     seedId: parsed.options.seedId,
+    file: parsed.options.definitionFile,
   };
   await routeByMode({
     mode: resolveClientMode(parsed.options.mode),
@@ -647,9 +648,7 @@ async function runGraphNeighborhood(parsed: ParsedArgs): Promise<void> {
       );
     },
     direct: async () => {
-      const service = await createZvecGrep(
-        createServiceOptions(parsed.options, root),
-      );
+      const service = openWorkspaceGraphReadSession(root);
       try {
         printNeighborhoodResult(await service.graphNeighborhood(input));
       } finally {
@@ -705,7 +704,7 @@ async function runDirectQuery(
 ): Promise<void> {
   if (commandOptions.refresh === "background") {
     console.error(
-      "warning: --refresh background requires Server mode; Direct mode uses --refresh off",
+      "warning: --refresh background requires Server mode; Direct mode uses --refresh check",
     );
   }
   const serviceOptions = createServiceOptions(commandOptions, undefined);
@@ -721,7 +720,19 @@ async function runDirectQuery(
         if (progressEvent.phase !== "done") progress.report(progressEvent);
       },
     );
-    const info = await directQueryInfo(zvecGrep);
+    const info = await directQueryInfo(zvecGrep, false);
+    const searchPolicy = resolveDirectSearchPolicy(commandOptions);
+    // A freshness scan walks the whole workspace. It is independent from the
+    // read-only search, so overlap it with model acquisition and retrieval
+    // instead of adding both costs serially. `refresh=wait` already performs
+    // the authoritative scan/update inside context().
+    const statusPromise =
+      searchPolicy.autoUpdate === true || commandOptions.refresh === "off"
+        ? undefined
+        : directQueryInfo(zvecGrep, true).then(
+            (current) => ({ status: current.status }),
+            (error: unknown) => ({ error }),
+          );
     const schema = info.workspaceIndex?.embedding;
     const workspaceRuntime = workspaceRuntimeFromInfo(info);
     const modelInfo =
@@ -755,6 +766,8 @@ async function runDirectQuery(
       authorizationResolution.authorization,
       () => zvecGrep.context(effectiveContextRequest),
     );
+    const statusResult = await statusPromise;
+    if (statusResult && "error" in statusResult) throw statusResult.error;
     progress.finish();
     printCliContextResult(result, commandOptions);
     for (const line of contextWarningLines(result)) {
@@ -762,9 +775,12 @@ async function runDirectQuery(
     }
     if (
       effectiveContextRequest.autoUpdate !== true &&
-      indexStatusNeedsRefresh(info.status)
+      indexStatusNeedsRefresh(statusResult?.status ?? null)
     ) {
-      printStaleIndexStatus("idle", indexCompletionFromStatus(info.status));
+      printStaleIndexStatus(
+        "idle",
+        indexCompletionFromStatus(statusResult?.status ?? null),
+      );
     }
 
     if (commandOptions.debug) {
@@ -856,6 +872,7 @@ function daemonClient(options: CliOptions): DaemonClient {
     home: options.home,
     tokenFile: options.serverTokenFile,
     allowRemote: options.allowRemote,
+    expectedServerVersion: readPackageVersion(),
   });
 }
 
@@ -876,8 +893,11 @@ function ftsFallbackContextRequest(
   };
 }
 
-async function directQueryInfo(service: ZvecGrep): Promise<ZvecGrepInfoResult> {
-  return await service.info({ root: process.cwd() });
+async function directQueryInfo(
+  service: ZvecGrep,
+  includeStatus: boolean,
+): Promise<ZvecGrepInfoResult> {
+  return await service.info({ root: process.cwd(), includeStatus });
 }
 
 function normalizedDirectSearchInput(

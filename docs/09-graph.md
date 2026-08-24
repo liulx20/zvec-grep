@@ -36,7 +36,7 @@
 | 类型 | 含义 | 典型来源 |
 | --- | --- | --- |
 | `File` | 已索引文件 | 文件扫描与主索引 |
-| `Symbol` | 函数、方法、类、接口等公开代码实体 | `EntityFragment` |
+| `Symbol` | 函数、方法、类、接口、Vue/Svelte 组件等公开代码实体 | `EntityFragment` |
 | `DEFINES` | 文件定义符号 | 由 `Symbol.file_id` 隐式表达 |
 | `CONTAINS` | 类/容器包含成员 | fragment 的父子关系 |
 | `CALLS` | 调用、构造调用 | call-site 提取 |
@@ -48,6 +48,12 @@
 `unresolved_refs`，等所有文件写入后统一解析。同一 owner、名称、关系类型和行号下的多个引用会用
 采集顺序中的 occurrence 区分 Ref ID，因此 `target(); target();` 不会在解析前被误去重。解析成功后，
 该 occurrence 会迁移到 `edges`，并从 `unresolved_refs` 删除。
+
+Vue/Svelte 单文件组件会建立独立的 `component` Symbol，脚本块中的实体通过 `CONTAINS` 归属该组件；
+组件 import 支持 `.vue`/`.svelte` 扩展解析，Vue/Svelte 模板中的组件标签生成 `REFS`，Svelte 模板
+表达式中的直接函数调用生成 `CALLS`。Explore 还会把组件根节点与脚本中精确解析的 named import
+连接起来，使 store、composable 和 helper 能参与文件排序；该桥接不会展开 imported 文件中的全部符号。
+HTML 原生标签、框架内建组件和 Svelte runes 不进入关系图。
 
 ### 2.2 引用解析
 
@@ -66,8 +72,9 @@
 
 `GraphReader` 当前提供：
 
-- `callers` / `callees`：调用者和被调用者，多层 BFS。
-- `impact`：沿入向 `CALLS` 与 `REFS` 查找潜在受影响符号。
+- `callers` / `callees`：调用者和被调用者（包含构造关系），多层 BFS。
+- `impact`：沿入向调用、引用、继承与实例化关系查找潜在受影响符号；类型容器会在同一层
+  展开成员，以覆盖成员调用方。
 - `usages`：查询一个符号的直接使用点。
 - `hierarchy`：基类和派生类查询。
 - `members`：容器成员查询。
@@ -88,8 +95,12 @@
   `zvec_grep_explore`。
 - CLI 和 MCP 只解析参数和格式化结果。实际调用统一进入 `ZvecGrep` service；Server 模式再经过
   `ZvecGrepDaemonBackend` 和 workspace read session，因此会复用 daemon 路由、workspace 锁及 session cache。
-- daemon 为图操作维护独立的 model-free read session cache；Explore 和 neighborhood 只打开持久化实体索引
-  与 SQLite，不获取、下载或验证 embedding model。
+- daemon 为图操作维护独立的 model-free read session cache；Explore 和 neighborhood 只打开 SQLite。
+  `files` 和 `symbols.range_json` 提供轻量展示投影，源码按 range 从当前工作区读取，因此图查询既不打开
+  Zvec collection，也不获取、下载或验证 embedding model。
+- 同一个 direct `ZvecGrep` service 的普通 Query 也按 manifest、embedding runtime 和模型配置复用只读
+  `WorkspaceIndex`。index、refresh、drop 和 service close 会先等待活动 reader 并关闭旧 generation；
+  endpoint/API key 或 manifest generation 变化不会复用旧句柄。
 - 普通 `zg query` / `zvec_grep_search`：不会调用 `explore`，但会使用图做轻量候选扩展。
 
 ## 3. 数据模型
@@ -113,13 +124,19 @@ erDiagram
 
   FILE {
     text id PK
+    text absolute_path
+    text relative_path
+    text root_path
+    text format
   }
   SYMBOL {
     text id PK
     text file_id FK
     text name
+    text qualified_name
     text kind
     boolean is_exported
+    text range_json
   }
   EDGE {
     text id PK
@@ -182,8 +199,8 @@ erDiagram
 | 表 | 主键 | 作用 |
 | --- | --- | --- |
 | `graph_meta` | `key` | 保存 `schema_version` |
-| `files` | `id` | 图中存在的文件 |
-| `symbols` | `id` | 符号及其所属文件、名称、种类、导出状态 |
+| `files` | `id` | 图中存在的文件及 graph-only 展示所需的路径、格式和基础属性 |
+| `symbols` | `id` | 符号及其所属文件、名称、限定名称、种类、导出状态和源码 range |
 | `contains` | `(parent_id, child_id)` | 容器与成员关系 |
 | `edges` | `id` | 已解析的 `CALLS`、`REFS`、`INHERITS`、`IMPORTS`、`INSTANTIATES` occurrence |
 | `unresolved_refs` | `id` | 尚未解析、外部或动态的源码引用 occurrence |
@@ -209,6 +226,11 @@ erDiagram
 - `symbols.signature`、`arity` 和 `return_type` 保存用于重载过滤与类型传播的签名事实。`arity`
   直接从各语言的参数 AST 提取，不再按 signature 文本中的逗号推导；Rust 的 `self` 参数和 Python
   的首个 `self` / `cls` 参数不计入调用 arity，泛型类型内部的逗号也不会被误算为参数分隔符。
+- `symbols.qualified_name` 保存语言级稳定身份，例如 `Namespace::Type::member`。receiver/member
+  解析优先按限定名称匹配，再沿现有 `INHERITS` provider closure 查找；这使 C++ 头文件中的类型和另一文件中的
+  out-of-line 方法定义可以关联，同时避免把其他容器中的同名方法当成候选。
+- 查询层把 `parent.qualified_name + "::" + child.name == child.qualified_name` 视为派生 `CONTAINS`；
+  它不额外写入物理边，但 `members`、遍历和 Explore 都能由头文件类型扩展到其他源文件中的方法定义。
 - `unresolved_refs.status` 只包含 `pending / failed / external / dynamic`；不存在 `resolved` 状态。
   多目标调用保持 `dynamic` 并写入 `edge_candidates`。
   `resolvePending()` 不会全量 replay receiver facts；writer 根据 changed member/type/ref names、
@@ -216,7 +238,8 @@ erDiagram
 - 目标文件删除或重建时，writer 通过 `edges.dst_id`、名称和 hints 定位受影响 occurrence，把边恢复为
   `unresolved_refs` 的 `pending` 记录。新增同名 symbol 也会使可能受影响的已解析引用重新投影。
 - schema 使用 `STRICT`、外键、组合主键和按 src/dst/name 建立的查询索引。
-- 当前 schema 版本为 1，作为相对 main 新增图存储的首个正式 schema。不兼容分支中间提交生成的实验数据库；
+- 当前 schema 版本为 4，增加 graph-only 查询使用的文件定位、symbol range 和紧凑展示元数据。它不复制源码、FTS 或向量；
+  不兼容分支中间提交生成的实验数据库；
   read-only 模式遇到旧版本会明确拒绝打开，可写索引要求 rebuild。
 - 引入图索引后，workspace `CURRENT_INDEX_VERSION` 已提升为 2。旧 v1 workspace 不会把 unchanged
   文件直接沿用为“已有图数据”，而是要求执行 rebuild；rebuild 会同时重建 Zvec 主索引和完整图索引。
@@ -354,12 +377,15 @@ query 严格按照下面四个阶段执行：
 普通 query 的主体输出仍是代码 `SearchHit`，但会附带一个紧凑的 `relationships` 摘要，帮助调用方
 理解这些结果为什么在图上相关：
 
-- 只保留最终结果/seed 之间的关系，且至少一端必须是最终可见结果。
-- 关系端点必须通过原 query filter，不会借关系泄露被排除实体。
+- 只保留至少一端属于最终结果或 seed 的关系；另一端可以不占用正文 hit 配额，因此小 `limit` 仍能
+  说明调用、继承和容器结构。
+- 两个关系端点都必须通过原 query filter，不会借关系泄露被排除实体。
 - 支持 `CALLS`、`INHERITS`、`CONTAINS`、`REFS` 和文件级 `IMPORTS`。
 - 按上述关系类型优先级排序、去重，全局最多输出 20 条。
 - CLI/MCP 紧凑文本在源码结果后输出，例如
-  `login --CALLS--> validateToken`；structured result 同时提供端点 ID、label、kind 和 scope。
+  `login (function, src/auth/login.ts) --CALLS--> validateToken (function, src/auth/token.ts)`；structured
+  result 同时提供端点 ID、label、kind、scope、文件、符号类型、`rel/count` 和
+  `provenance/confidence/evidence`。
 
 普通 query 不返回完整局部子图，而是输出经过图增强的扁平代码结果，并在末尾追加关系摘要：
 
@@ -386,9 +412,10 @@ relationships:
 
 这三个命令都先按实体 ID 或精确符号名确定一个 seed，然后从这个 seed 做定向遍历：
 
-- `callers` 沿入向 `CALLS` 查找谁调用了 seed。
-- `callees` 沿出向 `CALLS` 查找 seed 调用了谁。
-- `impact` 沿入向 `CALLS + REFS` 查找修改 seed 后可能需要检查的依赖符号。
+- `callers` 沿入向 `CALLS + INSTANTIATES` 查找谁调用或构造了 seed。
+- `callees` 沿出向 `CALLS + INSTANTIATES` 查找 seed 调用或构造了谁。
+- `impact` 沿入向 `CALLS + REFS + INHERITS + INSTANTIATES` 查找修改 seed 后可能需要检查的
+  依赖符号；seed 是类型容器时还会通过其成员继续查找外部依赖。
 
 图只负责返回符号 ID；输出前会回到主索引补齐符号名、类型和文件路径。正常结果例如：
 
@@ -415,14 +442,27 @@ depth=2 limit=20
 - loginController (src/http/login-controller.ts) function
 ```
 
-同一个名称匹配多个符号且未提供 `seedId` 时，不会猜测目标，而是返回候选要求消歧：
+同一个名称匹配多个独立定义时，不会猜测目标或合并其邻居，而是按语义定义分组、分别遍历：
 
 ```text
-ambiguous seeds for parse:
-- parse (src/json/parser.ts)
-- parse (src/config/parser.ts)
-re-run with a unique name or --seed-id <id>
+callers: parse
+definitions=2 depth=1 limit=20 per definition
+
+definition: parse (src/json/parser.ts)
+results=1
+- decodeJson (src/json/decode.ts) function
+
+definition: parse (src/config/parser.ts)
+results=1
+- loadConfig (src/config/load.ts) function
+
+narrow with --file <relative-path> or --seed-id <id>
 ```
+
+`--file`（MCP 中为 `file`）可按相对或绝对源码路径收窄同名定义；`seedId` 仍可精确选择单个
+实体。头文件声明与对应实现会组成一个语义组并共同遍历，但不同文件中的多个真实定义不会仅因
+`symbolType + scope + name` 相同而被错误合并。文件过滤没有匹配时会给出 warning 并回退到
+全部定义组，而不是把“过滤路径错误”伪装成“符号不存在”。
 
 其他边界输出为：
 
@@ -449,13 +489,21 @@ type GraphNeighborhoodResult = {
   limit: number;
   seeds: GraphSeedMatch[];
   ambiguous?: boolean;
+  groups?: {
+    seed: GraphSeedMatch;
+    members: GraphSeedMatch[];
+    truncated?: boolean;
+    neighbors: EnrichedSymRef[];
+  }[];
+  groupsTruncated?: boolean;
   seed?: GraphSeedMatch;
   neighbors: EnrichedSymRef[];
 };
 ```
 
-该路径面向单一符号的定向邻域查询，默认深度 1、默认限制 20；深度限制为 1–10，
-结果限制为 1–200。
+该路径面向语义定义组的定向邻域查询；`callers` / `callees` 默认深度 1，`impact` 默认深度 2，
+默认每组限制 20。深度限制为 1–10，结果限制为 1–200；同名定义组最多输出 8 组，避免
+monorepo 中常见名称导致无界查询。
 
 ### 5.3 explore
 
@@ -516,16 +564,23 @@ change surface:
 dynamic boundaries:
 - dispatch -> handler.handle (unknown_receiver_type)
 
+relationships:
+CALLS:
+- login --CALLS--> authenticate
+REFS:
+- login --REFS--> LoginRequest
+
 src/auth/login.ts (central, score=0.3512)
-relations: login --CALLS--> authenticate; login --REFS--> LoginRequest
+selected: login(root), authenticate(calls)
 source:
 // function login L20-38
-export async function login(...) { ... }
+20  export async function login(...) { ... }
 
 src/auth/types.ts (change-surface, score=0.0021)
+selected: LoginResult(references)
 source:
 // class LoginResult L1-12
-export class LoginResult { ... }
+1  export class LoginResult { ... }
 ```
 
 各部分含义如下：
@@ -537,8 +592,9 @@ export class LoginResult { ... }
 | `call paths` | 多个 root 之间能够证明的调用路径 |
 | `blast radius` | root 的反向依赖和测试文件提示 |
 | `change surface` | callable 的参数/返回类型；`rescued` 表示原本会被文件预算埋没 |
-| `relations` | 当前输出文件所含节点与子图其他节点之间的关系摘要 |
-| `source` | 从主索引实体内容组装的相关符号源码，而不是 SQLite 图数据 |
+| `relationships` | 全局关系摘要，按 `CALLS / INHERITS / REFS / INSTANTIATES` 分组并分别限额；不重复输出 `CONTAINS` |
+| `selected` | 文件入选原因，例如 root、跨文件 definition、calls 或 references |
+| `source` | 根据 SQLite 中的文件定位和 symbol range，从当前工作区源码按需组装 |
 
 文件标签含义：
 
@@ -588,9 +644,11 @@ type ExploreEdge = {
 无法确定接收者类型的 `obj.method()`，让 Agent 知道静态图在这里断开，而不是把“没有边”误读成
 "没有调用"。每个 boundary 同时返回预算内的 `candidates`；单条 boundary 的
 `candidatesTruncated` 和结果级 `dynamicBoundariesTruncated` 会明确指出候选或边界列表是否被预算截断。
-只有 `call` 引用会进入 dynamic boundary；字段/member 引用不会混入。带实际候选的多态边界优先保留，
-没有候选的未知 receiver 调用最多使用 dynamic-boundary 预算的四分之一（且不超过 12 条），避免容器方法
-和第三方 API 调用淹没 Explore context。
+只有 `call` 引用会进入 dynamic boundary；字段/member 引用不会混入。Explore 默认只展示带实际候选的
+多态边界；没有候选的 `unknown_receiver_type` 仍保留在图查询中，但不进入默认 context pack，避免容器方法
+和第三方 API 调用淹没输出。resolver 会按源语言识别内建 receiver；在没有真实图候选时，
+TypeScript 的 `Array / Map / Set / Promise`、Python 的 `list / dict`、Java 集合、Rust 标准容器以及 C++ STL
+容器等会被标记为 `external`，不会写成 dynamic boundary。真实存在的同名用户类型仍优先参与解析。
 
 结构化 target 的 `receiverType`、`candidateTypes`、`genericBounds` 和 `dispatch` 由语言 AST 提取：
 Go 支持方法 receiver、参数类型和类型参数 constraint；Rust 支持参数类型和 trait bound；Java 支持参数
@@ -599,6 +657,9 @@ Go 支持方法 receiver、参数类型和类型参数 constraint；Rust 支持�
 会按语言的结构化 typing 规则在可见文件内使用 method set 候选；Java interface 和 Rust trait 必须来自
 显式 `implements` / trait impl 关系，不能用无关类的同名方法补候选。唯一候选可以生成带 provenance/confidence 的关系；
 多个候选保留为 `polymorphic_dispatch` boundary，不会伪造唯一调用边。
+若 receiver type 在可见图中不存在，即使工作区里只有一个同名方法，也保留为
+`unknown_receiver_type` boundary，不会退化成跨类型的全局同名连接。继承方法按 provider 深度选择最近的
+具体实现；抽象类中的具体方法仍可由已实例化子类继承，真正的抽象方法则不会成为 `CALLS` 目标。
 Go method set 校验会沿嵌入 interface/type 的 `INHERITS` provider closure 递归展开，因此 promoted method
 也可用于判断一个具体类型是否完整实现 interface。
 
@@ -615,6 +676,13 @@ RTA 会把已实例化子类继承的方法映射到实际 provider，例如实�
 resolver projection 与 reader 的 dynamic-boundary 查询共用 `SemanticCandidateRepository`，不再维护两份
 递归候选 SQL。repository 统一处理可见文件、arity、RTA、排序和预算；Java、Go、Rust 策略分别决定
 `extends/implements/trait` 范围与 interface/trait method-set 的结构化候选规则。
+
+Explore seed selection 对完整 symbol name 采用 exact-first：只要存在精确命中，就不再把语义召回结果混成
+额外 roots；同名候选中生产文件优先于测试文件。源码组装始终把 root 所属文件标记为 central，并对非 root
+测试文件降权；`third_party/vendor/node_modules`、examples/benchmarks 和 tools/scripts 也按程度降权，除非查询
+明确提到对应目录。与 root 类型 qualified name 匹配的跨文件方法 definition 会获得额外文件分，优先于普通
+邻居进入预算。若 class/type 的源码 range 已完整包含成员 range，只输出外层源码块，避免 class body 与方法
+再次重复占用字符预算。源码片段按真实起始行编号，离散片段之间输出 `... (gap) ...`。
 
 类型事实收集会在进入嵌套 method/function/constructor entity 前停止，节点边界按 type 和 source range
 判断，不依赖 Tree-sitter wrapper 对象身份，因此匿名内部类或嵌套函数的参数不会污染外层 receiver map。
@@ -636,8 +704,8 @@ scope；同名局部变量在兄弟 block 中不会互相覆盖，函数参数�
 这是当前最主要的能力瓶颈。
 
 - 基于名称和启发式作用域解析，不是 TypeScript language service 或编译器级解析。
-- JS/TS named import alias 和 Python `from ... import ... as ...` 已通过 binding IR 解析；namespace、
-  限定名、default import 和 re-export 链仍不完整。
+- JS/TS named/default import alias 和 Python `from ... import ... as ...` 已通过 binding IR 解析；default
+  import 会优先选择组件或目标文件中唯一导出的顶层实体。namespace、限定名和复杂 re-export 链仍不完整。
 - 不理解 `tsconfig paths`、package exports、workspace package 等完整模块解析规则。
 - 当前提取方法 receiver、函数参数、字段、局部变量显式类型、简单构造赋值和直接泛型约束；尚未进行
   分支合流、复杂赋值、容器元素、返回值跨函数传播；
@@ -678,13 +746,52 @@ occurrence 仍依赖提取遍历顺序，尚未使用 column 或稳定 source ra
 
 - 普通 query 使用固定小预算的 explore 子图扩展，边权、预算和 synthetic rank penalty 尚不可配置
   或学习。
+- 普通 query 会在尾部结果中为“与 seed 直接相连且来自新文件”的图命中保留有限位置；被提升的命中
+  通过 `forced` 和 `matchedBy=graph` 暴露来源。它不会替换 seed 或唯一文件，也不会把任意多跳邻居
+  强行塞进结果。Vue 组件引用 Pinia store 这类跨文件结构关系因此可以进入正文结果，而不只出现在
+  relationship 摘要中。
+- CLI 冷启动 query 的总耗时还包含 Node 进程、配置、embedding model acquire 和 query embedding；
+  它不能直接当作 SQLite 图查询耗时。性能回归应同时记录 service 内部的 `query_embedding`、
+  `recall`、`graph_expand` 和 `search_total`，并区分冷启动与常驻 daemon/session。真实 Go 查询中，
+  复用 service 后的后续请求约为 22–25ms；CLI 冷启动仍约为 700–900ms，两者不能混用一个指标。
 - Explore 的种子质量依赖主索引精确名称/文本检索；自然语言短语可能选到噪声种子。
+- Explore 的声明/实现配对先按候选文件 stem 批量读取符号，再由统一 counterpart policy 校验路径；
+  不再为每个头文件分别扫描整个 symbols 表。NeuG `NeugDB` 的相同 `8 files / 152 nodes`
+  结果在本地热测中由约 366–373ms 降至 327–335ms。
 - Change surface 依赖已经成功解析的直接 `type`/`return` 边；未解析 alias、泛型绑定或动态类型
   不会被救回。
 - Explore 直接通过 SQLite source/target/kind 索引读取类型化边，同一对节点并存的 `CALLS`、
   `REFS` 等关系会分别保留。
 - RWR 只在预算裁剪后的局部子图运行，结果受选种、遍历顺序和预算影响。
-- `impact` 本质上是入向 `CALLS + REFS` 的启发式影响范围，不等价于编译依赖或测试覆盖分析。
+- `impact` 本质上是入向调用、引用、继承和实例化关系的启发式影响范围，不等价于编译依赖或
+  测试覆盖分析。
+- 大型动态语言项目中的 receiver、猴子补丁、反射、依赖注入和运行时注册无法由 Tree-sitter 静态事实
+  完整证明。当前策略是：有可靠 binding/type/hierarchy 证据时生成关系；存在多个可信目标时保留
+  dynamic boundary；缺乏证据时保持 unresolved/external，不退化为工作区全局同名方法连接。
+- TypeScript 与 Python 的联合类型参数和局部变量会保留完整候选集合，例如 `Alpha | Beta` 不再被
+  压缩为最后一个类型；成员调用投影为带候选的 `polymorphic_dispatch` boundary。单一类型注解仍走
+  确定解析，词法重绑定会遮蔽旧候选。
+- Python 会从 `__init__` 中带类型注解的参数赋值恢复实例字段类型，例如
+  `self.driver = graph_driver` 会把 `GraphDriver` 传播到其他方法中的 `self.driver.execute_query()`；
+  只接受构造器参数注解或字段自身注解，不从任意运行时赋值猜测类型。
+- 链式 factory receiver 使用 owner-qualified callable identity，例如 `Alpha::new()` 与 `Beta::new()`
+  不再共享一个由遍历顺序覆盖的裸 `new` 返回类型；只有同文件全部裸同名 callable 返回类型一致时才允许
+  bare fallback。Java/TypeScript 的显式 `new Type()` 直接使用语法中的 nominal type。Go 的普通
+  `Factory()` 不再被误当成类型，仅对惯用 `NewType() -> Type` 保留启发式恢复，真实返回签名存在时仍以
+  签名为准。
+- Go import 的可见性按 package 目录展开，而不是只使用 import path 解析出的一个代表文件。结构候选索引
+  在内存中校验完整 interface method set、嵌入 interface/struct 的 promoted methods，并选择最近 provider。
+  Chi 完整 rebuild 中，`Router` receiver 的 231 条 `unknown_receiver_type` 转为带候选的
+  `polymorphic_dispatch`；graph resolve 从递归 SQL 版本约 1,122ms 降至约 236ms。
+- 在固定 Graphiti worktree 完整 rebuild 后，Python `unknown_receiver_type` 从 1,956 降至 772；
+  Python 构造赋值和带装饰器函数会在内部 callable AST 上建立逐调用点类型环境，FastAPI、pytest、
+  Click 等框架常见的装饰器不会再导致整个函数的参数与局部绑定丢失。
+  `Annotated[T, ...]` 等单目标类型包装会按当前 import closure 展开；不同模块复用同一 alias 名时
+  不依赖数据库行顺序，循环 alias 在 16 层以内按 visited set 保守停止。
+  同时生成 790 条带候选证据的 `polymorphic_dispatch`。其中 `QueryExecutor`/`GraphDriver` 是 ABC，
+  因此保留候选边界而非伪造确定 CALLS。带默认参数、可选参数、rest/splat 的 callable 不再使用错误的
+  固定 arity 过滤；当前 schema 还没有 min/max arity，因此这类 callable 以未知精确 arity 保存。
+  该次 16,527 条 symbol refs 的 graph resolve 约 915ms。
 - `deadCode` 是基于图入边的候选判断，不能证明代码不可达。
 
 ### 6.6 覆盖面与可观测性

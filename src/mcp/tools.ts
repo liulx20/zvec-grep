@@ -55,6 +55,7 @@ import {
   type ZvecGrepRgInput,
   type ZvecGrepSearchIndexing,
 } from "./schemas.js";
+import { ZVEC_GREP_CLI_CONTRACT_ID } from "./cli-contract.js";
 import { embeddingEnvironmentFromRequestMeta } from "./request-metadata.js";
 import { textToolResult, toolResult } from "./result-format.js";
 import type {
@@ -322,7 +323,11 @@ export function createZvecGrepMcpServer(
     options.requestStateReplayGuard ??
     new InMemoryRemoteEmbeddingRequestStateReplayGuard();
   const server = new McpServer(
-    { name: "zvec-grep", version },
+    {
+      name: "zvec-grep",
+      version,
+      title: ZVEC_GREP_CLI_CONTRACT_ID,
+    },
     {
       instructions:
         toolset === "full"
@@ -576,6 +581,7 @@ export function registerZvecGrepTools(
           direction,
           query: input.query,
           seedId: input.seedId,
+          file: input.file,
           depth: input.depth,
           limit: input.limit,
           root: input.root,

@@ -13,6 +13,13 @@ export function resolveLocalReferenceCandidates(
   ownerId: string,
   index: LocalReferenceIndex,
 ): string[] {
+  // Namespace/type-qualified references have an exact language-level identity.
+  // Prefer it over interpreting the first segment as an object receiver; this
+  // covers C++/Rust `ns::Type` while preserving `Type::member` fallback below.
+  if (plan.qualifiedLookupName) {
+    const exact = index.nameToIds.get(plan.qualifiedLookupName) ?? [];
+    if (exact.length > 0) return [...exact];
+  }
   const candidates = index.nameToIds.get(plan.lookupName) ?? [];
   if (plan.containerScope.kind === "none") return [...candidates];
   const containerIds = localContainerScope(plan.containerScope, ownerId, index);
@@ -22,7 +29,7 @@ export function resolveLocalReferenceCandidates(
     );
     if (hits.length > 0) return hits;
   }
-  return [];
+  return plan.containerScope.kind === "owner-preferred" ? [...candidates] : [];
 }
 
 function localContainerScope(
@@ -33,14 +40,16 @@ function localContainerScope(
   if (scope.kind === "named") {
     return [...(index.nameToIds.get(scope.name) ?? [])];
   }
-  if (scope.kind !== "owner-hierarchy") return [];
+  if (scope.kind !== "owner-hierarchy" && scope.kind !== "owner-preferred")
+    return [];
   const ownerContainer = index.containerIdByChild.get(ownerId);
   if (!ownerContainer) return [];
   const seen = new Set<string>();
   const containers: string[] = [];
-  const queue = scope.includeOwner
-    ? [ownerContainer]
-    : localBases(ownerContainer);
+  const queue =
+    scope.kind === "owner-preferred" || scope.includeOwner
+      ? [ownerContainer]
+      : localBases(ownerContainer);
   while (queue.length > 0) {
     const current = queue.shift()!;
     if (seen.has(current)) continue;

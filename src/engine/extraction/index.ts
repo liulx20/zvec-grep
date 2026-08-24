@@ -7,5 +7,6 @@ export {
   collectTypeInheritanceSites,
 } from "./code/extractor.js";
 export { collectImportSpecs, type ImportSpec } from "./code/import-sites.js";
+export { extractCallableReturnType } from "./code/callable-shape.js";
 export type { ChunkOptions } from "./types.js";
 export { vectorContentForFragment } from "./vector-content.js";

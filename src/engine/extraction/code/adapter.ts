@@ -37,7 +37,12 @@ export type LanguageAdapter = {
   extractArity?(node: TSNode): number | undefined;
   extractCallResolutionFacts?(
     node: TSNode,
+    context?: {
+      callableReturnTypes?: ReadonlyMap<string, string>;
+    },
   ): ReadonlyMap<string, CallResolutionFact>;
+  collectDeclaredFieldTypes?(node: TSNode): ReadonlyMap<string, string>;
+  collectCallableReturnTypes?(node: TSNode): ReadonlyMap<string, string>;
   extractDoc?(node: TSNode): string | undefined;
   extractModifiers?(node: TSNode): readonly CodeEntityModifier[];
 };
@@ -59,8 +64,8 @@ function withCallableShape(adapter: LanguageAdapter): LanguageAdapter {
   return {
     ...adapter,
     extractArity: (node) => extractCallableArity(node, adapter.format),
-    extractCallResolutionFacts: (node) =>
-      extractCallResolutionFacts(node, adapter),
+    extractCallResolutionFacts: (node, context) =>
+      extractCallResolutionFacts(node, adapter, context),
   };
 }
 

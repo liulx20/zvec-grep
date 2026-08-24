@@ -36,7 +36,12 @@ export async function extractFileGraph(
   fragments: readonly EntityFragment[],
   preparedAnalysis?: Pick<
     PreparedCodeAnalysis,
-    "imports" | "calls" | "refs" | "inheritance" | "ownership"
+    | "imports"
+    | "calls"
+    | "refs"
+    | "inheritance"
+    | "ownership"
+    | "sourceLanguage"
   >,
 ): Promise<FileGraphInput> {
   const analysis =
@@ -44,10 +49,12 @@ export async function extractFileGraph(
     (source.kind === "text" && source.file.kind === "code"
       ? await analyzeForIndexing(source)
       : undefined);
+  const sourceLanguage = analysis?.sourceLanguage ?? source.file.format;
   const base = fileGraphFromFragments(
     source.file.id,
     fragments,
     analysis?.ownership,
+    sourceLanguage,
   );
   if (source.kind !== "text" || source.file.kind !== "code") {
     return base;
@@ -60,7 +67,17 @@ export async function extractFileGraph(
   const occurrences = new Map<string, number>();
 
   const importSpecs = analysis.imports.filter(
-    (spec) => !isExternalImportSpec(spec.spec, source.file.format),
+    (spec) => !isExternalImportSpec(spec.spec, sourceLanguage),
+  );
+  const externalImportedNames = new Set(
+    analysis.imports
+      .filter((spec) => isExternalImportSpec(spec.spec, sourceLanguage))
+      .flatMap((spec) => (spec.bindings ?? []).map((binding) => binding.local)),
+  );
+  const importedReceiverNames = new Set(
+    importSpecs.flatMap((spec) =>
+      (spec.bindings ?? []).map((binding) => binding.local),
+    ),
   );
   for (const [occurrence, spec] of importSpecs.entries()) {
     const ref = rawRef({
@@ -69,6 +86,8 @@ export async function extractFileGraph(
       refName: spec.spec,
       line: spec.line,
       occurrence,
+      sourceLanguage,
+      rustInlineModuleDepth: spec.rustInlineModuleDepth,
     });
     if (!seenRefIds.has(ref.id)) {
       seenRefIds.add(ref.id);
@@ -83,7 +102,8 @@ export async function extractFileGraph(
         occurrence: occurrence * 1_000 + bindingIndex + 1,
         importedName: binding.imported,
         localName: binding.local,
-        sourceLanguage: source.file.format,
+        sourceLanguage,
+        rustInlineModuleDepth: spec.rustInlineModuleDepth,
       });
       if (!seenRefIds.has(bindingRef.id)) {
         seenRefIds.add(bindingRef.id);
@@ -95,13 +115,20 @@ export async function extractFileGraph(
   const idByOffset = indexPublicFragmentsByOffset(fragments);
   const nameToIds = new Map<string, string[]>();
   const nodeNameById = new Map<string, string>();
+  const nodeKindById = new Map<string, string>();
   for (const node of base.nodes) {
+    nodeKindById.set(node.id, node.kind);
     if (!node.name) {
       continue;
     }
     const list = nameToIds.get(node.name) ?? [];
     list.push(node.id);
     nameToIds.set(node.name, list);
+    if (node.qualifiedName && node.qualifiedName !== node.name) {
+      const qualified = nameToIds.get(node.qualifiedName) ?? [];
+      qualified.push(node.id);
+      nameToIds.set(node.qualifiedName, qualified);
+    }
     nodeNameById.set(node.id, node.name);
   }
   const containerNameByChild = new Map<string, string>();
@@ -124,9 +151,12 @@ export async function extractFileGraph(
     occurrences,
     refs,
     seenRefIds,
-    sourceLanguage: source.file.format,
+    sourceLanguage,
     containerNameByChild,
     containerIdByChild,
+    importedReceiverNames,
+    externalImportedNames,
+    nodeKindById,
   });
 
   const symbolRefs = analysis.refs;
@@ -140,9 +170,12 @@ export async function extractFileGraph(
     occurrences,
     refs,
     seenRefIds,
-    sourceLanguage: source.file.format,
+    sourceLanguage,
     containerNameByChild,
     containerIdByChild,
+    importedReceiverNames,
+    externalImportedNames,
+    nodeKindById,
   });
 
   const calls = analysis.calls;
@@ -156,9 +189,12 @@ export async function extractFileGraph(
     occurrences,
     refs,
     seenRefIds,
-    sourceLanguage: source.file.format,
+    sourceLanguage,
     containerNameByChild,
     containerIdByChild,
+    importedReceiverNames,
+    externalImportedNames,
+    nodeKindById,
   });
 
   return {
@@ -181,6 +217,9 @@ function absorbRelationOwners(input: {
   sourceLanguage: string;
   containerNameByChild: ReadonlyMap<string, string>;
   containerIdByChild: ReadonlyMap<string, string>;
+  importedReceiverNames: ReadonlySet<string>;
+  externalImportedNames: ReadonlySet<string>;
+  nodeKindById: ReadonlyMap<string, string>;
 }): void {
   for (const owner of input.owners) {
     const ownerId =
@@ -191,6 +230,7 @@ function absorbRelationOwners(input: {
     }
 
     for (const site of owner.sites) {
+      if (isExternalImportedSite(site, input.externalImportedNames)) continue;
       const occurrence = nextOccurrence(
         input.occurrences,
         `${ownerId}\0${site.name}\0${site.kind}\0${site.line}`,
@@ -212,10 +252,76 @@ function absorbRelationOwners(input: {
         reference,
         input.containerNameByChild.get(ownerId),
       );
-      const localHits = reference.hints?.dispatch
-        ? []
-        : resolveLocalReferenceCandidates(plan, ownerId, input);
-      const targets = localHits.filter((id) => id !== ownerId);
+      const rawLocalHits =
+        reference.hints?.dispatch || reference.hints?.lexicallyBound
+          ? []
+          : resolveLocalReferenceCandidates(plan, ownerId, input);
+      const localHits =
+        input.edgeKind === "CALLS" && site.kind !== "new"
+          ? rawLocalHits.filter((candidate) =>
+              isConcreteFunctionFragment(
+                input.fragments,
+                input.nodeKindById,
+                candidate,
+              ),
+            )
+          : input.edgeKind === "REFS" && site.kind === "value"
+            ? preferOwnerScopedValues(rawLocalHits, ownerId, input)
+            : input.edgeKind === "REFS" && site.kind === "function"
+              ? rawLocalHits.filter(
+                  (candidate) =>
+                    candidate !== ownerId &&
+                    isFunctionFragment(input.fragments, candidate),
+                )
+              : rawLocalHits;
+      // A callable may legitimately reference itself. Other relation kinds
+      // must still reject self loops (for example a same-named type in an
+      // inheritance clause).
+      const targets =
+        input.edgeKind === "CALLS"
+          ? localHits
+          : localHits.filter((id) => id !== ownerId);
+
+      // A declaration's own type/name can appear in its syntax (for example
+      // `typedef struct Row { ... } Row`). If local lookup proves that the only
+      // candidate is the owner itself, this is declaration syntax rather than
+      // a dependency. Do not persist it for the global resolver to recreate as
+      // a self REFS/INHERITS edge.
+      if (
+        input.edgeKind !== "CALLS" &&
+        localHits.length > 0 &&
+        targets.length === 0
+      ) {
+        continue;
+      }
+
+      // Conditional module values (for example Python try/except feature
+      // flags) may have multiple same-file definitions but represent one
+      // logical dependency. Preserve the read against every definition so
+      // impact works regardless of which branch is edited.
+      if (
+        input.edgeKind === "REFS" &&
+        site.kind === "value" &&
+        targets.length > 1 &&
+        targets.every((id) => isValueFragment(input.fragments, id))
+      ) {
+        for (const dst of targets) {
+          const key = `${ownerId}\0${dst}\0${site.kind}\0${input.edgeKind}\0${site.line}\0${occurrence}`;
+          input.localEdges.set(key, {
+            id: `${siteRef.id}:${dst}`,
+            src: ownerId,
+            dst,
+            rel: site.kind,
+            count: 1,
+            first_line: site.line,
+            ref_name: site.name,
+            kind: input.edgeKind,
+            source_language: input.sourceLanguage,
+            target: site.target,
+          });
+        }
+        continue;
+      }
 
       if (targets.length === 1) {
         const dst = targets[0]!;
@@ -250,7 +356,14 @@ function absorbRelationOwners(input: {
         continue;
       }
 
-      if (referenceResolutionPolicy.isExternal(reference)) continue;
+      if (
+        referenceResolutionPolicy.isExternal(reference) &&
+        !(
+          reference.receiver.kind === "qualified" &&
+          input.importedReceiverNames.has(reference.receiver.name)
+        )
+      )
+        continue;
 
       const ref = siteRef;
       if (!input.seenRefIds.has(ref.id)) {
@@ -259,6 +372,70 @@ function absorbRelationOwners(input: {
       }
     }
   }
+}
+
+function isExternalImportedSite(
+  site: RelationOwner["sites"][number],
+  externalImportedNames: ReadonlySet<string>,
+): boolean {
+  if (externalImportedNames.has(site.name)) return true;
+  const receiver = site.target.receiver?.name;
+  return receiver !== undefined && externalImportedNames.has(receiver);
+}
+
+function preferOwnerScopedValues(
+  candidates: readonly string[],
+  ownerId: string,
+  input: {
+    fragments: readonly EntityFragment[];
+    containerIdByChild: ReadonlyMap<string, string>;
+  },
+): string[] {
+  const ownerContainer = input.containerIdByChild.get(ownerId);
+  if (!ownerContainer) return [...candidates];
+  const scoped = candidates.filter(
+    (candidate) =>
+      isValueFragment(input.fragments, candidate) &&
+      input.containerIdByChild.get(candidate) === ownerContainer,
+  );
+  return scoped.length > 0 ? scoped : [...candidates];
+}
+
+function isFunctionFragment(
+  fragments: readonly EntityFragment[],
+  id: string,
+): boolean {
+  return fragments.some(
+    (fragment) =>
+      (fragment.group ?? fragment.id) === id &&
+      fragment.metadata?.kind === "code" &&
+      fragment.metadata.symbolType === "function",
+  );
+}
+
+function isConcreteFunctionFragment(
+  fragments: readonly EntityFragment[],
+  nodeKindById: ReadonlyMap<string, string>,
+  id: string,
+): boolean {
+  // An abstract declaration is a dispatch contract, not a concrete runtime
+  // target. Keep the occurrence unresolved so the semantic resolver can
+  // project concrete implementations or an explicit dynamic boundary.
+  return (
+    nodeKindById.get(id) !== "abstract_method" &&
+    isFunctionFragment(fragments, id)
+  );
+}
+
+function isValueFragment(
+  fragments: readonly EntityFragment[],
+  id: string,
+): boolean {
+  const fragment = fragments.find((item) => (item.group ?? item.id) === id);
+  return (
+    fragment?.metadata?.kind === "code" &&
+    fragment.metadata.symbolType === "value"
+  );
 }
 
 function nextOccurrence(counts: Map<string, number>, key: string): number {

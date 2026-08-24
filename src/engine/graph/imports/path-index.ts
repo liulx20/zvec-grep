@@ -16,6 +16,13 @@ export class FilePathIndex {
   /** rootPath\0relativePath → file */
   private readonly byRootRelative = new Map<string, IndexedFile>();
   private readonly byId = new Map<string, IndexedFile>();
+  /** Path suffix → unique file; null marks an ambiguous suffix. */
+  private readonly byRelativeSuffix = new Map<string, IndexedFile | null>();
+  /** Directory suffix → files in one physical directory; null is ambiguous. */
+  private readonly byDirectorySuffix = new Map<
+    string,
+    { absoluteDirectory: string; files: IndexedFile[] } | null
+  >();
 
   constructor(files: readonly FileInfo[] = []) {
     this.addFiles(files);
@@ -36,6 +43,19 @@ export class FilePathIndex {
         entry,
       );
       this.byId.set(entry.id, entry);
+      const segments = entry.relativePath.split("/").filter(Boolean);
+      for (let index = 0; index < segments.length; index++) {
+        const suffix = segments.slice(index).join("/");
+        this.addRelativeSuffix(suffix, entry);
+        this.addRelativeSuffix(`${entry.format}\0${suffix}`, entry);
+      }
+      const directory = dirname(entry.relativePath).replace(/^\.$/, "");
+      const directorySegments = directory.split("/").filter(Boolean);
+      for (let index = 0; index < directorySegments.length; index++) {
+        const suffix = directorySegments.slice(index).join("/");
+        this.addDirectorySuffix(suffix, entry);
+        this.addDirectorySuffix(`${entry.format}\0${suffix}`, entry);
+      }
     }
   }
 
@@ -65,6 +85,59 @@ export class FilePathIndex {
     return undefined;
   }
 
+  /** Return a unique indexed file whose root-relative path has this suffix. */
+  findUniqueRelativeSuffix(
+    relativeSuffix: string,
+    format?: string,
+  ): IndexedFile | undefined {
+    const suffix = toDisplayPath(relativeSuffix).replace(/^\/+/, "");
+    return (
+      this.byRelativeSuffix.get(format ? `${format}\0${suffix}` : suffix) ??
+      undefined
+    );
+  }
+
+  private addRelativeSuffix(key: string, entry: IndexedFile): void {
+    const existing = this.byRelativeSuffix.get(key);
+    if (existing === undefined) this.byRelativeSuffix.set(key, entry);
+    else if (existing?.id !== entry.id) this.byRelativeSuffix.set(key, null);
+  }
+
+  private addDirectorySuffix(key: string, entry: IndexedFile): void {
+    const absoluteDirectory = dirname(entry.absolutePath);
+    const existing = this.byDirectorySuffix.get(key);
+    if (existing === undefined) {
+      this.byDirectorySuffix.set(key, {
+        absoluteDirectory,
+        files: [entry],
+      });
+      return;
+    }
+    if (existing === null) return;
+    if (existing.absoluteDirectory !== absoluteDirectory) {
+      this.byDirectorySuffix.set(key, null);
+      return;
+    }
+    if (!existing.files.some((file) => file.id === entry.id))
+      existing.files.push(entry);
+  }
+
+  /** Files in one uniquely identifiable package/source directory suffix. */
+  filesInUniqueRelativeDirectorySuffix(
+    relativeSuffix: string,
+    format?: string,
+  ): IndexedFile[] {
+    const suffix = toDisplayPath(relativeSuffix).replace(/^\/+|\/$/g, "");
+    const bucket = this.byDirectorySuffix.get(
+      format ? `${format}\0${suffix}` : suffix,
+    );
+    return bucket
+      ? [...bucket.files].sort((left, right) =>
+          left.relativePath.localeCompare(right.relativePath),
+        )
+      : [];
+  }
+
   dirOf(fileId: string): string | undefined {
     const file = this.byId.get(fileId);
     return file ? dirname(file.absolutePath) : undefined;
@@ -81,6 +154,55 @@ export class FilePathIndex {
   /** All indexed absolute paths (for debugging / tests). */
   absolutePaths(): string[] {
     return [...this.byAbsolute.keys()];
+  }
+
+  /** Immutable snapshots used by language-aware workspace resolvers. */
+  entries(): IndexedFile[] {
+    return [...this.byId.values()];
+  }
+
+  filesInDirectory(
+    rootPath: string,
+    relativeDirectory: string,
+    format?: string,
+  ): IndexedFile[] {
+    const normalizedRoot = normalizePath(rootPath);
+    const normalizedDirectory = toDisplayPath(relativeDirectory).replace(
+      /^\.\/?$/,
+      "",
+    );
+    return [...this.byId.values()]
+      .filter(
+        (file) =>
+          file.rootPath === normalizedRoot &&
+          dirname(file.relativePath).replace(/^\.$/, "") ===
+            normalizedDirectory &&
+          (!format || file.format === format),
+      )
+      .sort((left, right) => {
+        const testWeight = (path: string): number =>
+          /(?:^|\/)(?:tests?|testdata)(?:\/|$)|_test\.go$/i.test(path) ? 1 : 0;
+        return (
+          testWeight(left.relativePath) - testWeight(right.relativePath) ||
+          left.relativePath.localeCompare(right.relativePath)
+        );
+      });
+  }
+
+  filesInAbsoluteDirectory(
+    absoluteDirectory: string,
+    format?: string,
+  ): IndexedFile[] {
+    const normalizedDirectory = normalizePath(absoluteDirectory);
+    return [...this.byId.values()]
+      .filter(
+        (file) =>
+          dirname(file.absolutePath) === normalizedDirectory &&
+          (!format || file.format === format),
+      )
+      .sort((left, right) =>
+        left.relativePath.localeCompare(right.relativePath),
+      );
   }
 }
 

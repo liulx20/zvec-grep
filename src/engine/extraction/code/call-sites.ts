@@ -8,7 +8,12 @@ import type { TSNode } from "./tree-sitter/nodes.js";
 import {
   callNodeKey,
   enrichTargetWithResolutionFact,
+  type CallResolutionFact,
 } from "./call-resolution-facts.js";
+import {
+  dynamicCallTarget,
+  isReflectionHelperCall,
+} from "./dynamic-call-target.js";
 
 export type CallSite = {
   /** Callee text as written, e.g. "formatDate" or "utils.formatDate". */
@@ -27,10 +32,16 @@ export type CallSite = {
 export function collectCallSites(
   node: TSNode,
   adapter?: LanguageAdapter | null,
+  context?: {
+    callableReturnTypes?: ReadonlyMap<string, string>;
+    resolutionFacts?: ReadonlyMap<string, CallResolutionFact>;
+  },
 ): CallSite[] {
   const sites: CallSite[] = [];
   const entityTypes = adapter?.entityTypes;
-  const resolutionFacts = adapter?.extractCallResolutionFacts?.(node);
+  const resolutionFacts =
+    context?.resolutionFacts ??
+    adapter?.extractCallResolutionFacts?.(node, context);
 
   const visit = (current: TSNode | null, skipSelfEntity: boolean): void => {
     if (!current) {
@@ -40,12 +51,13 @@ export function collectCallSites(
     if (
       !skipSelfEntity &&
       entityTypes?.has(current.type) &&
-      adapter?.shouldIndexEntity?.(current) !== false
+      adapter?.shouldIndexEntity?.(current) !== false &&
+      !isWrappedRootDeclaration(node, current)
     ) {
       return;
     }
 
-    if (isCallNode(current)) {
+    if (isCallNode(current) && !isReflectionHelperCall(current)) {
       const target = extractCallTarget(current);
       if (target) {
         const enrichedTarget = enrichTargetWithResolutionFact(
@@ -69,6 +81,15 @@ export function collectCallSites(
 
   visit(node, true);
   return sites;
+}
+
+function isWrappedRootDeclaration(root: TSNode, current: TSNode): boolean {
+  return (
+    (root.type === "decorated_definition" ||
+      root.type === "export_statement") &&
+    current.parent?.startIndex === root.startIndex &&
+    current.parent?.endIndex === root.endIndex
+  );
 }
 
 function callArity(node: TSNode): number | undefined {
@@ -103,6 +124,11 @@ export function extractCallName(node: TSNode): string | undefined {
 
 export function extractCallTarget(node: TSNode): ReferenceTarget | undefined {
   if (node.type === "method_invocation") {
+    const reflection = dynamicCallTarget(
+      node,
+      normalizeCallName(node.text) ?? node.text,
+    );
+    if (reflection) return reflection;
     const name = node.childForFieldName("name");
     const receiver =
       node.childForFieldName("object") ?? node.childForFieldName("receiver");
@@ -128,8 +154,39 @@ export function extractCallTarget(node: TSNode): ReferenceTarget | undefined {
     return undefined;
   }
 
-  const raw = normalizeCallName(target.text);
-  return raw ? referenceTargetFromSyntax(raw) : undefined;
+  const raw = normalizeCallName(callableTargetText(target));
+  if (!raw) return undefined;
+  return dynamicCallTarget(target, raw) ?? referenceTargetFromSyntax(raw);
+}
+
+function callableTargetText(node: TSNode): string {
+  if (node.type === "generic_function") {
+    const inner = node.childForFieldName("function") ?? node.namedChildren[0];
+    return inner ? callableTargetText(inner) : node.text;
+  }
+  if (node.type === "template_function") {
+    const inner = node.childForFieldName("name") ?? node.namedChildren[0];
+    return inner ? callableTargetText(inner) : node.text;
+  }
+  if (node.type === "generic_type") {
+    const inner = node.childForFieldName("type") ?? node.namedChildren[0];
+    return inner ? callableTargetText(inner) : node.text;
+  }
+  if (node.type === "template_type") {
+    const inner = node.childForFieldName("name") ?? node.namedChildren[0];
+    return inner ? callableTargetText(inner) : node.text;
+  }
+  if (
+    node.type === "scoped_identifier" ||
+    node.type === "qualified_identifier"
+  ) {
+    const scope =
+      node.childForFieldName("path") ?? node.childForFieldName("scope");
+    const name = node.childForFieldName("name");
+    if (scope && name)
+      return `${callableTargetText(scope)}::${callableTargetText(name)}`;
+  }
+  return node.text;
 }
 
 const MAX_CALL_NAME_CHARS = 180;

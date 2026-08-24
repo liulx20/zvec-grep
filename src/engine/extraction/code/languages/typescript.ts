@@ -15,6 +15,7 @@ export const TYPESCRIPT_ADAPTER: LanguageAdapter = {
   entityTypes: new Set([
     "abstract_class_declaration",
     "abstract_method_signature",
+    "assignment_expression",
     "class_declaration",
     "enum_declaration",
     "field_definition",

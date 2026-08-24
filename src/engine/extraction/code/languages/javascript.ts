@@ -13,6 +13,7 @@ import {
 export const JAVASCRIPT_ADAPTER: LanguageAdapter = {
   format: "javascript",
   entityTypes: new Set([
+    "assignment_expression",
     "class_declaration",
     "field_definition",
     "function_declaration",

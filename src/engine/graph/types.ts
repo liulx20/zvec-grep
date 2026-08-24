@@ -1,4 +1,5 @@
-import type { FileInfo } from "../types.js";
+import type { CodeEntityModifier, FileInfo, Range } from "../types.js";
+import type { StoredEntity } from "../storage/index.js";
 import type { ReferenceTarget } from "../reference-target.js";
 
 /** Graph layer types. SymRef here is a symbol handle, not the Ref node table. */
@@ -72,12 +73,19 @@ export type GraphEdge = {
 export type DynamicBoundary = {
   sourceId: string;
   target: ReferenceTarget;
-  reason: "unknown_receiver_type" | "polymorphic_dispatch";
+  reason:
+    | "unknown_receiver_type"
+    | "polymorphic_dispatch"
+    | "lexical_dispatch"
+    | "runtime_dispatch";
   candidates: string[];
   candidatesTruncated: boolean;
+  occurrenceCount?: number;
   candidateDetails: {
     targetId: string;
-    reason: "hierarchy" | "generic_bound" | "method_set";
+    displayName?: string;
+    filePath?: string;
+    reason: "hierarchy" | "generic_bound" | "method_set" | "function_pointer";
     confidence: number;
   }[];
 };
@@ -115,9 +123,16 @@ export type SymNode = {
   is_exported: boolean;
   /** Resolve-only symbol name used by the graph name index. */
   name?: string;
+  /** Language-level identity such as `Namespace::Type::member`. */
+  qualifiedName?: string;
   signature?: string;
   arity?: number;
   returnType?: string;
+  /** Source location retained for graph-only presentation queries. */
+  range?: Range;
+  scope?: string;
+  nodeType?: string;
+  modifiers?: readonly CodeEntityModifier[];
 };
 
 export type LocalEdge = {
@@ -151,6 +166,8 @@ export type SymbolRawRef = RawRefBase & {
 export type ImportRawRef = RawRefBase & {
   type: "import";
   ref_kind: "import";
+  source_language?: string;
+  rust_inline_module_depth?: number;
 };
 
 export type ImportBindingRawRef = RawRefBase & {
@@ -159,6 +176,7 @@ export type ImportBindingRawRef = RawRefBase & {
   imported_name: string;
   local_name: string;
   source_language: string;
+  rust_inline_module_depth?: number;
 };
 
 export type RawRef = SymbolRawRef | ImportRawRef | ImportBindingRawRef;
@@ -189,11 +207,22 @@ export type RefResolveResult =
 export type ResolvePendingOptions = {
   /** Indexed files used for import path resolution. */
   files?: readonly FileInfo[];
+  /** Retry previously failed refs; pending refs are always processed. */
+  retryFailed?: boolean;
+  onTiming?: (name: string, durationMs: number, count?: number) => void;
 };
 
 export interface GraphReader {
   readonly available: boolean;
   readonly unavailableReason?: string;
+  /** Lightweight entity projection; does not open the vector collection. */
+  getEntity(entityId: string): StoredEntity | null;
+  findSymbolsByName(name: string, limit: number): StoredEntity[];
+  findSymbolsByQuery?(query: string, limit: number): StoredEntity[];
+  readFileText?(file: FileInfo): string | null;
+
+  /** Case-insensitive exact lookup over the indexed symbol name column. */
+  findSymbolIdsByName(name: string, limit: number): string[];
 
   symbolScope(rootSymId: string, depth: number, limit: number): string[];
   fileScope(fileId: string, depth: number, limit: number): string[];
@@ -207,6 +236,8 @@ export interface GraphReader {
     fileIds: readonly string[],
     limit: number,
   ): FileNeighbor[];
+  /** Exact symbols named by resolved import bindings from the given files. */
+  importedSymbols?(fileIds: readonly string[], limit: number): SymRef[];
 
   callers(symId: string, depth: number, limit: number): SymRef[];
   callees(symId: string, depth: number, limit: number): SymRef[];
@@ -247,6 +278,8 @@ export interface GraphReader {
     nodeIds: readonly string[],
     limit: number,
   ): DynamicBoundary[];
+  /** Sources of unresolved dynamic calls that may dispatch to targetIds. */
+  dynamicBoundarySources(targetIds: readonly string[], limit: number): SymRef[];
 
   stats(): GraphStats;
 }
@@ -260,6 +293,7 @@ export interface GraphStorage extends GraphReader {
     nodes: readonly SymNode[],
     edges: readonly LocalEdge[],
     refs: readonly RawRef[],
+    file?: FileInfo,
   ): void;
   deleteFileGraph(fileId: string): void;
   resolvePending(options?: ResolvePendingOptions): Promise<void>;

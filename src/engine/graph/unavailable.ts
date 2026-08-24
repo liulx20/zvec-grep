@@ -14,6 +14,7 @@ import type {
   SymRef,
   UsageRef,
 } from "./types.js";
+import type { FileInfo } from "../types.js";
 
 /** Stub when graph backend is disabled or failed to open. */
 export class UnavailableGraphStorage implements GraphStorage {
@@ -29,11 +30,22 @@ export class UnavailableGraphStorage implements GraphStorage {
     _nodes: readonly SymNode[],
     _edges: readonly LocalEdge[],
     _refs: readonly RawRef[],
+    _file?: FileInfo,
   ): void {}
+
+  getEntity(): null {
+    return null;
+  }
+  findSymbolsByName(): [] {
+    return [];
+  }
 
   deleteFileGraph(_fileId: string): void {}
   async resolvePending(_options?: ResolvePendingOptions): Promise<void> {}
 
+  findSymbolIdsByName(): string[] {
+    return [];
+  }
   symbolScope(): string[] {
     return [];
   }
@@ -95,6 +107,9 @@ export class UnavailableGraphStorage implements GraphStorage {
     return { edges: [], truncated: false };
   }
   dynamicBoundaries(): DynamicBoundary[] {
+    return [];
+  }
+  dynamicBoundarySources(): SymRef[] {
     return [];
   }
   stats(): GraphStats {

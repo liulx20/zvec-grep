@@ -6,7 +6,7 @@ export type ColorMode = "auto" | "always" | "never";
 
 export type PreviewMode = "none" | "short" | "full";
 
-export type QueryRefreshMode = "background" | "wait" | "off";
+export type QueryRefreshMode = "background" | "check" | "wait" | "off";
 
 export type McpInstallTransport = "stdio" | "http";
 
@@ -75,6 +75,8 @@ export type CliOptions = {
   maxFiles?: number;
   /** Explore / neighborhood: disambiguate seed entity id. */
   seedId?: string;
+  /** Neighborhood: narrow same-named definitions to a source file. */
+  definitionFile?: string;
 };
 
 export type CliCommand =
@@ -116,6 +118,7 @@ export const DEFAULT_LIMIT = 10;
 
 export const VALID_SYMBOL_TYPES = new Set<CodeSymbolType>([
   "module",
+  "component",
   "class",
   "interface",
   "function",

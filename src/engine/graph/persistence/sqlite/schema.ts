@@ -1,13 +1,33 @@
-export const SQLITE_GRAPH_SCHEMA_VERSION = 1;
+export const SQLITE_GRAPH_SCHEMA_VERSION = 4;
+
+export const SQLITE_GRAPH_INDEXES = `
+CREATE INDEX IF NOT EXISTS symbols_file_id_idx ON symbols(file_id);
+CREATE INDEX IF NOT EXISTS symbols_name_idx ON symbols(name) WHERE name IS NOT NULL;
+CREATE INDEX IF NOT EXISTS symbols_qualified_name_idx ON symbols(qualified_name) WHERE qualified_name IS NOT NULL;
+CREATE INDEX IF NOT EXISTS edges_src_kind_idx ON edges(src_id,src_is_file,kind,dst_id);
+CREATE INDEX IF NOT EXISTS edges_dst_kind_idx ON edges(dst_id,dst_is_file,kind,src_id);
+CREATE INDEX IF NOT EXISTS edges_member_idx ON edges(member_name,kind);
+CREATE INDEX IF NOT EXISTS contains_child_idx ON contains(child_id);
+CREATE INDEX IF NOT EXISTS unresolved_refs_name_idx ON unresolved_refs(ref_name,status);
+CREATE INDEX IF NOT EXISTS unresolved_refs_owner_idx ON unresolved_refs(owner_id,owner_is_file);
+CREATE INDEX IF NOT EXISTS unresolved_refs_retry_idx ON unresolved_refs(ref_name,status,last_attempt,id);
+CREATE INDEX IF NOT EXISTS unresolved_refs_member_idx ON unresolved_refs(member_name,status);
+CREATE INDEX IF NOT EXISTS edge_candidates_target_idx ON edge_candidates(target_id);
+`;
 
 export const SQLITE_GRAPH_SCHEMA = `
 PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS graph_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;
-CREATE TABLE IF NOT EXISTS files (id TEXT PRIMARY KEY) STRICT;
+CREATE TABLE IF NOT EXISTS files (
+ id TEXT PRIMARY KEY,
+ absolute_path TEXT, relative_path TEXT, root_path TEXT,
+ size_bytes INTEGER, last_modified_time INTEGER, kind TEXT, format TEXT
+) STRICT;
 CREATE TABLE IF NOT EXISTS symbols (
  id TEXT PRIMARY KEY, file_id TEXT NOT NULL REFERENCES files(id) ON DELETE CASCADE,
- name TEXT, kind TEXT NOT NULL, is_exported INTEGER NOT NULL CHECK (is_exported IN (0,1)),
- signature TEXT, arity INTEGER, return_type TEXT
+ name TEXT, qualified_name TEXT, kind TEXT NOT NULL, is_exported INTEGER NOT NULL CHECK (is_exported IN (0,1)),
+ signature TEXT, arity INTEGER, return_type TEXT, range_json TEXT,
+ scope TEXT, node_type TEXT, modifiers_json TEXT
 ) STRICT;
 CREATE TABLE IF NOT EXISTS unresolved_refs (
  id TEXT PRIMARY KEY, owner_id TEXT NOT NULL,
@@ -45,15 +65,5 @@ CREATE TABLE IF NOT EXISTS edge_candidates (
  reason TEXT NOT NULL, confidence REAL NOT NULL,
  PRIMARY KEY(edge_id,target_id)
 ) STRICT, WITHOUT ROWID;
-CREATE INDEX IF NOT EXISTS symbols_file_id_idx ON symbols(file_id);
-CREATE INDEX IF NOT EXISTS symbols_name_idx ON symbols(name) WHERE name IS NOT NULL;
-CREATE INDEX IF NOT EXISTS edges_src_kind_idx ON edges(src_id,src_is_file,kind,dst_id);
-CREATE INDEX IF NOT EXISTS edges_dst_kind_idx ON edges(dst_id,dst_is_file,kind,src_id);
-CREATE INDEX IF NOT EXISTS edges_member_idx ON edges(member_name,kind);
-CREATE INDEX IF NOT EXISTS contains_child_idx ON contains(child_id);
-CREATE INDEX IF NOT EXISTS unresolved_refs_name_idx ON unresolved_refs(ref_name,status);
-CREATE INDEX IF NOT EXISTS unresolved_refs_owner_idx ON unresolved_refs(owner_id,owner_is_file);
-CREATE INDEX IF NOT EXISTS unresolved_refs_retry_idx ON unresolved_refs(ref_name,status,last_attempt,id);
-CREATE INDEX IF NOT EXISTS unresolved_refs_member_idx ON unresolved_refs(member_name,status);
-CREATE INDEX IF NOT EXISTS edge_candidates_target_idx ON edge_candidates(target_id);
+${SQLITE_GRAPH_INDEXES}
 `;

@@ -307,6 +307,21 @@ class ZvecWorkspaceIndexStorage implements WorkspaceIndexStorage {
     return docsToHits(docs, "fts", this);
   }
 
+  findSymbolsByNames(
+    names: readonly string[],
+    limit: number,
+  ): StorageSearchHit[] {
+    if (limit <= 0 || names.length === 0) return [];
+    const filter = buildFilter({ symbolNames: names });
+    if (!filter) return [];
+    const docs = this.collection.querySync({
+      filter,
+      topk: limit,
+      includeVector: false,
+    });
+    return docsToHits(docs, "fts", this);
+  }
+
   searchVector(
     vector: readonly number[],
     limit: number,

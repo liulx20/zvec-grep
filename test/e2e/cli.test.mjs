@@ -11,6 +11,10 @@ import {
 } from "../helpers/fixtures.mjs";
 import { createFakeEmbeddingServer } from "../helpers/fake-embedding.mjs";
 
+function normalizeRuntimeWarnings(stderr) {
+  return stderr.replace(/^\(node:\d+\)(?= \[UNDICI-EHPA\])/gm, "(node:<pid>)");
+}
+
 test("direct and server indexes report aggregate local model download progress", async (t) => {
   const temporaryDirectory = await createTemporaryDirectory(
     t,
@@ -182,7 +186,10 @@ test("server-mode index reports Workspace progress", async (t) => {
     { cwd: root, env },
   );
   assert.equal(serverGrouped.stdout, directGrouped.stdout);
-  assert.equal(serverGrouped.stderr, directGrouped.stderr);
+  assert.equal(
+    normalizeRuntimeWarnings(serverGrouped.stderr),
+    normalizeRuntimeWarnings(directGrouped.stderr),
+  );
   assert.match(serverGrouped.stdout, /^query groups \(2\):/);
   assert.match(serverGrouped.stdout, /Q1 \[supplemental\]: missing-symbol/);
   assert.match(
@@ -343,6 +350,25 @@ test("CLI completes index, search, explicit refresh, status, and rg workflows", 
   assert.match(stale.stderr, /status: possibly_stale/);
   assert.match(stale.stderr, /results: served_from_current_index/);
   assert.match(stale.stderr, /background_refresh: idle \(0\/1\)/);
+
+  const unchecked = await runCli(
+    [
+      "query",
+      "--mode",
+      "direct",
+      "--refresh",
+      "off",
+      "--fts",
+      "RefreshedWorkflowSymbol",
+      "--limit",
+      "5",
+    ],
+    { cwd: root, env, timeout: 120_000 },
+  );
+  assert.match(unchecked.stdout, /hits: 0/);
+  assert.doesNotMatch(unchecked.stderr, /status: possibly_stale/);
+  assert.doesNotMatch(unchecked.stderr, /background_refresh:/);
+
   await assert.rejects(
     runCli(["status", "--check-ready", root], { cwd: root, env }),
     (error) => {

@@ -155,13 +155,36 @@ function collectJava(node: TSNode): RawInheritanceSite[] {
 }
 
 function collectCpp(node: TSNode): RawInheritanceSite[] {
-  if (node.type !== "class_specifier" && node.type !== "struct_specifier") {
+  if (
+    node.type !== "class_specifier" &&
+    node.type !== "struct_specifier" &&
+    node.type !== "function_definition"
+  ) {
     return [];
   }
   const clause = node.namedChildren.find((c) => c.type === "base_class_clause");
-  if (!clause) {
-    return [];
+  if (!clause && node.type === "function_definition") {
+    const header = node.text.slice(0, node.text.indexOf("{"));
+    const colon = header.indexOf(":");
+    if (
+      colon < 0 ||
+      !/^\s*(?:template\s*<[^>{}]*>\s*)?(?:class|struct)\b/s.test(header)
+    )
+      return [];
+    return header
+      .slice(colon + 1)
+      .split(",")
+      .map((part) =>
+        part.replace(/\b(?:public|protected|private|virtual)\b/g, "").trim(),
+      )
+      .filter(Boolean)
+      .map((name) => ({
+        name: name.replace(/^::/, ""),
+        line: node.startPosition.row + 1,
+        kind: "extends" as const,
+      }));
   }
+  if (!clause) return [];
   const sites: RawInheritanceSite[] = [];
   for (const child of clause.namedChildren) {
     if (
@@ -184,6 +207,20 @@ function collectCpp(node: TSNode): RawInheritanceSite[] {
 }
 
 function collectRust(node: TSNode): RawInheritanceSite[] {
+  if (node.type === "trait_item") {
+    const header = node.text.slice(0, node.text.indexOf("{"));
+    const match = header.match(/\btrait\s+[A-Za-z_]\w*\s*:\s*([\s\S]+)$/);
+    if (!match) return [];
+    return match[1]!
+      .split("+")
+      .map((part) => part.trim().replace(/<[^>]*>/g, ""))
+      .filter((name) => name.length > 0 && !name.startsWith("'"))
+      .map((name) => ({
+        name,
+        line: node.startPosition.row + 1,
+        kind: "extends" as const,
+      }));
+  }
   if (node.type !== "impl_item") {
     return [];
   }
@@ -244,7 +281,12 @@ function collectGo(node: TSNode): RawInheritanceSite[] {
 
   if (typeNode.type === "interface_type") {
     for (const child of typeNode.namedChildren) {
-      if (child.type !== "constraint_elem" && child.type !== "type_elem") {
+      if (
+        child.type !== "constraint_elem" &&
+        child.type !== "type_elem" &&
+        child.type !== "type_identifier" &&
+        child.type !== "qualified_type"
+      ) {
         continue;
       }
       const name = normalizeTypeName(child);

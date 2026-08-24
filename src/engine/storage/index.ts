@@ -61,6 +61,10 @@ export interface WorkspaceIndexStorage {
     limit: number,
     filter?: StorageSearchFilter,
   ): StorageSearchHit[];
+  findSymbolsByNames?(
+    names: readonly string[],
+    limit: number,
+  ): StorageSearchHit[];
   searchVector(
     vector: readonly number[],
     limit: number,

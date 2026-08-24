@@ -1,4 +1,5 @@
 import type { Content, EntityFragment } from "../types.js";
+import type { StructuredCodeFormat } from "../code-formats.js";
 import { CodeExtractor } from "./code/extractor.js";
 import type {
   EntityOwnership,
@@ -65,6 +66,7 @@ export type PreparedCodeAnalysis = {
   refs: readonly SymbolRefSites[];
   inheritance: readonly TypeInheritanceSites[];
   ownership: readonly EntityOwnership[];
+  sourceLanguage?: StructuredCodeFormat;
 };
 
 export async function analyzeForIndexing(

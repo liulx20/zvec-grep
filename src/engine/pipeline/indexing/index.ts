@@ -15,7 +15,6 @@ import type {
 } from "../../models/index.js";
 import type { WorkspaceIndexStorage } from "../../storage/index.js";
 import type {
-  WorkspaceIndexStatus,
   WorkspaceIndexInfo,
   Content,
   EntityFragment,
@@ -26,7 +25,6 @@ import type {
   IndexEmbeddingProgress,
   IndexResult,
 } from "../../types.js";
-import { sha256Bytes } from "../../utils/hash.js";
 import { normalizePath } from "../../utils/path.js";
 import { ConcurrentTiming, TimingCollector } from "../../utils/timing.js";
 import {
@@ -40,6 +38,9 @@ import {
   scanRootPaths,
 } from "./scanner/index.js";
 import { indexChunkOptions } from "./input-budget.js";
+import { computeIndexDiff, type IndexDiffResult } from "./diff.js";
+
+export { getWorkspaceIndexStatus } from "./status.js";
 
 export type IndexContext = {
   workspaceIndex: WorkspaceIndexInfo;
@@ -51,13 +52,7 @@ export type IndexContext = {
   signal?: AbortSignal;
 };
 
-type DiffResult = {
-  added: FileInfo[];
-  modified: FileInfo[];
-  pending: FileInfo[];
-  deleted: FileInfo[];
-  unchanged: FileInfo[];
-};
+type DiffResult = IndexDiffResult;
 
 type PreparedFragment = {
   fragment: EntityFragment;
@@ -165,63 +160,6 @@ export async function indexWorkspacePaths(
   }
 }
 
-export async function getWorkspaceIndexStatus(
-  workspaceIndex: WorkspaceIndexInfo,
-  storedFiles: readonly FileInfo[],
-): Promise<WorkspaceIndexStatus> {
-  try {
-    const scan = await scanRootPaths(
-      workspaceIndex.id,
-      workspaceIndex.rootPaths,
-      { knownFiles: storedFiles },
-    );
-    const diff = await computeDiffFromFiles(scan.files, storedFiles);
-    const pendingFiles = storedFiles.filter(
-      (file) => file.indexStatus?.indexedTime === null,
-    );
-    const failedFiles = pendingFiles.filter(
-      (file) => file.indexStatus?.error !== undefined,
-    );
-    const indexedFiles = storedFiles.filter(
-      (file) =>
-        file.indexStatus?.indexedTime !== undefined &&
-        file.indexStatus.indexedTime !== null,
-    );
-    const entitiesIndexed = indexedFiles.reduce(
-      (count, file) => count + (file.indexStatus?.entityCount ?? 0),
-      0,
-    );
-    const fragmentsTruncated = indexedFiles.reduce(
-      (count, file) => count + (file.indexStatus?.truncatedFragmentCount ?? 0),
-      0,
-    );
-
-    return {
-      filesScanned: scan.files.length,
-      filesStored: storedFiles.length,
-      filesIndexed: indexedFiles.length,
-      entitiesIndexed,
-      fragmentsTruncated,
-      filesPending: pendingFiles.length,
-      filesFailed: failedFiles.length,
-      filesAdded: diff.added.length,
-      filesModified: diff.modified.length,
-      filesDeleted: diff.deleted.length,
-      filesUnchanged: diff.unchanged.length,
-      pendingFiles,
-      failedFiles,
-      addedFiles: diff.added,
-      modifiedFiles: diff.modified,
-      deletedFiles: diff.deleted,
-    };
-  } catch (error) {
-    throw toEngineError(error, "Inspecting workspace index status failed", {
-      code: "ZVEC_GREP.ENGINE.INDEXING.STATUS_FAILED",
-      context: workspaceIndexContext(workspaceIndex),
-    });
-  }
-}
-
 async function indexWorkspaceUnchecked(
   ctx: IndexContext,
 ): Promise<IndexResult> {
@@ -261,7 +199,9 @@ async function indexWorkspaceUnchecked(
   const finalPass = passes[passes.length - 1];
   throwIfIndexCancelled(ctx);
   reportIndexFinalizing(ctx, report, finalPass, progressBase);
-  await timings.time("index_optimize", () => optimizeStorage(ctx));
+  await timings.time("index_optimize", () =>
+    optimizeStorage(ctx, timings, passes.some(passChangesGraph)),
+  );
 
   const result = buildIndexResult(ctx, passes, Date.now() - start, timings);
 
@@ -330,7 +270,9 @@ async function indexWorkspacePathsUnchecked(
   const finalPass = passes[passes.length - 1];
   throwIfIndexCancelled(ctx);
   reportIndexFinalizing(ctx, report, finalPass, progressBase);
-  await timings.time("index_optimize", () => optimizeStorage(ctx));
+  await timings.time("index_optimize", () =>
+    optimizeStorage(ctx, timings, passes.some(passChangesGraph)),
+  );
   const result = buildIndexResult(ctx, passes, Date.now() - start, timings);
   if (result.filesFailed > 0) {
     throw new EngineError(
@@ -449,7 +391,7 @@ async function runDiffPass(
   scanDiagnostics: FileScanDiagnostics = emptyScanDiagnostics(),
 ): Promise<IndexPassResult> {
   const diff = await timings.time("index_diff", () =>
-    computeDiffFromFiles(scannedFiles, existingFiles),
+    computeIndexDiff(scannedFiles, existingFiles),
   );
   throwIfIndexCancelled(ctx);
   const pending = [...diff.added, ...diff.modified, ...diff.pending];
@@ -640,12 +582,27 @@ function mergeScanDiagnostics(
   }
 }
 
-async function optimizeStorage(ctx: IndexContext): Promise<void> {
+async function optimizeStorage(
+  ctx: IndexContext,
+  timings: TimingCollector,
+  graphChanged: boolean,
+): Promise<void> {
   try {
-    await ctx.storage.finalizeWrites();
+    await timings.time("index_finalize_writes", () =>
+      ctx.storage.finalizeWrites(),
+    );
     if (ctx.graph?.available) {
-      await ctx.graph.resolvePending({ files: ctx.storage.listFiles() });
-      await ctx.graph.checkpoint();
+      await timings.time("index_graph_resolve", () =>
+        ctx.graph!.resolvePending({
+          files: ctx.storage.listFiles(),
+          retryFailed: graphChanged,
+          onTiming: (name, durationMs, count) =>
+            timings.add(name, durationMs, count),
+        }),
+      );
+      await timings.time("index_graph_checkpoint", () =>
+        ctx.graph!.checkpoint(),
+      );
     }
   } catch (error) {
     throw toEngineError(error, "Indexing failed to finalize storage", {
@@ -655,57 +612,12 @@ async function optimizeStorage(ctx: IndexContext): Promise<void> {
   }
 }
 
-async function computeDiffFromFiles(
-  scannedFiles: readonly FileInfo[],
-  existingFiles: readonly FileInfo[],
-): Promise<DiffResult> {
-  const existingById = new Map(existingFiles.map((file) => [file.id, file]));
-  const seen = new Set<string>();
-  const added: FileInfo[] = [];
-  const modified: FileInfo[] = [];
-  const pending: FileInfo[] = [];
-  const unchanged: FileInfo[] = [];
-
-  for (const file of scannedFiles) {
-    seen.add(file.id);
-    const existing = existingById.get(file.id);
-
-    if (!existing) {
-      added.push(await withContentHash(file));
-      continue;
-    }
-
-    if (existing.indexStatus?.indexedTime === null) {
-      pending.push(await withContentHash(file));
-      continue;
-    }
-
-    if (
-      existing.sizeBytes === file.sizeBytes &&
-      existing.lastModifiedTime === file.lastModifiedTime &&
-      existing.contentHash
-    ) {
-      unchanged.push(existing);
-      continue;
-    }
-
-    const hashed = await withContentHash(file);
-    if (
-      existing.sizeBytes === hashed.sizeBytes &&
-      existing.contentHash === hashed.contentHash
-    ) {
-      unchanged.push(existing);
-      continue;
-    }
-
-    modified.push(hashed);
-  }
-
-  const deleted = [...existingById.values()].filter(
-    (file) => !seen.has(file.id),
+function passChangesGraph(pass: IndexPassResult): boolean {
+  return (
+    pass.stats.filesIndexed > 0 ||
+    pass.stats.filesFailed > 0 ||
+    pass.diff.deleted.length > 0
   );
-
-  return { added, modified, pending, deleted, unchanged };
 }
 
 async function indexFiles(
@@ -1056,12 +968,15 @@ function commitFile(
         fileGraphFromFragments(
           file.file.id,
           file.fragments.map(({ fragment }) => fragment),
+          [],
+          file.file.format,
         );
       ctx.graph.upsertFileGraph(
         file.file.id,
         graphInput.nodes,
         graphInput.edges,
         graphInput.refs,
+        file.file,
       );
     }
     stats.filesIndexed++;
@@ -1688,24 +1603,6 @@ function countPublicEntities(fragments: readonly EntityFragment[]): number {
   }
 
   return count;
-}
-
-async function withContentHash(file: FileInfo): Promise<FileInfo> {
-  let bytes: Buffer;
-
-  try {
-    bytes = await readFile(file.absolutePath);
-  } catch (error) {
-    throw toEngineError(error, "Indexing failed to compute file content hash", {
-      code: "ZVEC_GREP.ENGINE.INDEXING.CONTENT_HASH_FAILED",
-      context: fileContext(file),
-    });
-  }
-
-  return {
-    ...file,
-    contentHash: sha256Bytes(bytes),
-  };
 }
 
 function markFileFailed(

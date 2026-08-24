@@ -14,6 +14,7 @@ import {
   resolveMcpToolset,
 } from "../dist/mcp/toolset.js";
 import { EMBEDDING_ENVIRONMENT_META_KEY } from "../dist/mcp/request-metadata.js";
+import { zvecGrepSearchOutputSchema } from "../dist/mcp/schemas.js";
 import { indexProgressFromMessage } from "../dist/index-progress.js";
 import { formatAgentContextResult } from "../dist/cli/format/context.js";
 import { ZVEC_GREP_WORKSPACE_EVIDENCE_RULES } from "../dist/prompts/zvec-grep-guidance.js";
@@ -21,6 +22,33 @@ import { ZVEC_GREP_WORKSPACE_EVIDENCE_RULES } from "../dist/prompts/zvec-grep-gu
 const root = resolve("test/fixtures/repository");
 const longIndexedContent = "x".repeat(8_000);
 const longRgContent = "r".repeat(8_000);
+
+test("search output contract accepts INSTANTIATES relationships", () => {
+  const parsed = zvecGrepSearchOutputSchema.safeParse({
+    root,
+    freshness: "fresh",
+    result: {
+      query: "create service",
+      root,
+      source: "index",
+      coverage: "ranked_sample",
+      relationships: [
+        {
+          srcId: "symbol:createService",
+          dstId: "symbol:Service",
+          srcLabel: "createService",
+          dstLabel: "Service",
+          kind: "INSTANTIATES",
+          scope: "symbol",
+        },
+      ],
+      diagnostics: {},
+      items: [],
+    },
+  });
+
+  assert.equal(parsed.success, true);
+});
 
 function createBackend() {
   return {
@@ -197,6 +225,31 @@ test("graph tool failures are returned as MCP errors", async (t) => {
     assert.equal(result.isError, true);
     assert.match(result.content[0].text, /graph model load failed/);
   }
+});
+
+test("graph neighborhood tools pass the definition file filter", async (t) => {
+  const backend = createBackend();
+  let received;
+  backend.graphNeighborhood = async (input) => {
+    received = input;
+    return await createBackend().graphNeighborhood(input);
+  };
+  const { client, server } = await connect(backend);
+  t.after(async () => {
+    await client.close();
+    await server.close();
+  });
+
+  const result = await client.callTool({
+    name: "zvec_grep_callers",
+    arguments: {
+      root,
+      query: "Service",
+      file: "apps/api/service.ts",
+    },
+  });
+  assert.equal(result.isError, undefined);
+  assert.equal(received.file, "apps/api/service.ts");
 });
 
 async function connect(backend = createBackend(), options = {}) {

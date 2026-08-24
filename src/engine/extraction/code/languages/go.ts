@@ -5,19 +5,29 @@ import {
   extractGenericSignature,
   extractPrecedingDoc,
 } from "../families/metadata.js";
+import {
+  collectGoCallableReturnTypes,
+  collectGoDeclaredFieldTypes,
+} from "./go-resolution.js";
 
 export const GO_ADAPTER: LanguageAdapter = {
   format: "go",
   entityTypes: new Set([
     "function_declaration",
+    "const_spec",
     "method_spec",
     "method_declaration",
     "type_alias",
     "type_spec",
+    "var_spec",
   ]),
   scopeTypes: new Set(["type_spec"]),
   extractName(node) {
     return node.childForFieldName("name")?.text;
+  },
+  shouldIndexEntity(node) {
+    if (node.type !== "const_spec" && node.type !== "var_spec") return true;
+    return !hasExecutableAncestor(node);
   },
   shouldEnterScope(node) {
     if (node.type !== "type_spec") {
@@ -41,6 +51,7 @@ export const GO_ADAPTER: LanguageAdapter = {
     return receiverType ? [...breadcrumb, receiverType] : breadcrumb;
   },
   classifyNode(node) {
+    if (node.type === "const_spec" || node.type === "var_spec") return "value";
     if (node.type === "type_alias") {
       return "alias";
     }
@@ -63,6 +74,8 @@ export const GO_ADAPTER: LanguageAdapter = {
     return undefined;
   },
   extractSignature: extractGenericSignature,
+  collectDeclaredFieldTypes: collectGoDeclaredFieldTypes,
+  collectCallableReturnTypes: collectGoCallableReturnTypes,
   extractDoc: extractPrecedingDoc,
   extractModifiers(node) {
     const name = node.childForFieldName("name")?.text;
@@ -75,6 +88,19 @@ export const GO_ADAPTER: LanguageAdapter = {
     return modifiers;
   },
 };
+
+function hasExecutableAncestor(node: TSNode): boolean {
+  let parent = node.parent;
+  while (parent) {
+    if (
+      parent.type === "function_declaration" ||
+      parent.type === "method_declaration"
+    )
+      return true;
+    parent = parent.parent;
+  }
+  return false;
+}
 
 function extractGoReceiverType(node: TSNode): string | undefined {
   const receiver = node.childForFieldName("receiver");

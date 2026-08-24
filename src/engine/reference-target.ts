@@ -3,12 +3,28 @@ export type ReferenceReceiverTarget = {
   name: string;
 };
 
+/** Reserved nominal container used to key C/C++ bare callback arrays. */
+export const FUNCTION_POINTER_ARRAY_CONTAINER = "@array";
+
 export type ReferenceResolutionHints = {
   receiverType?: string;
   candidateTypes?: string[];
   genericBounds?: string[];
   dispatch?: "static" | "virtual" | "interface" | "trait" | "dynamic";
   callArity?: number;
+  /** A parameter/local binding shadows this bare callable name. */
+  lexicallyBound?: boolean;
+  /** Runtime-selected call target retained from the source AST. */
+  dynamicDispatch?: {
+    form: "computed_member" | "getattr" | "reflection";
+    /** Literal dispatch key when statically visible; absent for runtime keys. */
+    key?: string;
+  };
+  /** High-precision C/C++ callback registration keyed by its storage slot. */
+  functionPointerRegistration?: {
+    containerType: string;
+    field: string;
+  };
 };
 
 export type ReferenceTarget = {

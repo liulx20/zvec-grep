@@ -237,6 +237,51 @@ test("changedPaths indexes and deletes only the affected paths", async () => {
   }
 });
 
+test("service reuses read indexes and invalidates them before an incremental write", async () => {
+  const temporaryDirectory = await mkdtemp(
+    join(tmpdir(), "zvec-grep-read-index-cache-"),
+  );
+  const root = join(temporaryDirectory, "repo");
+  const source = join(root, "value.ts");
+  await mkdir(root);
+  await writeFile(source, "export const beforeUpdate = 1;\n");
+  const model = new CountingEmbeddingModel();
+  const service = await createZvecGrep({ root, embeddingModel: model });
+  try {
+    await service.index();
+    const first = await service.context({
+      query: "beforeUpdate",
+      autoUpdate: false,
+      trace: true,
+    });
+    const second = await service.context({
+      query: "beforeUpdate",
+      autoUpdate: false,
+      trace: true,
+    });
+    assert.ok(timing(first, "workspace_open"));
+    assert.ok(timing(first, "workspace_cache_miss"));
+    assert.equal(timing(second, "workspace_open"), undefined);
+    assert.ok(timing(second, "workspace_cache_hit"));
+
+    await writeFile(source, "export const afterUpdate = 2;\n");
+    await service.index({ changedPaths: [source] });
+    const afterWrite = await service.context({
+      query: "afterUpdate",
+      autoUpdate: false,
+      trace: true,
+    });
+    assert.ok(timing(afterWrite, "workspace_open"));
+    assert.ok(timing(afterWrite, "workspace_cache_miss"));
+    assert.ok(
+      afterWrite.items.some((item) => item.content.includes("afterUpdate")),
+    );
+  } finally {
+    await service.close();
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  }
+});
+
 test("indexing applies the model input limit to code, markdown, and text chunks", async () => {
   const temporaryDirectory = await mkdtemp(
     join(tmpdir(), "zvec-grep-token-chunks-"),
@@ -317,6 +362,10 @@ test("indexing applies the model input limit to code, markdown, and text chunks"
     await rm(temporaryDirectory, { recursive: true, force: true });
   }
 });
+
+function timing(result, name) {
+  return result.diagnostics.timings?.find((entry) => entry.name === name);
+}
 
 class CountingEmbeddingModel extends BaseEmbeddingModel {
   info = {

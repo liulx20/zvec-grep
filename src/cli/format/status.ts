@@ -639,6 +639,18 @@ export function printIndexResult(
   }
   printQueryFilters(theme, options);
   if (options.debug) {
+    if ((result.timings?.length ?? 0) > 0) {
+      printField(
+        theme,
+        "timings",
+        result
+          .timings!.map(
+            (entry) =>
+              `${entry.name}=${entry.durationMs}ms${entry.count && entry.count > 1 ? `(${entry.count}x)` : ""}`,
+          )
+          .join(" "),
+      );
+    }
     printIndexScanDiagnostics(result.scanDiagnostics);
   }
   if (result.filesScanned === 0) {

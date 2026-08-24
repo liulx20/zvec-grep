@@ -1,0 +1,655 @@
+{
+  "repositories": {
+    "cpp": { "path": "/data/neug", "commit": "98f294c" },
+    "typescript": { "path": "/data/zvec-grep", "commit": "d743731" },
+    "python": { "path": "/data/graphiti", "commit": "96ef997" },
+    "java": {
+      "path": "/data/bench-java-spring-petclinic",
+      "commit": "88e37c1"
+    },
+    "go": { "path": "/data/bench-go-chi", "commit": "735ae2b" },
+    "rust": { "path": "/data/bench-rust-mini-redis", "commit": "3d93b42" },
+    "c": { "path": "/data/bench-c-kilo", "commit": "323d93b" },
+    "javascript": { "path": "/data/bench-js-express", "commit": "a371447" },
+    "jsx": { "path": "/data/bench-jsx-preact", "commit": "f6c6cda" },
+    "java_gson": { "path": "/data/bench-java-gson", "commit": "dae37cf" },
+    "go_cobra": { "path": "/data/bench-go-cobra", "commit": "adbc881" },
+    "rust_axum": { "path": "/data/bench-rust-axum", "commit": "3d78036" },
+    "c_libuv": { "path": "/data/bench-c-libuv", "commit": "f87c8e4" },
+    "vue": { "path": "/data/bench-vue-pinia", "commit": "5d6ac5b" },
+    "svelte": { "path": "/data/bench-svelte-realworld", "commit": "df79670" }
+  },
+  "cases": [
+    {
+      "id": "c-editor-flow",
+      "repository": "c",
+      "query": "editorRefreshScreen",
+      "required": ["kilo.c"],
+      "requiredOutput": [
+        "main -CALLS-> editorRefreshScreen",
+        "editorRefreshScreen -CALLS-> abAppend",
+        "editorRefreshScreen -REFS-> abuf"
+      ],
+      "forbiddenOutput": ["erow@L81 -REFS-> erow@L81"],
+      "minFiles": 1,
+      "maxFiles": 1,
+      "optional": [],
+      "forbidden": []
+    },
+    {
+      "id": "js-assigned-api",
+      "repository": "javascript",
+      "query": "app.listen app.handle app.use",
+      "required": ["lib/application.js", "lib/express.js"],
+      "requiredOutput": [
+        "listen(root)",
+        "handle(root)",
+        "use(root)",
+        "function listen"
+      ],
+      "forbiddenOutput": [
+        "listen@L598 -REFS-> listen@L598",
+        "handle@L152 -REFS-> handle@L152",
+        "use@L190 -REFS-> use@L190"
+      ],
+      "minFiles": 2,
+      "maxFiles": 3,
+      "optional": [],
+      "forbidden": []
+    },
+    {
+      "id": "jsx-component-flow",
+      "repository": "jsx",
+      "query": "TodoList TodoItems addTodo removeTodo",
+      "required": ["demo/todo.jsx"],
+      "requiredOutput": ["render -REFS-> TodoItems", "function addTodo"],
+      "minFiles": 1,
+      "maxFiles": 1,
+      "optional": [],
+      "forbidden": ["hooks/src/index.js"]
+    },
+    {
+      "id": "tsx-component-flow",
+      "repository": "jsx",
+      "query": "PeopleBrowser Profile Router",
+      "required": [
+        "demo/people/index.tsx",
+        "demo/people/profile.tsx",
+        "demo/people/router.tsx"
+      ],
+      "requiredOutput": [
+        "render -REFS-> Profile",
+        "render -REFS-> Router",
+        "Router -CALLS-> useLocation"
+      ],
+      "minFiles": 3,
+      "maxFiles": 4,
+      "optional": [],
+      "forbidden": ["src/index.d.ts"]
+    },
+    {
+      "id": "cpp-exact",
+      "repository": "cpp",
+      "query": "NeugDB",
+      "required": ["include/neug/main/neug_db.h", "src/main/neug_db.cc"],
+      "requiredOutput": ["~NeugDB -CALLS-> Close"],
+      "optional": [
+        "include/neug/main/connection_manager.h",
+        "include/neug/server/neug_db_service.h"
+      ],
+      "forbidden": []
+    },
+    {
+      "id": "cpp-flow",
+      "repository": "cpp",
+      "query": "checkpoint recovery WAL",
+      "required": [
+        "include/neug/main/checkpoint_coordinator.h",
+        "src/main/checkpoint_coordinator.cc",
+        "include/neug/storages/checkpoint.h",
+        "src/main/neug_db.cc"
+      ],
+      "requiredOutput": ["execute -CALLS-> invokeActivationHandler"],
+      "optional": [
+        "include/neug/main/wal_writer_set.h",
+        "src/main/wal_writer_set.cc",
+        "src/main/execution_slot.cc"
+      ],
+      "forbidden": []
+    },
+    {
+      "id": "cpp-interface",
+      "repository": "cpp",
+      "query": "IOperator",
+      "required": [
+        "include/neug/execution/execute/operator.h",
+        "src/execution/execute/pipeline.cc"
+      ],
+      "requiredFilePatterns": ["^src/execution/execute/ops/"],
+      "requiredOutput": [
+        "dynamic boundaries:",
+        "Eval",
+        "-INHERITS-> IOperator"
+      ],
+      "minFiles": 4,
+      "maxFiles": 8,
+      "optional": [],
+      "forbidden": []
+    },
+    {
+      "id": "cpp-type-family",
+      "repository": "cpp",
+      "query": "Expr",
+      "required": ["include/neug/execution/expression/expr.h"],
+      "requiredAny": [
+        [
+          "src/execution/expression/expr.cc",
+          "src/execution/expression/exprs/struct_expr.cc",
+          "src/execution/expression/exprs/path_expr.cc",
+          "src/execution/expression/exprs/arith_expr.cc"
+        ]
+      ],
+      "requiredFilePatterns": ["expression/(?:accessors|exprs)/"],
+      "requiredOutput": ["roots: ExprBase", "-INHERITS-> ExprBase"],
+      "minFiles": 4,
+      "maxFiles": 8,
+      "optional": [],
+      "forbidden": []
+    },
+    {
+      "id": "ts-exact",
+      "repository": "typescript",
+      "query": "SqliteGraphStorage",
+      "required": [
+        "src/engine/graph/sqlite.ts",
+        "src/engine/graph/types.ts",
+        "src/engine/graph/persistence/sqlite/reader.ts"
+      ],
+      "requiredOutput": [
+        "openGraphStorage -CALLS-> SqliteGraphStorage",
+        "openGraphStorage -INSTANTIATES-> SqliteGraphStorage",
+        "SqliteGraphStorage -INHERITS-> GraphStorage",
+        "SqliteGraphStorage -INHERITS-> SqliteGraphReader"
+      ],
+      "optional": [],
+      "forbidden": []
+    },
+    {
+      "id": "ts-flow",
+      "repository": "typescript",
+      "query": "resolve pending references dynamic dispatch",
+      "required": [
+        "src/engine/graph/persistence/sqlite/pending-ref-resolver.ts",
+        "src/engine/graph/persistence/sqlite/candidate-repository.ts",
+        "src/engine/graph/persistence/sqlite/writer.ts",
+        "src/engine/graph/types.ts"
+      ],
+      "optional": [],
+      "forbidden": ["src/engine/models/backends/model2vec-worker-pool.ts"]
+    },
+    {
+      "id": "python-exact",
+      "repository": "python",
+      "query": "Graphiti",
+      "required": ["graphiti_core/graphiti.py"],
+      "requiredOutput": [
+        "initialize -CALLS-> Graphiti",
+        "ZepGraphiti -INHERITS-> Graphiti"
+      ],
+      "optional": [],
+      "forbidden": []
+    },
+    {
+      "id": "python-flow",
+      "repository": "python",
+      "query": "resolve edge contradictions",
+      "required": [
+        "graphiti_core/utils/maintenance/edge_operations.py",
+        "graphiti_core/utils/bulk_utils.py"
+      ],
+      "optional": [
+        "graphiti_core/prompts/dedupe_edges.py",
+        "graphiti_core/edges.py"
+      ],
+      "forbidden": ["graphiti_core/utils/maintenance/node_operations.py"]
+    },
+    {
+      "id": "python-interface-family",
+      "repository": "python",
+      "query": "EmbedderClient",
+      "required": [
+        "graphiti_core/embedder/client.py",
+        "graphiti_core/embedder/openai.py",
+        "graphiti_core/embedder/gemini.py",
+        "graphiti_core/embedder/azure_openai.py"
+      ],
+      "requiredOutput": [
+        "OpenAIEmbedder -INHERITS-> EmbedderClient",
+        "GeminiEmbedder -INHERITS-> EmbedderClient",
+        "AzureOpenAIEmbedderClient -INHERITS-> EmbedderClient"
+      ],
+      "forbiddenOutput": [
+        "create@L41 -CALLS? confidence=0.35-> create@L31",
+        "create@L54 -CALLS? confidence=0.35-> create@L31"
+      ],
+      "minFiles": 4,
+      "maxFiles": 8,
+      "optional": ["mcp_server/src/services/factories.py"],
+      "forbidden": []
+    },
+    {
+      "id": "java-exact",
+      "repository": "java",
+      "query": "OwnerController",
+      "required": [
+        "src/main/java/org/springframework/samples/petclinic/owner/OwnerController.java",
+        "src/main/java/org/springframework/samples/petclinic/owner/Owner.java",
+        "src/main/java/org/springframework/samples/petclinic/owner/OwnerRepository.java"
+      ],
+      "requiredOutput": [
+        "processFindForm -CALLS-> findPaginatedForOwnersLastName",
+        "change surface:",
+        "OwnerController type -> Owner",
+        "OwnerController type -> OwnerRepository"
+      ],
+      "optional": [],
+      "forbidden": []
+    },
+    {
+      "id": "java-flow",
+      "repository": "java",
+      "query": "owner creation validation repository",
+      "required": [
+        "src/main/java/org/springframework/samples/petclinic/owner/PetController.java",
+        "src/main/java/org/springframework/samples/petclinic/owner/OwnerRepository.java",
+        "src/main/java/org/springframework/samples/petclinic/owner/PetValidator.java"
+      ],
+      "optional": [
+        "src/main/java/org/springframework/samples/petclinic/owner/OwnerController.java",
+        "src/main/java/org/springframework/samples/petclinic/owner/Owner.java"
+      ],
+      "forbidden": [
+        "src/main/java/org/springframework/samples/petclinic/vet/VetRepository.java"
+      ]
+    },
+    {
+      "id": "go-exact",
+      "repository": "go",
+      "query": "Mux",
+      "required": ["mux.go"],
+      "requiredOutput": ["ServeHTTP -CALLS-> NotFoundHandler"],
+      "optional": ["tree.go", "chi.go"],
+      "forbidden": []
+    },
+    {
+      "id": "go-flow",
+      "repository": "go",
+      "query": "route matching middleware",
+      "required": ["middleware/route_headers.go", "mux.go"],
+      "optional": ["tree.go", "chi.go"],
+      "forbidden": ["CHANGELOG.md"]
+    },
+    {
+      "id": "go-clean-path",
+      "repository": "go",
+      "query": "CleanPath",
+      "required": ["middleware/clean_path.go", "context.go"],
+      "optional": [],
+      "forbidden": [],
+      "requiredOutput": ["CleanPath -CALLS-> RouteContext"],
+      "minFiles": 2,
+      "maxFiles": 3
+    },
+    {
+      "id": "rust-exact",
+      "repository": "rust",
+      "query": "Connection",
+      "required": ["src/connection.rs"],
+      "requiredOutput": ["read_frame -CALLS-> parse_frame"],
+      "forbiddenOutput": ["confidence=0.35-> new"],
+      "optional": ["src/server.rs"],
+      "forbidden": []
+    },
+    {
+      "id": "rust-flow",
+      "repository": "rust",
+      "query": "server run connection read frame",
+      "required": ["src/server.rs", "src/connection.rs"],
+      "optional": [
+        "src/frame.rs",
+        "src/clients/client.rs",
+        "src/bin/server.rs"
+      ],
+      "forbidden": []
+    },
+    {
+      "id": "c-impact",
+      "repository": "c",
+      "command": "impact",
+      "query": "editorRefreshScreen",
+      "required": ["kilo.c"],
+      "requiredOutput": ["editorProcessKeypress", "main"],
+      "optional": [],
+      "forbidden": []
+    },
+    {
+      "id": "go-interface-family",
+      "repository": "go",
+      "query": "Router",
+      "required": ["chi.go", "mux.go"],
+      "requiredOutput": [
+        "Router -INHERITS-> Routes",
+        "r := chi.NewRouter()",
+        "func (mx *Mux) With"
+      ],
+      "forbiddenOutput": ["Router type -> Router"],
+      "minFiles": 2,
+      "maxFiles": 4,
+      "optional": ["_examples/router-walk/main.go"],
+      "forbidden": []
+    },
+    {
+      "id": "js-callers",
+      "repository": "javascript",
+      "command": "callers",
+      "query": "listen",
+      "required": ["lib/application.js", "test/app.listen.js"],
+      "requiredOutput": ["results=3"],
+      "optional": [],
+      "forbidden": []
+    },
+    {
+      "id": "ts-impact",
+      "repository": "typescript",
+      "command": "impact",
+      "query": "SqliteGraphStorage",
+      "required": [
+        "src/engine/graph/sqlite.ts",
+        "src/engine/graph/open.ts",
+        "src/engine/service/workspace-index.ts"
+      ],
+      "requiredOutput": ["openGraphStorage", "constructor"],
+      "optional": [],
+      "forbidden": []
+    },
+    {
+      "id": "python-impact",
+      "repository": "python",
+      "command": "impact",
+      "query": "Graphiti",
+      "required": [
+        "graphiti_core/graphiti.py",
+        "mcp_server/src/graphiti_mcp_server.py",
+        "server/graph_service/zep_graphiti.py"
+      ],
+      "requiredOutput": ["get_client", "ZepGraphiti"],
+      "optional": [],
+      "forbidden": []
+    },
+    {
+      "id": "java-impact",
+      "repository": "java",
+      "command": "impact",
+      "query": "OwnerRepository",
+      "required": [
+        "src/main/java/org/springframework/samples/petclinic/owner/OwnerRepository.java",
+        "src/main/java/org/springframework/samples/petclinic/owner/OwnerController.java",
+        "src/main/java/org/springframework/samples/petclinic/owner/PetController.java"
+      ],
+      "requiredOutput": ["VisitController", "OwnerController"],
+      "optional": [],
+      "forbidden": []
+    },
+    {
+      "id": "go-callees",
+      "repository": "go",
+      "command": "callees",
+      "query": "CleanPath",
+      "required": ["middleware/clean_path.go", "context.go"],
+      "requiredOutput": ["RouteContext"],
+      "optional": [],
+      "forbidden": []
+    },
+    {
+      "id": "rust-impact",
+      "repository": "rust",
+      "command": "impact",
+      "query": "Connection",
+      "required": [
+        "src/connection.rs",
+        "src/server.rs",
+        "src/clients/client.rs"
+      ],
+      "requiredOutput": ["run", "connect"],
+      "optional": [],
+      "forbidden": []
+    },
+    {
+      "id": "cpp-impact",
+      "repository": "cpp",
+      "command": "impact",
+      "query": "IOperator",
+      "required": [
+        "include/neug/execution/execute/operator.h",
+        "include/neug/execution/execute/pipeline.h",
+        "src/execution/execute/plan_parser.cc"
+      ],
+      "requiredFilePatterns": ["^src/execution/execute/ops/"],
+      "requiredOutput": ["Pipeline", "parse_execute_pipeline_with_meta"],
+      "optional": [],
+      "forbidden": []
+    },
+    {
+      "id": "go-cobra-large-type",
+      "repository": "go_cobra",
+      "query": "Command",
+      "required": ["command.go"],
+      "requiredOutput": ["function ExecuteC", "function AddCommand"],
+      "minFiles": 2,
+      "maxFiles": 6,
+      "optional": ["completions.go", "args.go"],
+      "forbidden": []
+    },
+    {
+      "id": "rust-axum-generic-type",
+      "repository": "rust_axum",
+      "query": "Router",
+      "required": [
+        "axum/src/routing/mod.rs",
+        "axum/src/routing/path_router.rs"
+      ],
+      "requiredOutput": [
+        "Router<S>(root)",
+        "function route",
+        "function route_service",
+        "function layer"
+      ],
+      "minFiles": 2,
+      "maxFiles": 8,
+      "optional": ["axum-extra/src/routing/mod.rs"],
+      "forbidden": []
+    },
+    {
+      "id": "java-gson-large-type",
+      "repository": "java_gson",
+      "query": "Gson",
+      "required": ["gson/src/main/java/com/google/gson/Gson.java"],
+      "requiredOutput": [
+        "function getAdapter",
+        "function toJson",
+        "function fromJson"
+      ],
+      "minFiles": 1,
+      "maxFiles": 6,
+      "optional": [
+        "gson/src/main/java/com/google/gson/TypeAdapter.java",
+        "gson/src/main/java/com/google/gson/TypeAdapterFactory.java"
+      ],
+      "forbidden": []
+    },
+    {
+      "id": "java-gson-reflective-flow",
+      "repository": "java_gson",
+      "query": "reflective type adapter serialization",
+      "required": [
+        "gson/src/main/java/com/google/gson/internal/bind/ReflectiveTypeAdapterFactory.java",
+        "gson/src/main/java/com/google/gson/internal/bind/TypeAdapterRuntimeTypeWrapper.java",
+        "gson/src/main/java/com/google/gson/Gson.java"
+      ],
+      "requiredOutput": [
+        "ReflectiveTypeAdapterFactory",
+        "TypeAdapterRuntimeTypeWrapper"
+      ],
+      "minFiles": 4,
+      "maxFiles": 8,
+      "optional": [
+        "gson/src/main/java/com/google/gson/TypeAdapter.java",
+        "gson/src/main/java/com/google/gson/GsonBuilder.java"
+      ],
+      "forbidden": []
+    },
+    {
+      "id": "c-libuv-platform-loop",
+      "repository": "c_libuv",
+      "query": "uv_run",
+      "required": ["include/uv.h", "src/unix/core.c", "src/win/core.c"],
+      "requiredOutput": ["uv_run -CALLS-> uv__run_timers", "function uv_run"],
+      "minFiles": 3,
+      "maxFiles": 8,
+      "optional": [
+        "src/timer.c",
+        "src/queue.h",
+        "src/unix/linux.c",
+        "src/unix/kqueue.c"
+      ],
+      "forbidden": []
+    },
+    {
+      "id": "c-libuv-callback-close",
+      "repository": "c_libuv",
+      "query": "uv_close",
+      "required": ["include/uv.h", "src/unix/core.c", "src/win/handle.c"],
+      "requiredOutput": [
+        "function uv_close",
+        "uv_close -CALLS-> uv_timer_stop"
+      ],
+      "minFiles": 3,
+      "maxFiles": 8,
+      "optional": ["src/unix/stream.c", "src/win/tcp.c"],
+      "forbidden": []
+    },
+    {
+      "id": "vue-component-exact",
+      "repository": "vue",
+      "query": "CounterStore",
+      "required": [
+        "packages/playground/src/views/CounterStore.vue",
+        "packages/playground/src/stores/counter.ts"
+      ],
+      "requiredOutput": ["CounterStore(root)", "component CounterStore"],
+      "minFiles": 1,
+      "maxFiles": 3,
+      "optional": [],
+      "forbidden": ["packages/docs/cookbook/composables.md"]
+    },
+    {
+      "id": "svelte-directory-component",
+      "repository": "svelte",
+      "query": "ArticleList",
+      "required": [
+        "src/lib/ArticleList/index.svelte",
+        "src/lib/ArticleList/ArticlePreview.svelte"
+      ],
+      "requiredOutput": [
+        "ArticleList(root)",
+        "ArticleList -REFS-> ArticlePreview"
+      ],
+      "minFiles": 2,
+      "maxFiles": 5,
+      "optional": ["src/routes/+page.svelte"],
+      "forbidden": []
+    },
+    {
+      "id": "svelte-alias-impact",
+      "repository": "svelte",
+      "command": "impact",
+      "query": "ArticleList",
+      "required": [
+        "src/lib/ArticleList/index.svelte",
+        "src/routes/+page.svelte",
+        "src/routes/profile/@[user]/+page.svelte",
+        "src/routes/profile/@[user]/favorites/+page.svelte"
+      ],
+      "requiredOutput": ["results=3"],
+      "optional": [],
+      "forbidden": []
+    },
+    {
+      "id": "query-go-symbol",
+      "repository": "go",
+      "command": "query",
+      "query": "CleanPath",
+      "required": ["middleware/clean_path.go", "context.go"],
+      "requiredOutput": [
+        "#1 matchedBy=fts+vector middleware/clean_path.go",
+        "CleanPath (function, middleware/clean_path.go) --CALLS--> RouteContext"
+      ],
+      "optional": ["middleware/strip.go"],
+      "forbidden": ["CHANGELOG.md"]
+    },
+    {
+      "id": "query-cpp-type",
+      "repository": "cpp",
+      "command": "query",
+      "query": "IOperator",
+      "required": [
+        "include/neug/execution/execute/operator.h",
+        "include/neug/execution/execute/pipeline.h"
+      ],
+      "requiredOutput": [
+        "#1 matchedBy=fts+vector include/neug/execution/execute/operator.h:31-44",
+        "--INHERITS--> IOperator"
+      ],
+      "optional": ["src/execution/execute/ops/admin/checkpoint.cc"],
+      "forbidden": ["tests/execution/execution_test.cc"]
+    },
+    {
+      "id": "query-python-type",
+      "repository": "python",
+      "command": "query",
+      "query": "Graphiti",
+      "required": [
+        "graphiti_core/graphiti.py",
+        "mcp_server/src/graphiti_mcp_server.py"
+      ],
+      "requiredOutput": [
+        "#1 matchedBy=vector graphiti_core/graphiti.py",
+        "GraphitiService"
+      ],
+      "optional": ["server/graph_service/zep_graphiti.py"],
+      "forbidden": ["mcp_server/tests/test_core_parity.py"]
+    },
+    {
+      "id": "query-vue-component",
+      "repository": "vue",
+      "command": "query",
+      "query": "CounterStore",
+      "required": [
+        "packages/playground/src/views/CounterStore.vue",
+        "packages/playground/src/stores/counter.ts"
+      ],
+      "requiredOutput": [
+        "#1 matchedBy=vector packages/playground/src/views/CounterStore.vue",
+        "CounterStore (component, packages/playground/src/views/CounterStore.vue) --REFS--> useCounter"
+      ],
+      "optional": [
+        "packages/playground/src/views/AllStores.vue",
+        "packages/playground/src/views/AllStoresDispose.vue"
+      ],
+      "forbidden": [
+        "packages/pinia/test-dts/mapHelpers.test-d.ts",
+        "packages/testing/src/testing.spec.ts"
+      ]
+    }
+  ]
+}
