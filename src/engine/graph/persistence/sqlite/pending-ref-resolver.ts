@@ -202,9 +202,11 @@ export class SqlitePendingRefResolver {
         SymbolRow & {
           container_id: string | null;
           container_name: string | null;
+          start_line: number | null;
         }
       >(
         `SELECT s.id,s.file_id,s.name,s.qualified_name,s.kind,s.is_exported,s.signature,
+                json_extract(s.range_json,'$.startLine') AS start_line,
                 p.id AS container_id,p.name AS container_name
          FROM symbols s
          LEFT JOIN contains c ON c.child_id=s.id
@@ -222,6 +224,7 @@ export class SqlitePendingRefResolver {
         kind: row.kind,
         isExported: row.is_exported === 1,
         signature: row.signature ?? undefined,
+        startLine: row.start_line ?? undefined,
         containerName: row.container_name ?? undefined,
         containerId: row.container_id ?? undefined,
       })),

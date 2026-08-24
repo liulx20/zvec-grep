@@ -5,6 +5,7 @@ import {
   SqliteGraphStorage,
   extractFileGraph,
 } from "../../dist/engine/graph/index.js";
+import { NameIndex } from "../../dist/engine/graph/name-index.js";
 
 function codeFile(relativePath = "mod.ts") {
   return {
@@ -19,6 +20,26 @@ function codeFile(relativePath = "mod.ts") {
     format: "typescript",
   };
 }
+
+test("equivalent declarations resolve independently of load order", () => {
+  const entry = (id, startLine) => ({
+    id,
+    fileId: "source",
+    name: "run",
+    qualifiedName: "Worker::run",
+    kind: "function",
+    signature: "void run()",
+    startLine,
+  });
+  for (const entries of [
+    [entry("declaration", 3), entry("definition", 20)],
+    [entry("definition", 20), entry("declaration", 3)],
+  ]) {
+    const names = new NameIndex();
+    names.load(entries);
+    assert.equal(names.lookup("run", "source")?.id, "definition");
+  }
+});
 
 test("extractFileGraph builds local CALLS and pending cross-file refs", async () => {
   const file = codeFile("local.ts");

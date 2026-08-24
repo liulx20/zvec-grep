@@ -10,6 +10,7 @@ export type NameEntry = {
   kind: string;
   isExported?: boolean;
   signature?: string;
+  startLine?: number;
   containerName?: string;
   containerId?: string;
 };
@@ -334,9 +335,17 @@ function equivalentDeclarationGroup(
     )
   )
     return undefined;
-  // Insertion follows source order. A C-family forward declaration precedes
-  // its body-bearing definition, so the last equivalent symbol is preferred.
-  return candidates.at(-1);
+  // Prefer the later source declaration (normally the body-bearing C-family
+  // definition) without depending on SQLite or insertion order. The id is a
+  // stable final tie-breaker for generated symbols without source ranges.
+  return [...candidates].sort(compareDeclarationPosition).at(-1);
+}
+
+function compareDeclarationPosition(left: NameEntry, right: NameEntry): number {
+  return (
+    (left.startLine ?? -1) - (right.startLine ?? -1) ||
+    left.id.localeCompare(right.id)
+  );
 }
 
 function entryLookupKeys(entry: NameEntry): string[] {
