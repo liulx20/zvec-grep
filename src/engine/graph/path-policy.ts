@@ -27,9 +27,8 @@ export function isLowValuePath(path: string): boolean {
 
 /**
  * Low-value paths are noise by default, not an access-control boundary. When
- * the user explicitly names a module represented by a path segment (for
- * example `bthread` in `third_party/brpc/src/bthread/...`), keep that module
- * eligible without opening every vendor/test/doc candidate.
+ * the user explicitly names a module represented by a path segment, keep that
+ * module eligible without opening every vendor/test/doc candidate.
  */
 export function queryTargetsPath(
   path: string,

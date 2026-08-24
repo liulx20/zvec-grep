@@ -10,6 +10,11 @@ export function rankExploreNodes(
   edges: readonly ExploreEdge[],
   rootIds: readonly string[],
   seedWeights?: ReadonlyMap<string, number>,
+  evidenceLinks: readonly {
+    src: string;
+    dst: string;
+    weight: number;
+  }[] = [],
 ): Map<string, number> {
   const adjacency = new Map<string, Map<string, number>>();
   for (const node of nodes) adjacency.set(node.id, new Map());
@@ -18,6 +23,11 @@ export function rankExploreNodes(
     const weight = RWR_EDGE_WEIGHTS[edge.kind] * edge.confidence;
     addWeightedNeighbor(adjacency.get(edge.src)!, edge.dst, weight);
     addWeightedNeighbor(adjacency.get(edge.dst)!, edge.src, weight);
+  }
+  for (const link of evidenceLinks) {
+    if (!adjacency.has(link.src) || !adjacency.has(link.dst)) continue;
+    addWeightedNeighbor(adjacency.get(link.src)!, link.dst, link.weight);
+    addWeightedNeighbor(adjacency.get(link.dst)!, link.src, link.weight);
   }
   return personalizedPageRank(
     [...adjacency.keys()],

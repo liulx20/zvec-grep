@@ -28,6 +28,7 @@ import {
 } from "./impact.js";
 import {
   EXPLORE_POLICY,
+  exploreEdgeBudget,
   isTypeishKind,
   queryTerms,
   semanticTermsCovered,
@@ -55,6 +56,10 @@ const DEFAULT_CONTAINER_GLUE_LIMIT = EXPLORE_POLICY.containerGlueLimit;
 const DEFAULT_PATH_LIMIT = EXPLORE_POLICY.pathLimit;
 const DEFAULT_BLAST_LIMIT = EXPLORE_POLICY.blastLimit;
 const HIERARCHY_BUDGET_RATIO = EXPLORE_POLICY.hierarchyBudgetRatio;
+const DYNAMIC_BOUNDARY_BUDGET = EXPLORE_POLICY.dynamicBoundaryBudget;
+const COMPONENT_IMPORT_POLICY = EXPLORE_POLICY.componentImport;
+const DYNAMIC_BOUNDARY_FILE_POLICY = EXPLORE_POLICY.dynamicBoundaryFiles;
+const SCORE_BOOSTS = EXPLORE_POLICY.scoreBoosts;
 const TRAVERSE_EDGE_KINDS: readonly GraphEdgeKind[] =
   EXPLORE_POLICY.traverseEdgeKinds;
 
@@ -65,7 +70,7 @@ type ScoredNode = {
   depth: number;
 };
 
-type ComponentDependency = { src: string; dst: string };
+type ExploreRankingLink = { src: string; dst: string; weight: number };
 
 type ExploreHierarchyReader = GraphReader & {
   hierarchyDiverse?: (
@@ -202,7 +207,7 @@ export function exploreGraph(
       : graph.edges(
           nodes.map((node) => node.id),
           TRAVERSE_EDGE_KINDS,
-          Math.min(20_000, Math.max(128, nodes.length * 8)),
+          exploreEdgeBudget(nodes.length),
         );
   let edges = counterpartEdges
     ? counterpartEdges.edges.map(toExploreEdge)
@@ -213,8 +218,14 @@ export function exploreGraph(
         (node) => node.id === exactGroups[0]!.representative.entity.id,
       )
     : nodes.filter((node) => node.isRoot);
-  const dynamicBoundaryLimit = Math.min(16, maxNodes);
-  const dynamicBoundaryFetchLimit = Math.min(256, dynamicBoundaryLimit * 8);
+  const dynamicBoundaryLimit = Math.min(
+    DYNAMIC_BOUNDARY_BUDGET.maximum,
+    maxNodes,
+  );
+  const dynamicBoundaryFetchLimit = Math.min(
+    DYNAMIC_BOUNDARY_BUDGET.fetchMaximum,
+    dynamicBoundaryLimit * DYNAMIC_BOUNDARY_BUDGET.fetchRatio,
+  );
   const dynamicBoundaryRows =
     graph.dynamicBoundaries?.(
       nodes.map((node) => node.id),
@@ -253,7 +264,7 @@ export function exploreGraph(
     const impactEdges = graph.edges(
       contextNodes.map((node) => node.id),
       TRAVERSE_EDGE_KINDS,
-      Math.min(20_000, Math.max(128, contextNodes.length * 8)),
+      exploreEdgeBudget(contextNodes.length),
     );
     edges = impactEdges.edges.map(toExploreEdge);
     const impactNodeIds = new Set(contextNodes.map((node) => node.id));
@@ -1234,7 +1245,10 @@ function boostDynamicBoundaryFiles(
     );
   }
   for (const [fileId, count] of counts) {
-    const boost = strongest * Math.min(0.14, 0.06 + count * 0.015);
+    const policy = SCORE_BOOSTS.dynamicBoundary;
+    const boost =
+      strongest *
+      Math.min(policy.maximum, policy.base + count * policy.perOccurrence);
     fileScores.set(fileId, Math.max(fileScores.get(fileId) ?? 0, boost));
   }
 }
@@ -1246,7 +1260,9 @@ function boostImpactFiles(
   const strongest = Math.max(...fileScores.values(), 0);
   if (strongest <= 0) return;
   for (const [fileId, hits] of fileHits) {
-    const floor = strongest * Math.min(0.22, 0.08 + hits * 0.04);
+    const policy = SCORE_BOOSTS.impact;
+    const floor =
+      strongest * Math.min(policy.maximum, policy.base + hits * policy.perHit);
     fileScores.set(fileId, Math.max(fileScores.get(fileId) ?? 0, floor));
   }
 }
@@ -1377,7 +1393,8 @@ function relevantDynamicBoundaryFileIds(
           Boolean(
             item.sourceScope && adjacentOwnerScopes.has(item.sourceScope),
           ) ||
-          item.score >= strongest * 0.6),
+          item.score >=
+            strongest * DYNAMIC_BOUNDARY_FILE_POLICY.relevanceFloor),
     );
   const byFile = new Map<string, number>();
   for (const item of scored)
@@ -1388,7 +1405,11 @@ function relevantDynamicBoundaryFileIds(
       (left, right) =>
         right.score - left.score || left.fileId.localeCompare(right.fileId),
     );
-  return new Set(ranked.slice(0, 2).map((item) => item.fileId));
+  return new Set(
+    ranked
+      .slice(0, DYNAMIC_BOUNDARY_FILE_POLICY.maximum)
+      .map((item) => item.fileId),
+  );
 }
 
 /**
@@ -1555,7 +1576,9 @@ export function exploreSubgraph(
     ...representativeDependencies.slice(0, 12),
     ...callPaths.flatMap((path) => path.nodes),
     ...hierarchyGlueIds,
-    ...componentDependencies.slice(0, 8).map((dependency) => dependency.dst),
+    ...componentDependencies
+      .slice(0, COMPONENT_IMPORT_POLICY.protectedNodes)
+      .map((dependency) => dependency.dst),
     // Preserve only a small integration spine. The rest remains subject to
     // the ordinary node budget so high fan-in roots cannot flood Explore.
     ...impactGlueIds.slice(0, Math.min(8, maxNodes - rootIds.length)),
@@ -1580,28 +1603,13 @@ export function exploreSubgraph(
     });
   }
 
-  const edgeBudget = Math.min(20_000, Math.max(128, maxNodes * 8));
+  const edgeBudget = exploreEdgeBudget(maxNodes);
   const induced = collectExploreEdges(graph, selected, edgeBudget);
-  const edges = [
-    ...induced.edges,
-    ...componentDependencies
-      .filter(
-        (dependency) =>
-          selected.has(dependency.src) && selected.has(dependency.dst),
-      )
-      .map((dependency): ExploreEdge => ({
-        src: dependency.src,
-        dst: dependency.dst,
-        kind: "REFS",
-        rel: "import_binding",
-        count: 1,
-        firstLine: 0,
-        refName: "",
-        provenance: "static",
-        confidence: 1,
-        evidence: "component_import",
-      })),
-  ];
+  const edges = induced.edges;
+  const rankingLinks = componentDependencies.filter(
+    (dependency) =>
+      selected.has(dependency.src) && selected.has(dependency.dst),
+  );
   return {
     available: true,
     rootIds,
@@ -1609,7 +1617,13 @@ export function exploreSubgraph(
     edges,
     edgesTruncated: induced.truncated,
     callPaths: retainedCallPaths,
-    nodeScores: rankExploreNodes(nodes, edges, rootIds, options.seedWeights),
+    nodeScores: rankExploreNodes(
+      nodes,
+      edges,
+      rootIds,
+      options.seedWeights,
+      rankingLinks,
+    ),
   };
 }
 
@@ -1625,7 +1639,7 @@ function glueComponentImportDependencies(
   selected: Map<string, ScoredNode>,
   rootIds: readonly string[],
   limit: number,
-): ComponentDependency[] {
+): ExploreRankingLink[] {
   if (!graph.importedSymbols || limit <= 0) return [];
   const componentRoots = rootIds.filter((id) => {
     const metadata = storage.getEntity(id)?.entity.metadata;
@@ -1633,7 +1647,7 @@ function glueComponentImportDependencies(
   });
   if (componentRoots.length === 0) return [];
 
-  const dependencies: ComponentDependency[] = [];
+  const dependencies: ExploreRankingLink[] = [];
   const perRootLimit = Math.max(2, Math.ceil(limit / componentRoots.length));
   for (const rootId of componentRoots) {
     const fileId = storage.getEntity(rootId)?.file.id;
@@ -1641,7 +1655,11 @@ function glueComponentImportDependencies(
     for (const dependency of graph.importedSymbols([fileId], perRootLimit)) {
       if (!storage.getEntity(dependency.id)) continue;
       absorb(selected, dependency, false, 1);
-      dependencies.push({ src: rootId, dst: dependency.id });
+      dependencies.push({
+        src: rootId,
+        dst: dependency.id,
+        weight: COMPONENT_IMPORT_POLICY.rankingWeight,
+      });
       if (dependencies.length >= limit) return dependencies;
     }
   }
@@ -2063,9 +2081,8 @@ function glueCallNeighbors(
 
     // A type's integration points normally call its methods, not the type node
     // itself. Preserve those two-hop callers as candidates so RWR can decide
-    // whether they belong in the final context (NeugDB → member ← Service).
-    // This mirrors CodeGraph's bidirectional relevant-context expansion; it
-    // does not force the caller file into the rendered result.
+    // whether they belong in the final context. This does not force the caller
+    // file into the rendered result.
     const entity = storage.getEntity(rootId);
     const kind =
       entity?.entity.metadata?.kind === "code"

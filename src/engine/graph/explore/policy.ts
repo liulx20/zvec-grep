@@ -52,6 +52,14 @@ export const EXPLORE_POLICY = {
   pathLimit: 8,
   blastLimit: 20,
   hierarchyBudgetRatio: 0.25,
+  edgeBudget: { minimum: 128, maximum: 20_000, perNode: 8 },
+  dynamicBoundaryBudget: { maximum: 16, fetchMaximum: 256, fetchRatio: 8 },
+  componentImport: { protectedNodes: 8, rankingWeight: 0.25 },
+  dynamicBoundaryFiles: { maximum: 2, relevanceFloor: 0.6 },
+  scoreBoosts: {
+    dynamicBoundary: { maximum: 0.14, base: 0.06, perOccurrence: 0.015 },
+    impact: { maximum: 0.22, base: 0.08, perHit: 0.04 },
+  },
   traverseEdgeKinds: [
     "CALLS",
     "REFS",
@@ -73,11 +81,18 @@ export const EXPLORE_POLICY = {
   } satisfies Readonly<Record<GraphEdgeKind, number>>,
 };
 
+export function exploreEdgeBudget(nodeCount: number): number {
+  const policy = EXPLORE_POLICY.edgeBudget;
+  return Math.min(
+    policy.maximum,
+    Math.max(policy.minimum, nodeCount * policy.perNode),
+  );
+}
+
 /**
  * Low-value paths are noise by default, not an access-control boundary. When
- * the user explicitly names a module represented by a path segment (for
- * example `bthread` in `third_party/brpc/src/bthread/...`), keep that module
- * eligible without opening every vendor/test/doc candidate.
+ * the user explicitly names a module represented by a path segment, keep that
+ * module eligible without opening every vendor/test/doc candidate.
  */
 export function queryTargetsPath(query: string, path: string): boolean {
   return queryTargetsPathTerms(path, queryNameTerms(query));

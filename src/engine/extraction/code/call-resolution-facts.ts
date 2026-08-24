@@ -229,8 +229,7 @@ export function enrichTargetWithResolutionFact(
           : undefined) ??
         inferDeclaredFieldChainType(receiver, fact) ??
         inferFactoryReceiverType(target, fact) ??
-        fact.ownerFieldTypes.get(receiverTail))) ??
-    inferChainedReceiverType(receiver, fact);
+        fact.ownerFieldTypes.get(receiverTail)));
   if (!receiverType) return target;
   const bounds = fact.genericBounds.get(receiverType);
   const dynamicDispatch = Boolean(dynamicTypes?.length);
@@ -934,26 +933,7 @@ function contextualDeclarationBindings(
     const returnType = callableReturnTypes.get(factoryCall[1]!);
     if (returnType) return [{ name, type: returnType }];
   }
-  if (/^this\.(?:db|database\.db)\.prepare\s*\(/.test(initializer))
-    return [{ name, type: "StatementSync" }];
   return [];
-}
-
-function inferChainedReceiverType(
-  receiver: string,
-  fact: CallResolutionFact,
-): string | undefined {
-  const sqliteRoot = /^(?:this\.)?(db|database\.db)\b/.exec(receiver)?.[1];
-  if (!sqliteRoot) return undefined;
-  const rootType =
-    sqliteRoot === "db" ? fact.ownerFieldTypes.get("db") : undefined;
-  if (rootType && !["DatabaseSync", "NodeDatabaseSync"].includes(rootType))
-    return undefined;
-  if (/\.prepare\s*\(/.test(receiver)) {
-    if (/\.all\b/.test(receiver)) return "Array";
-    return "StatementSync";
-  }
-  return undefined;
 }
 
 function lookupBinding(

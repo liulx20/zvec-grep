@@ -161,9 +161,9 @@ export class NameIndex {
       }
     }
     // An unqualified cross-file reference may fall back to a unique global
-    // symbol, but never to a class member from an unrelated container. The
-    // latter caused calls such as Python packaging.Version() to bind to a C++
-    // NeugDB::Version method merely because it was unique in the workspace.
+    // symbol, but never to a class member from an unrelated container. A
+    // same-named member in another language or module is not evidence that it
+    // is the intended target.
     const workspaceGlobals = candidates.filter(
       (candidate) => candidate.containerId === undefined,
     );
