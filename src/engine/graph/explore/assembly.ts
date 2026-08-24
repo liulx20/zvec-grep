@@ -15,13 +15,17 @@ import {
   semanticTermCoverage,
 } from "./policy.js";
 import { polymorphicSiblingSkeletonNodeIds } from "./adaptive-sizing.js";
+import type { ExploreCandidatePool } from "./candidate-pool.js";
 import { isCounterpartSourcePath } from "./counterpart-policy.js";
-import { selectExploreFiles } from "./file-selection.js";
+import {
+  selectExploreFiles,
+  type ExploreFileEvidenceKind,
+} from "./file-selection.js";
 
 export function assembleExploreFiles(input: {
   query: string;
   storage: GraphReader;
-  nodes: readonly ExploreNode[];
+  pool: ExploreCandidatePool;
   edges: readonly ExploreEdge[];
   callPaths: readonly ExploreCallPath[];
   fileScores: Map<string, number>;
@@ -29,15 +33,12 @@ export function assembleExploreFiles(input: {
   maxFiles: number;
   maxChars: number;
   rootFileIds: ReadonlySet<string>;
-  changeSurfaceFileIds: ReadonlySet<string>;
-  structuralChangeSurfaceFileIds: ReadonlySet<string>;
-  dynamicBoundaryFileIds: ReadonlySet<string>;
-  semanticCounterpartFileIds: ReadonlySet<string>;
-  collaboratorFileIds: ReadonlySet<string>;
 }): ExploreFileBundle[] {
+  const nodes = input.pool.nodes;
+  const fileEvidence = input.pool.fileEvidence;
   const pathNodeIds = new Set(input.callPaths.flatMap((path) => path.nodes));
   const byFile = new Map<string, ExploreNode[]>();
-  for (const node of input.nodes) {
+  for (const node of nodes) {
     const file = node.entity?.file;
     if (!file || !input.fileScores.has(file.id)) {
       continue;
@@ -86,42 +87,44 @@ export function assembleExploreFiles(input: {
     return a[0].localeCompare(b[0]);
   });
   const pathFileIds = new Set(
-    input.nodes
+    nodes
       .filter((node) => pathNodeIds.has(node.id))
       .map((node) => node.entity?.file.id)
       .filter((fileId): fileId is string => Boolean(fileId)),
   );
+  for (const fileId of pathFileIds)
+    input.pool.addFileEvidence(fileId, "call_path");
   const integrationFiles = directIntegrationFiles(
-    input.nodes,
+    nodes,
     input.edges,
     input.rootFileIds,
   );
   const integrationFileWeights = integrationFiles.weights;
-  for (const fileId of input.dynamicBoundaryFileIds)
-    integrationFileWeights.set(
-      fileId,
-      Math.max(1, integrationFileWeights.get(fileId) ?? 0),
-    );
-  const integrationFileIds = new Set(integrationFileWeights.keys());
+  for (const [fileId, strength] of integrationFileWeights)
+    input.pool.addFileEvidence(fileId, "integration", strength);
+  for (const fileId of integrationFiles.entrypointFileIds)
+    input.pool.addFileEvidence(fileId, "entrypoint");
   const hierarchyFileIds = representativeHierarchyFileIds(
     orderedCandidates,
-    input.nodes,
+    nodes,
     input.edges,
     input.rootFileIds,
     Math.min(4, Math.max(1, input.maxFiles - 1)),
   );
-  const definitionEvidence = definitionFileEvidence(
-    input.nodes,
-    input.rootFileIds,
-  );
+  for (const fileId of hierarchyFileIds)
+    input.pool.addFileEvidence(fileId, "hierarchy");
+  const definitionEvidence = definitionFileEvidence(nodes, input.rootFileIds);
   const definitionFileIds = definitionEvidence.logical;
-  const counterpartFileIds = new Set([
-    ...definitionEvidence.counterparts,
-    ...input.semanticCounterpartFileIds,
-  ]);
+  for (const fileId of definitionEvidence.counterparts)
+    input.pool.addFileEvidence(fileId, "counterpart");
+  const counterpartFileIds = fileIdsWithEvidence(fileEvidence, "counterpart");
+  const changeSurfaceFileIds = fileIdsWithEvidence(
+    fileEvidence,
+    "change_surface",
+  );
   const alignedChangeSurfaceFileIds = queryAlignedFileIds(
     byFile,
-    input.changeSurfaceFileIds,
+    changeSurfaceFileIds,
     input.query,
   );
   const alignedFileIds = queryAlignedFileIds(
@@ -135,26 +138,18 @@ export function assembleExploreFiles(input: {
     input.query,
     integrationFileWeights,
   );
+  for (const [fileId, strength] of alignedChangeSurfaceWeights)
+    input.pool.addFileEvidence(fileId, "aligned_change_surface", strength);
+  for (const fileId of alignedFileIds)
+    input.pool.addFileEvidence(fileId, "query_alignment");
   const rankedFileIds = selectExploreFiles({
     ordered: orderedCandidates,
     maxFiles: input.maxFiles,
-    rootFileIds: input.rootFileIds,
-    changeSurfaceFileIds: input.changeSurfaceFileIds,
-    alignedChangeSurfaceFileIds,
-    alignedFileIds,
-    structuralChangeSurfaceFileIds: input.structuralChangeSurfaceFileIds,
-    pathFileIds,
-    integrationFileIds,
-    hierarchyFileIds,
-    counterpartFileIds,
-    integrationFileWeights,
-    alignedChangeSurfaceWeights,
-    entrypointFileIds: integrationFiles.entrypointFileIds,
-    collaboratorFileIds: input.collaboratorFileIds,
+    evidence: fileEvidence,
   }).map((candidate) => candidate.fileId);
   const skeletonNodeIds = polymorphicSiblingSkeletonNodeIds(
     rankedFileIds,
-    input.nodes,
+    nodes,
     input.edges,
     pathNodeIds,
   );
@@ -173,7 +168,8 @@ export function assembleExploreFiles(input: {
     rankedFileIds.find((fileId) => counterpartFileIds.has(fileId)) ??
     rankedFileIds.find(
       (fileId) =>
-        definitionFileIds.has(fileId) || integrationFileIds.has(fileId),
+        definitionFileIds.has(fileId) ||
+        fileEvidence.get(fileId)?.has("integration"),
     );
   if (coCentral && central.size < 2) central.add(coCentral);
 
@@ -193,7 +189,7 @@ export function assembleExploreFiles(input: {
       : removeContainedSymbols(symbols);
     const ranked = rankSymbols(
       retained,
-      input.nodes,
+      nodes,
       input.edges,
       input.nodeScores,
       pathNodeIds,
@@ -248,13 +244,24 @@ export function assembleExploreFiles(input: {
       file,
       score: input.fileScores.get(fileId) ?? 0,
       isCentral: central.has(fileId),
-      isChangeSurface: input.changeSurfaceFileIds.has(fileId),
+      isChangeSurface: changeSurfaceFileIds.has(fileId),
       reasons: fileReasons(fileId, nodes, input.edges, input.rootFileIds),
       symbols: rendered.symbols,
       text,
     });
   }
   return bundles;
+}
+
+function fileIdsWithEvidence(
+  evidence: ReadonlyMap<string, ReadonlyMap<ExploreFileEvidenceKind, number>>,
+  kind: ExploreFileEvidenceKind,
+): Set<string> {
+  return new Set(
+    [...evidence]
+      .filter(([, values]) => values.has(kind))
+      .map(([fileId]) => fileId),
+  );
 }
 
 function definitionFileEvidence(

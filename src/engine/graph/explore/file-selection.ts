@@ -9,6 +9,7 @@ export type ExploreFileEvidenceKind =
   | "structural_change_surface"
   | "change_surface"
   | "integration"
+  | "dynamic_boundary"
   | "call_path";
 
 export type ExploreFileCandidate = {
@@ -21,19 +22,7 @@ export type ExploreFileCandidate = {
 export type ExploreFileSelectionInput = {
   ordered: readonly [string, number][];
   maxFiles: number;
-  rootFileIds: ReadonlySet<string>;
-  counterpartFileIds: ReadonlySet<string>;
-  collaboratorFileIds: ReadonlySet<string>;
-  alignedChangeSurfaceFileIds: ReadonlySet<string>;
-  entrypointFileIds: ReadonlySet<string>;
-  hierarchyFileIds: ReadonlySet<string>;
-  alignedFileIds: ReadonlySet<string>;
-  structuralChangeSurfaceFileIds: ReadonlySet<string>;
-  changeSurfaceFileIds: ReadonlySet<string>;
-  integrationFileIds: ReadonlySet<string>;
-  pathFileIds: ReadonlySet<string>;
-  integrationFileWeights: ReadonlyMap<string, number>;
-  alignedChangeSurfaceWeights: ReadonlyMap<string, number>;
+  evidence: ReadonlyMap<string, ReadonlyMap<ExploreFileEvidenceKind, number>>;
 };
 
 const EVIDENCE_WEIGHTS: Readonly<Record<ExploreFileEvidenceKind, number>> = {
@@ -47,8 +36,14 @@ const EVIDENCE_WEIGHTS: Readonly<Record<ExploreFileEvidenceKind, number>> = {
   structural_change_surface: 0.8,
   change_surface: 0.65,
   integration: 0.75,
+  dynamic_boundary: 0.75,
   call_path: 0.45,
 };
+
+const SCALED_EVIDENCE = new Set<ExploreFileEvidenceKind>([
+  "aligned_change_surface",
+  "integration",
+]);
 
 /**
  * Rank every eligible file once from its accumulated evidence. Only roots and
@@ -60,65 +55,9 @@ export function selectExploreFiles(
 ): ExploreFileCandidate[] {
   if (input.maxFiles <= 0 || input.ordered.length === 0) return [];
   const strongestBase = Math.max(...input.ordered.map(([, score]) => score), 0);
-  const strongestIntegration = maximumValue(input.integrationFileWeights);
-  const strongestAlignedChange = maximumValue(
-    input.alignedChangeSurfaceWeights,
-  );
+  const maxima = evidenceMaxima(input.evidence);
   const candidates = input.ordered.map(([fileId, rawBaseScore]) => {
-    const evidence = new Map<ExploreFileEvidenceKind, number>();
-    addBooleanEvidence(evidence, "root", input.rootFileIds.has(fileId));
-    addBooleanEvidence(
-      evidence,
-      "counterpart",
-      input.counterpartFileIds.has(fileId),
-    );
-    addBooleanEvidence(
-      evidence,
-      "collaborator",
-      input.collaboratorFileIds.has(fileId),
-    );
-    addScaledEvidence(
-      evidence,
-      "aligned_change_surface",
-      input.alignedChangeSurfaceFileIds.has(fileId)
-        ? (input.alignedChangeSurfaceWeights.get(fileId) ?? 1)
-        : 0,
-      strongestAlignedChange,
-    );
-    addBooleanEvidence(
-      evidence,
-      "entrypoint",
-      input.entrypointFileIds.has(fileId),
-    );
-    addBooleanEvidence(
-      evidence,
-      "hierarchy",
-      input.hierarchyFileIds.has(fileId),
-    );
-    addBooleanEvidence(
-      evidence,
-      "query_alignment",
-      input.alignedFileIds.has(fileId),
-    );
-    addBooleanEvidence(
-      evidence,
-      "structural_change_surface",
-      input.structuralChangeSurfaceFileIds.has(fileId),
-    );
-    addBooleanEvidence(
-      evidence,
-      "change_surface",
-      input.changeSurfaceFileIds.has(fileId),
-    );
-    addScaledEvidence(
-      evidence,
-      "integration",
-      input.integrationFileIds.has(fileId)
-        ? (input.integrationFileWeights.get(fileId) ?? 1)
-        : 0,
-      strongestIntegration,
-    );
-    addBooleanEvidence(evidence, "call_path", input.pathFileIds.has(fileId));
+    const evidence = normalizedEvidence(input.evidence.get(fileId), maxima);
 
     const baseScore = strongestBase > 0 ? rawBaseScore / strongestBase : 0;
     const score =
@@ -141,13 +80,13 @@ export function selectExploreFiles(
   };
 
   for (const candidate of candidates.filter((item) =>
-    input.rootFileIds.has(item.fileId),
+    item.evidence.has("root"),
   ))
     take(candidate);
   take(
     candidates.find(
       (candidate) =>
-        input.counterpartFileIds.has(candidate.fileId) &&
+        candidate.evidence.has("counterpart") &&
         !selectedIds.has(candidate.fileId),
     ),
   );
@@ -155,26 +94,33 @@ export function selectExploreFiles(
   return selected;
 }
 
-function addBooleanEvidence(
-  evidence: Map<ExploreFileEvidenceKind, number>,
-  kind: ExploreFileEvidenceKind,
-  present: boolean,
-): void {
-  if (present) evidence.set(kind, 1);
+function evidenceMaxima(
+  evidence: ExploreFileSelectionInput["evidence"],
+): ReadonlyMap<ExploreFileEvidenceKind, number> {
+  const maxima = new Map<ExploreFileEvidenceKind, number>();
+  for (const values of evidence.values()) {
+    for (const [kind, strength] of values) {
+      maxima.set(kind, Math.max(maxima.get(kind) ?? 0, strength));
+    }
+  }
+  return maxima;
 }
 
-function addScaledEvidence(
-  evidence: Map<ExploreFileEvidenceKind, number>,
-  kind: ExploreFileEvidenceKind,
-  value: number,
-  maximum: number,
-): void {
-  if (value <= 0) return;
-  evidence.set(kind, maximum > 0 ? Math.min(1, value / maximum) : 1);
-}
-
-function maximumValue(values: ReadonlyMap<string, number>): number {
-  return Math.max(...values.values(), 0);
+function normalizedEvidence(
+  evidence: ReadonlyMap<ExploreFileEvidenceKind, number> | undefined,
+  maxima: ReadonlyMap<ExploreFileEvidenceKind, number>,
+): Map<ExploreFileEvidenceKind, number> {
+  const normalized = new Map<ExploreFileEvidenceKind, number>();
+  for (const [kind, strength] of evidence ?? []) {
+    const maximum = maxima.get(kind) ?? 0;
+    normalized.set(
+      kind,
+      SCALED_EVIDENCE.has(kind) && maximum > 0
+        ? Math.min(1, strength / maximum)
+        : Math.min(1, strength),
+    );
+  }
+  return normalized;
 }
 
 function compareCandidates(

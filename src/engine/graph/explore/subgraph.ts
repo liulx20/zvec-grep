@@ -193,6 +193,12 @@ export function exploreGraph(
     query,
     8,
   );
+  for (const fileId of counterpartExpansion.directCounterpartFileIds)
+    candidates.addFileEvidence(fileId, "counterpart");
+  for (const fileId of moduleEntrypoints.fileIds)
+    candidates.addFileEvidence(fileId, "counterpart");
+  for (const fileId of collaborators.fileIds)
+    candidates.addFileEvidence(fileId, "collaborator");
   const nodes = candidates.nodes;
   const counterpartEdges =
     nodes.length === subgraph.nodes.length
@@ -248,6 +254,7 @@ export function exploreGraph(
   const impactCandidates = new ExploreCandidatePool(
     impactAssembly.nodes,
     nodeScores,
+    candidates.fileEvidence,
   );
   const impactCounterpartFileIds = collectImpactSourceDeclarations(
     impactCandidates,
@@ -257,6 +264,8 @@ export function exploreGraph(
     4,
   );
   const contextNodes = impactCandidates.nodes;
+  for (const fileId of impactCounterpartFileIds)
+    impactCandidates.addFileEvidence(fileId, "counterpart");
   if (contextNodes.length !== nodes.length) {
     const impactEdges = graph.edges(
       contextNodes.map((node) => node.id),
@@ -304,6 +313,8 @@ export function exploreGraph(
     edges,
     rootIds,
   );
+  for (const fileId of dynamicBoundaryFileIds)
+    impactCandidates.addFileEvidence(fileId, "dynamic_boundary");
   const changeSurface = collectChangeSurface({
     graph,
     storage,
@@ -319,13 +330,24 @@ export function exploreGraph(
     graph,
     storage,
   );
+  for (const node of assemblyNodes) impactCandidates.addNode(node);
   const assemblyRootFileIds = exactGroups?.[0]
     ? fileIdsForRoots(nodes, rootIds)
     : primaryConceptualRootFileIds(nodes, rootIds, query, nodeScores, maxFiles);
+  for (const fileId of assemblyRootFileIds)
+    impactCandidates.addFileEvidence(fileId, "root");
+  for (const item of changeSurface) {
+    impactCandidates.addFileEvidence(item.entity.file.id, "change_surface");
+    if (item.structural)
+      impactCandidates.addFileEvidence(
+        item.entity.file.id,
+        "structural_change_surface",
+      );
+  }
   const files = assembleExploreFiles({
     query,
     storage,
-    nodes: assemblyNodes,
+    pool: impactCandidates,
     edges,
     callPaths,
     fileScores,
@@ -333,21 +355,6 @@ export function exploreGraph(
     maxFiles,
     maxChars,
     rootFileIds: assemblyRootFileIds,
-    changeSurfaceFileIds: new Set(
-      changeSurface.map((item) => item.entity.file.id),
-    ),
-    structuralChangeSurfaceFileIds: new Set(
-      changeSurface
-        .filter((item) => item.structural)
-        .map((item) => item.entity.file.id),
-    ),
-    dynamicBoundaryFileIds,
-    semanticCounterpartFileIds: new Set([
-      ...counterpartExpansion.directCounterpartFileIds,
-      ...impactCounterpartFileIds,
-      ...moduleEntrypoints.fileIds,
-    ]),
-    collaboratorFileIds: collaborators.fileIds,
   });
   const visibleFileIds = new Set(files.map((file) => file.file.id));
   const visibleDynamicBoundaries = dynamicBoundaries.filter((boundary) => {
