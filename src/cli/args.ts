@@ -449,25 +449,21 @@ export function parseArgs(args: readonly string[]): ParsedArgs {
     } else if (arg === "--fixed-strings") {
       options.rgOptions = appendRgExtraArgs(options.rgOptions, [arg]);
       markRgCompatibilityOption(options, arg);
+    } else if (isLongOptionWithValue(arg, "--definition-file")) {
+      options.definitionFile = valueFromLongOption(arg);
+    } else if (arg === "--definition-file") {
+      options.definitionFile = readOptionValue(args, ++index, arg);
     } else if (isLongOptionWithValue(arg, "--file")) {
-      if (isGraphNeighborhoodCommand(commandInput.command)) {
-        options.definitionFile = valueFromLongOption(arg);
-      } else {
-        options.rgOptions = appendRgPatternFile(
-          options.rgOptions,
-          valueFromLongOption(arg),
-          "--file",
-        );
-        markRgCompatibilityOption(options, "--file");
-      }
+      options.rgOptions = appendRgPatternFile(
+        options.rgOptions,
+        valueFromLongOption(arg),
+        "--file",
+      );
+      markRgCompatibilityOption(options, "--file");
     } else if (arg === "--file") {
       const value = readOptionValue(args, ++index, arg);
-      if (isGraphNeighborhoodCommand(commandInput.command)) {
-        options.definitionFile = value;
-      } else {
-        options.rgOptions = appendRgPatternFile(options.rgOptions, value, arg);
-        markRgCompatibilityOption(options, arg);
-      }
+      options.rgOptions = appendRgPatternFile(options.rgOptions, value, arg);
+      markRgCompatibilityOption(options, arg);
     } else if (isRgFlagWithValue(arg)) {
       const option = optionNameFromLong(arg);
       options.rgOptions = appendRgExtraArgs(options.rgOptions, [
@@ -702,7 +698,7 @@ function validateCliShape(
     [options.depth, "--depth"],
     [options.maxFiles, "--max-files"],
     [options.seedId, "--seed-id"],
-    [options.definitionFile, "--file"],
+    [options.definitionFile, "--definition-file"],
   ]);
   if (graphOnly && !graphCommand) {
     throw new Error(
@@ -716,7 +712,9 @@ function validateCliShape(
     options.definitionFile !== undefined &&
     !isGraphNeighborhoodCommand(command)
   ) {
-    throw new Error("--file can only narrow callers/callees/impact symbols");
+    throw new Error(
+      "--definition-file can only narrow callers/callees/impact symbols",
+    );
   }
   if (graphCommand && positionals.length !== 1) {
     throw new Error(`zg ${command} requires exactly one query`);

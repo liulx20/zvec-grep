@@ -456,10 +456,10 @@ definition: parse (src/config/parser.ts)
 results=1
 - loadConfig (src/config/load.ts) function
 
-narrow with --file <relative-path> or --seed-id <id>
+narrow with --definition-file <path> or --seed-id <id>
 ```
 
-`--file`（MCP 中为 `file`）可按相对或绝对源码路径收窄同名定义；`seedId` 仍可精确选择单个
+`--definition-file`（MCP 中为 `file`）可按相对或绝对源码路径收窄同名定义；`seedId` 仍可精确选择单个
 实体。头文件声明与对应实现会组成一个语义组并共同遍历，但不同文件中的多个真实定义不会仅因
 `symbolType + scope + name` 相同而被错误合并。文件过滤没有匹配时会给出 warning 并回退到
 全部定义组，而不是把“过滤路径错误”伪装成“符号不存在”。

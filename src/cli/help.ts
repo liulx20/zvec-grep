@@ -197,7 +197,7 @@ Uses the nearest workspace index from the current directory.
 Options:
   --depth <n>                       Traversal depth (default ${topic === "impact" ? 2 : 1})
   --limit <n>                       Max neighbors (default 20)
-  --file <relative-path>            Narrow same-named definitions by source file
+  --definition-file <path>          Narrow same-named definitions by source file
   --seed-id <id>                    Disambiguate when multiple symbols match`;
     case "index":
       return `Usage:

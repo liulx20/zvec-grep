@@ -219,7 +219,7 @@ function neighborhoodLines(result: NeighborhoodOutput): string[] {
         );
         appendNeighborhoodEntries(lines, group.neighbors);
       }
-      lines.push("", "narrow with --file <relative-path> or --seed-id <id>");
+      lines.push("", "narrow with --definition-file <path> or --seed-id <id>");
       return lines;
     }
     const lines = [`ambiguous seeds for ${result.query}:`];
