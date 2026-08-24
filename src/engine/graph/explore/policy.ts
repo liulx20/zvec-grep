@@ -16,6 +16,18 @@ import type { GraphEdgeKind } from "../types.js";
 import { TYPE_SYMBOL_KIND_SET } from "../symbol-kinds.js";
 
 const TYPEISH_KINDS = TYPE_SYMBOL_KIND_SET;
+type ScoredSeed = {
+  entity: StoredEntity;
+  id: string;
+  score: number;
+  coverage: number;
+};
+
+type TermSeed = ScoredSeed & {
+  strict: boolean;
+  coherence: number;
+  rank: readonly number[];
+};
 const QUERY_STOP_WORDS = new Set([
   "about",
   "after",
@@ -232,30 +244,21 @@ export function resolveExploreSeeds(
       entity,
       id: entity.entity.id,
       score,
-      nameAffinity,
       coverage: semanticTermsCovered(`${identityHay} ${contentHay}`, terms)
         .size,
     };
   });
   scored.sort((a, b) => b.score - a.score || a.id.localeCompare(b.id));
 
-  // A phrase such as "checkpoint recovery Open" describes several concepts.
-  // Do not let many overloads of one exact token consume every seed slot:
-  // reserve the best strict symbol match for each query token, then fill the
-  // remaining budget from the global ranking.
+  // Reserve one strong representative per query concept before filling from
+  // the global ranking. This keeps overloads from consuming the seed budget.
   const selected: string[] = [];
   const selectedIds = new Set<string>();
-  const selectedFileCounts = new Map<string, number>();
-  // Lexical candidates are restart seeds, not the final context. One seed per
-  // query concept gives graph propagation room to recover implementations and
-  // collaborators; doubling this count made declarations, constructors and
-  // overloads consume the complete file budget before traversal could rank
-  // their neighbours.
+  // Seeds restart graph propagation; they are not the final context.
   const seedTarget = Math.min(
     limit,
     nameTerms.length <= 1 ? 1 : nameTerms.length + 1,
   );
-  const selectedNameCounts = new Map<string, number>();
   const explicitSymbolSequence = /(?:\.|::|->|#)/.test(query);
   const perFileSeedCap = explicitSymbolSequence ? 4 : 1;
   const orderedSeedTerms = [...nameTerms].sort((left, right) => {
@@ -267,63 +270,17 @@ export function resolveExploreSeeds(
     );
   });
   for (const rawTerm of orderedSeedTerms) {
-    const normalizedTerm = rawTerm.toLowerCase();
     const explicitAcronym = /^[A-Z][A-Z0-9_]{1,}$/.test(rawTerm);
-    const matches = scored.filter(
-      ({ entity }) =>
-        identifierPrefixAffinity(symbolName(entity), normalizedTerm) > 0,
-    );
-    const rankedMatches = matches
-      .map((candidate) => {
-        const strict =
-          symbolName(candidate.entity).trim().toLowerCase() === normalizedTerm;
-        const typeish =
-          candidate.entity.entity.metadata?.kind === "code" &&
-          TYPEISH_KINDS.has(candidate.entity.entity.metadata.symbolType ?? "");
-        const coherence = anchorCoherence(candidate.entity, selected, scored);
-        return {
-          ...candidate,
-          strict,
-          strictType: strict && typeish,
-          acronymType: explicitAcronym && typeish,
-          topLevelApi: strict ? topLevelCallableScore(candidate.entity) : 0,
-          prefixAffinity: identifierPrefixAffinity(
-            symbolName(candidate.entity),
-            normalizedTerm,
-          ),
-          coherence,
-          // Sharing only a language or a top-level `src` directory is weak
-          // evidence in a monorepo. Require package-level proximity before a
-          // generic exact token can outrank a semantically coherent symbol.
-          anchored: selected.length === 0 || coherence >= 36,
-        };
-      })
-      .sort(
-        (left, right) =>
-          // An explicit identifier term is stronger evidence than arbitrary
-          // occurrences of that word in another symbol's body. Keep this as
-          // a lexicographic tier rather than a numeric bonus: long API bodies
-          // can otherwise accumulate enough content/coherence score to evict
-          // an exact seed (`app.use` used to select createApplication).
-          Number(right.acronymType) - Number(left.acronymType) ||
-          Number(right.strictType) - Number(left.strictType) ||
-          Number(right.anchored) - Number(left.anchored) ||
-          Number(right.strict) - Number(left.strict) ||
-          right.prefixAffinity - left.prefixAffinity ||
-          right.topLevelApi - left.topLevelApi ||
-          right.coherence - left.coherence ||
-          right.score - left.score ||
-          left.id.localeCompare(right.id),
-      );
-    const best = rankedMatches.find(
+    const best = rankTermSeeds(scored, rawTerm, selected, explicitAcronym).find(
       (candidate) =>
         !selectedIds.has(candidate.id) &&
-        (selectedNameCounts.get(
-          symbolName(candidate.entity).trim().toLowerCase(),
-        ) ?? 0) < 1 &&
+        !selected.some(
+          (id) => seedName(scored, id) === seedName(scored, candidate.id),
+        ) &&
         (candidate.strict ||
-          (selectedFileCounts.get(candidate.entity.file.id) ?? 0) <
-            perFileSeedCap) &&
+          selected.filter(
+            (id) => seedFileId(scored, id) === candidate.entity.file.id,
+          ).length < perFileSeedCap) &&
         (selected.length === 0 ||
           (candidate.strict &&
             candidate.entity.entity.metadata?.kind === "code" &&
@@ -341,16 +298,6 @@ export function resolveExploreSeeds(
     if (best && !selectedIds.has(best.id)) {
       selected.push(best.id);
       selectedIds.add(best.id);
-      selectedFileCounts.set(
-        best.entity.file.id,
-        (selectedFileCounts.get(best.entity.file.id) ?? 0) + 1,
-      );
-      const selectedName = symbolName(best.entity).trim().toLowerCase();
-      if (selectedName)
-        selectedNameCounts.set(
-          selectedName,
-          (selectedNameCounts.get(selectedName) ?? 0) + 1,
-        );
       if (selected.length >= seedTarget) break;
     }
   }
@@ -369,22 +316,73 @@ export function resolveExploreSeeds(
     const name = symbolName(candidate.entity).trim().toLowerCase();
     // Conceptual queries need one representative per symbol name. Exact-name
     // queries take the dedicated branch above and may still return overloads.
-    if (name && (selectedNameCounts.get(name) ?? 0) >= 1) continue;
+    if (name && selected.some((id) => seedName(scored, id) === name)) continue;
     const fileId = candidate.entity.file.id;
     if (
-      (selectedFileCounts.get(fileId) ?? 0) >= perFileSeedCap &&
+      selected.filter((id) => seedFileId(scored, id) === fileId).length >=
+        perFileSeedCap &&
       candidate.coverage < 2
     )
       continue;
     selected.push(candidate.id);
     selectedIds.add(candidate.id);
-    if (name)
-      selectedNameCounts.set(name, (selectedNameCounts.get(name) ?? 0) + 1);
-    selectedFileCounts.set(fileId, (selectedFileCounts.get(fileId) ?? 0) + 1);
   }
   return explicitSymbolSequence
     ? selected
     : diversifyConceptualSeedFiles(selected, scored, seedTarget);
+}
+
+function rankTermSeeds(
+  scored: readonly ScoredSeed[],
+  rawTerm: string,
+  selected: readonly string[],
+  explicitAcronym: boolean,
+): TermSeed[] {
+  const term = rawTerm.toLowerCase();
+  return scored
+    .filter(
+      ({ entity }) => identifierPrefixAffinity(symbolName(entity), term) > 0,
+    )
+    .map((candidate) => {
+      const strict = symbolName(candidate.entity).trim().toLowerCase() === term;
+      const typeish =
+        candidate.entity.entity.metadata?.kind === "code" &&
+        TYPEISH_KINDS.has(candidate.entity.entity.metadata.symbolType ?? "");
+      const coherence = anchorCoherence(candidate.entity, selected, scored);
+      return {
+        ...candidate,
+        strict,
+        coherence,
+        rank: [
+          Number(explicitAcronym && typeish),
+          Number(strict && typeish),
+          Number(selected.length === 0 || coherence >= 36),
+          Number(strict),
+          identifierPrefixAffinity(symbolName(candidate.entity), term),
+          strict ? topLevelCallableScore(candidate.entity) : 0,
+          coherence,
+          candidate.score,
+        ],
+      };
+    })
+    .sort(compareTermSeeds);
+}
+
+function compareTermSeeds(left: TermSeed, right: TermSeed): number {
+  for (let index = 0; index < left.rank.length; index += 1) {
+    const difference = right.rank[index]! - left.rank[index]!;
+    if (difference) return difference;
+  }
+  return left.id.localeCompare(right.id);
+}
+
+function seedName(scored: readonly ScoredSeed[], id: string): string {
+  const entity = scored.find((candidate) => candidate.id === id)?.entity;
+  return entity ? symbolName(entity).trim().toLowerCase() : "";
+}
+
+function seedFileId(scored: readonly ScoredSeed[], id: string): string {
+  return scored.find((candidate) => candidate.id === id)?.entity.file.id ?? "";
 }
 
 function diversifyConceptualSeedFiles(
