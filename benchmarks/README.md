@@ -16,6 +16,7 @@ See benchmark-specific README for setup and execution instructions.
 
 | Benchmark | Description | Agent | Study scope |
 | --- | --- | --- | --- |
+| [Explore quality](explore-quality/README.md) | Offline parser-to-graph and Explore regression suite | None | 531 deterministic cases |
 | [BrowseComp-Plus](browse-comp-plus/README.md) | Evaluates multi-document evidence retrieval and answer accuracy over a large, fixed corpus | Codex | 80 cases |
 | [SWE-QA-Bench](swe-qa-bench/README.md) | Evaluates repository-level, cross-file, and multi-hop software-engineering question answering | OpenCode | 20 tasks |
 

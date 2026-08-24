@@ -35,6 +35,8 @@
     "dist"
   ],
   "scripts": {
+    "benchmark:explore-quality": "npm run build && node benchmarks/explore-quality/run.mjs",
+    "benchmark:language-quality": "npm run build && node benchmarks/explore-quality/run-language-matrix.mjs",
     "build": "tsc -p tsconfig.json",
     "check": "npm run lint && npm run format:check && npm run typecheck && npm run test:coverage && npm run test:package",
     "format:check": "prettier --check .",
