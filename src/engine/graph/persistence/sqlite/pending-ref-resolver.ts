@@ -2,7 +2,10 @@ import { performance } from "node:perf_hooks";
 import { dirname } from "node:path";
 import { escapeRegExp } from "../../../utils/regex.js";
 import { FilePathIndex } from "../../imports/path-index.js";
-import { resolveImportPath } from "../../imports/resolve-path.js";
+import {
+  resetImportResolutionCaches,
+  resolveImportPath,
+} from "../../imports/resolve-path.js";
 import { NameIndex } from "../../name-index.js";
 import { referenceResolutionPolicy } from "../../reference-resolution-policy.js";
 import {
@@ -166,6 +169,7 @@ export class SqlitePendingRefResolver {
     this.assertWritable();
     let startedAt = performance.now();
     this.database.endBulkLoad();
+    resetImportResolutionCaches();
     options.onTiming?.("graph_bulk_finalize", performance.now() - startedAt);
     const retryFailed = options.retryFailed ?? true;
     const resolvable =
@@ -697,6 +701,10 @@ export class SqlitePendingRefResolver {
         )
       : { candidates: [], abstractDispatch: false, rtaActive: false };
     const semanticCandidates = semanticResolution.candidates;
+    const receiverEvidence = target.hints?.receiverTypeEvidence;
+    const receiverTypeIsTextFallback =
+      receiverEvidence?.source === "text_fallback" ||
+      receiverEvidence?.source === "cross_file_text_fallback";
     const targetHasExternalReceiver = this.receiverTypeIsExternal(
       target.hints?.candidateTypes ??
         (target.hints?.receiverType ? [target.hints.receiverType] : []),
@@ -709,6 +717,20 @@ export class SqlitePendingRefResolver {
         targetHasExternalReceiver)
     ) {
       this.bufferedExternalRefIds.add(ref.id);
+      return;
+    }
+    // Source-text inference is deliberately an uncertainty signal. It cannot
+    // account for macros, lexical shadowing, or complete declaration syntax,
+    // so it must never be projected as a definite CALLS edge.
+    if (ref.ref_kind === "call" && receiverTypeIsTextFallback) {
+      this.persistDynamicCall(
+        ref,
+        target,
+        semanticCandidates,
+        "lexical_dispatch",
+        "hierarchy",
+        receiverEvidence.confidence,
+      );
       return;
     }
     // A typed receiver that is absent from the visible graph must not fall
@@ -888,6 +910,10 @@ export class SqlitePendingRefResolver {
         hints: {
           ...target.hints,
           receiverType: inferred.type,
+          receiverTypeEvidence: {
+            source: inferred.source,
+            confidence: inferred.confidence,
+          },
           candidateTypes: [inferred.type],
           dispatch: "virtual",
         },

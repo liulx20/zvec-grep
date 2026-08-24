@@ -8,6 +8,16 @@ export const FUNCTION_POINTER_ARRAY_CONTAINER = "@array";
 
 export type ReferenceResolutionHints = {
   receiverType?: string;
+  /** How the receiver type was obtained; controls resolver trust boundaries. */
+  receiverTypeEvidence?: {
+    source:
+      | "ast_type"
+      | "binding"
+      | "ast_assignment"
+      | "text_fallback"
+      | "cross_file_text_fallback";
+    confidence: number;
+  };
   candidateTypes?: string[];
   genericBounds?: string[];
   dispatch?: "static" | "virtual" | "interface" | "trait" | "dynamic";

@@ -145,6 +145,53 @@ test("external refs are dropped without creating edges", async () => {
   graph.close();
 });
 
+test("text-inferred receiver types remain dynamic boundaries", async () => {
+  const graph = new SqliteGraphStorage("", { inMemory: true });
+  graph.upsertFileGraph(
+    "caller-file",
+    [
+      { id: "caller", kind: "function", is_exported: true, name: "caller" },
+      { id: "worker", kind: "class", is_exported: true, name: "Worker" },
+      { id: "worker-run", kind: "method", is_exported: true, name: "run" },
+    ],
+    [edge("worker", "worker-run", "CONTAINS", "contains")],
+    [
+      rawRef({
+        owner: "caller",
+        refName: "value.run",
+        line: 3,
+        sourceLanguage: "cpp",
+        target: {
+          raw: "value.run",
+          member: "run",
+          receiver: { kind: "qualified", name: "value" },
+          hints: {
+            receiverType: "Worker",
+            candidateTypes: ["Worker"],
+            receiverTypeEvidence: {
+              source: "text_fallback",
+              confidence: 0.4,
+            },
+          },
+        },
+      }),
+    ],
+  );
+  await graph.resolvePending();
+
+  assert.equal(graph.callees("caller", 1, 10).length, 0);
+  const boundary = graph.dynamicBoundaries(["caller"], 10)[0];
+  assert.equal(boundary?.reason, "lexical_dispatch");
+  assert.deepEqual(boundary?.candidates, ["worker-run"]);
+  assert.equal(
+    graph.database.db
+      .prepare("SELECT confidence FROM edge_candidates WHERE target_id=?")
+      .get("worker-run").confidence,
+    0.4,
+  );
+  graph.close();
+});
+
 test("failed member references are not reported as dynamic call boundaries", async () => {
   const graph = new SqliteGraphStorage("", { inMemory: true });
   graph.upsertFileGraph(

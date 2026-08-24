@@ -25,6 +25,8 @@ const CPP_NON_TYPES = new Set([
 export type CppReceiverTypeEvidence = {
   type: string;
   declarationFileId: string;
+  source: "text_fallback" | "cross_file_text_fallback";
+  confidence: number;
 };
 
 /** Invocation-local source cache used by C++ receiver inference. */
@@ -75,7 +77,13 @@ export class CppReceiverTypeInference {
     const localType = local
       ? this.inferLocal(source, local, receiver, Math.max(0, callLine - 1))
       : undefined;
-    if (localType) return { type: localType, declarationFileId: sourceFileId };
+    if (localType)
+      return {
+        type: localType,
+        declarationFileId: sourceFileId,
+        source: "text_fallback",
+        confidence: 0.4,
+      };
 
     const headerKey = `${source.id}\0${receiver}`;
     const cachedHeader = this.headerTypes.get(headerKey);
@@ -87,7 +95,12 @@ export class CppReceiverTypeInference {
       if (!lines) continue;
       const type = this.inferLocal(header, lines, receiver, lines.length - 1);
       if (type) {
-        const evidence = { type, declarationFileId: header.id };
+        const evidence: CppReceiverTypeEvidence = {
+          type,
+          declarationFileId: header.id,
+          source: "cross_file_text_fallback",
+          confidence: 0.3,
+        };
         this.headerTypes.set(headerKey, evidence);
         return evidence;
       }

@@ -39,6 +39,7 @@ export function enrichTargetWithResolutionFact(
   const annotatedTypes =
     fact.receiverCandidateTypes.get(receiver) ??
     fact.receiverCandidateTypes.get(receiverTail);
+  const factoryReceiverType = inferFactoryReceiverType(target, fact);
   const receiverType =
     dynamicTypes?.[0] ??
     annotatedTypes?.[0] ??
@@ -51,7 +52,7 @@ export function enrichTargetWithResolutionFact(
             fact.ownerFieldTypes.get(`${indexedRoot}.$element`))
           : undefined) ??
         inferDeclaredFieldChainType(receiver, fact) ??
-        inferFactoryReceiverType(target, fact) ??
+        factoryReceiverType ??
         fact.ownerFieldTypes.get(receiverTail)));
   if (!receiverType) return target;
   const bounds = fact.genericBounds.get(receiverType);
@@ -61,6 +62,14 @@ export function enrichTargetWithResolutionFact(
     hints: {
       ...target.hints,
       receiverType,
+      ...(factoryReceiverType === receiverType
+        ? {
+            receiverTypeEvidence: {
+              source: "text_fallback" as const,
+              confidence: 0.4,
+            },
+          }
+        : {}),
       ...arityHints,
       ...(bounds ? { genericBounds: [...bounds] } : {}),
       candidateTypes: dynamicTypes?.length

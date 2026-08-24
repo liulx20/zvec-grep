@@ -11,7 +11,7 @@ import {
   type FileGraphInput,
   rawRef,
 } from "./from-fragments.js";
-import { isExternalImportSpec } from "./imports/resolve-path.js";
+import { isDefinitelyExternalImportSpec } from "./imports/resolve-path.js";
 import type { LocalEdge } from "./types.js";
 import { resolveLocalReferenceCandidates } from "./local-reference-resolver.js";
 
@@ -67,11 +67,13 @@ export async function extractFileGraph(
   const occurrences = new Map<string, number>();
 
   const importSpecs = analysis.imports.filter(
-    (spec) => !isExternalImportSpec(spec.spec, sourceLanguage),
+    (spec) => !isDefinitelyExternalImportSpec(spec.spec, sourceLanguage),
   );
   const externalImportedNames = new Set(
     analysis.imports
-      .filter((spec) => isExternalImportSpec(spec.spec, sourceLanguage))
+      .filter((spec) =>
+        isDefinitelyExternalImportSpec(spec.spec, sourceLanguage),
+      )
       .flatMap((spec) => (spec.bindings ?? []).map((binding) => binding.local)),
   );
   const importedReceiverNames = new Set(
