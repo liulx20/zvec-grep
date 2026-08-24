@@ -181,85 +181,6 @@ function callableResolutionRoot(node: TSNode, language: string): TSNode {
   );
 }
 
-export function enrichTargetWithResolutionFact(
-  target: ReferenceTarget,
-  fact: CallResolutionFact | undefined,
-  arity: number | undefined,
-): ReferenceTarget {
-  const arityHints = arity === undefined ? {} : { callArity: arity };
-  const receiver = target.receiver?.name;
-  if (!receiver) {
-    const dynamicCallable = fact?.dynamicCallables.get(target.member);
-    if (dynamicCallable) {
-      return {
-        ...dynamicCallable,
-        hints: { ...dynamicCallable.hints, ...arityHints },
-      };
-    }
-    const lexicalHints = fact?.boundNames.has(target.member)
-      ? { lexicallyBound: true as const }
-      : {};
-    return Object.keys(arityHints).length === 0 &&
-      Object.keys(lexicalHints).length === 0
-      ? target
-      : {
-          ...target,
-          hints: { ...target.hints, ...arityHints, ...lexicalHints },
-        };
-  }
-  if (!fact) return target;
-  const receiverTail = receiver.split(".").pop() ?? receiver;
-  const indexedRoot = /^(?:this\.)?([A-Za-z_]\w*)\s*\[/.exec(receiver)?.[1];
-  const dynamicTypes =
-    fact.dynamicReceivers.get(receiver) ??
-    fact.dynamicReceivers.get(receiverTail);
-  const annotatedTypes =
-    fact.receiverCandidateTypes.get(receiver) ??
-    fact.receiverCandidateTypes.get(receiverTail);
-  const receiverType =
-    dynamicTypes?.[0] ??
-    annotatedTypes?.[0] ??
-    (isOwnerFieldReceiver(receiver)
-      ? fact.ownerFieldTypes.get(receiverTail)
-      : (fact.receiverTypes.get(receiver) ??
-        fact.receiverTypes.get(receiverTail) ??
-        (indexedRoot
-          ? (fact.receiverTypes.get(`${indexedRoot}.$element`) ??
-            fact.ownerFieldTypes.get(`${indexedRoot}.$element`))
-          : undefined) ??
-        inferDeclaredFieldChainType(receiver, fact) ??
-        inferFactoryReceiverType(target, fact) ??
-        fact.ownerFieldTypes.get(receiverTail)));
-  if (!receiverType) return target;
-  const bounds = fact.genericBounds.get(receiverType);
-  const dynamicDispatch = Boolean(dynamicTypes?.length);
-  return {
-    ...target,
-    hints: {
-      ...target.hints,
-      receiverType,
-      ...arityHints,
-      ...(bounds ? { genericBounds: [...bounds] } : {}),
-      candidateTypes: dynamicTypes?.length
-        ? [...dynamicTypes]
-        : annotatedTypes?.length
-          ? [...annotatedTypes]
-          : bounds
-            ? [receiverType, ...bounds]
-            : [receiverType],
-      ...(bounds && bounds.length > 0
-        ? { dispatch: dispatchForLanguage(fact.language) }
-        : annotatedTypes && annotatedTypes.length > 1
-          ? { dispatch: dispatchForLanguage(fact.language) }
-          : dynamicDispatch
-            ? { dispatch: dispatchForLanguage(fact.language) }
-            : VIRTUAL_LANGUAGES.has(fact.language)
-              ? { dispatch: "virtual" as const }
-              : {}),
-    },
-  };
-}
-
 function updateDynamicCallableScope(
   scope: Map<string, ReferenceTarget>,
   node: TSNode,
@@ -284,7 +205,6 @@ export function callNodeKey(node: TSNode): string {
   return `${node.type}:${node.startIndex}:${node.endIndex}`;
 }
 
-const VIRTUAL_LANGUAGES = new Set(["java", "cpp", "typescript", "tsx"]);
 const PARAMETER_TYPES = new Set([
   "parameter_declaration",
   "formal_parameter",
@@ -601,58 +521,6 @@ function collectConstructedOwnerFields(
   }
 }
 
-function inferDeclaredFieldChainType(
-  receiver: string,
-  fact: CallResolutionFact,
-): string | undefined {
-  const segments = receiver.split(".").filter(Boolean);
-  if (segments.length < 2) return undefined;
-  const initialType =
-    fact.receiverTypes.get(segments[0]!) ??
-    fact.ownerFieldTypes.get(segments[0]!);
-  if (!initialType) return undefined;
-  let currentType: string = initialType;
-  for (const field of segments.slice(1)) {
-    const declaringType = currentType.split(".").pop() ?? currentType;
-    const next: string | undefined =
-      fact.declaredFieldTypes.get(`${currentType}.${field}`) ??
-      fact.declaredFieldTypes.get(`${declaringType}.${field}`);
-    if (!next) return undefined;
-    currentType = next;
-  }
-  return currentType;
-}
-
-function inferFactoryReceiverType(
-  target: ReferenceTarget,
-  fact: CallResolutionFact,
-): string | undefined {
-  // The constructor node already proves the produced nominal type; do not
-  // require a synthetic constructor return signature to resolve an outer
-  // chained call such as `new GsonBuilder().create()`.
-  const constructed = /^new\s+([A-Za-z_$][\w$.:]*)\s*(?:[<(]|$)/.exec(
-    target.receiver?.name ?? "",
-  )?.[1];
-  if (constructed) return normalizeType(constructed);
-
-  const receiverExpression = target.raw.slice(
-    0,
-    Math.max(0, target.raw.lastIndexOf(`.${target.member}`)),
-  );
-  const factory =
-    /([A-Za-z_$][\w$]*(?:(?:::|\.)[A-Za-z_$][\w$]*)*)\s*\([^()]*\)\s*$/.exec(
-      receiverExpression,
-    )?.[1];
-  if (!factory) return undefined;
-  const tail = factory.split(/::|\./).at(-1)!;
-  const exact =
-    fact.callableReturnTypes.get(factory) ??
-    fact.callableReturnTypes.get(factory.replace(/\./g, "::")) ??
-    fact.callableReturnTypes.get(factory.replace(/::/g, "."));
-  if (exact) return exact;
-  return factory === tail ? fact.callableReturnTypes.get(tail) : undefined;
-}
-
 function collectOwnerMethodReturns(
   node: TSNode,
   language: string,
@@ -697,10 +565,6 @@ function collectOwnerMethodReturns(
 
 function isSelfReturnType(value: string): boolean {
   return /^(?:Self|self|this)$/.test(value);
-}
-
-function isOwnerFieldReceiver(receiver: string): boolean {
-  return /^(?:this|self|cls)\./.test(receiver);
 }
 
 function flattenScopes<T>(
@@ -1064,15 +928,7 @@ function collectGenericBounds(
   return result;
 }
 
-function dispatchForLanguage(
-  language: string,
-): "interface" | "trait" | "virtual" {
-  if (language === "rust") return "trait";
-  if (language === "go" || language === "java") return "interface";
-  return "virtual";
-}
-
-function normalizeType(value: string): string {
+export function normalizeType(value: string): string {
   const trimmed = value.trim();
   if (/\[\s*\]$/.test(trimmed)) return "Array";
   const wrapped = /^(?:(?:typing\.)?(?:Union|Optional))\s*\[(.*)\]$/.exec(

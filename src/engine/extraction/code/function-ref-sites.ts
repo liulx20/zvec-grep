@@ -4,9 +4,9 @@ import type { TSNode } from "./tree-sitter/nodes.js";
 import { referenceTargetFromSyntax } from "../../reference-target.js";
 import {
   callNodeKey,
-  enrichTargetWithResolutionFact,
   type CallResolutionFact,
 } from "./call-resolution-facts.js";
+import { enrichTargetWithResolutionFact } from "./call-resolution-target.js";
 import { cFunctionPointerRegistration } from "./c-function-pointer-registration.js";
 
 const VALUE_CONTEXTS = new Set([

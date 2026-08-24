@@ -7,9 +7,9 @@ import {
 import type { TSNode } from "./tree-sitter/nodes.js";
 import {
   callNodeKey,
-  enrichTargetWithResolutionFact,
   type CallResolutionFact,
 } from "./call-resolution-facts.js";
+import { enrichTargetWithResolutionFact } from "./call-resolution-target.js";
 import {
   dynamicCallTarget,
   isReflectionHelperCall,

@@ -10,6 +10,7 @@ import type {
   SymRef,
 } from "../types.js";
 import { collectCallPaths } from "./paths.js";
+import { collectComponentImportEvidence } from "./component-imports.js";
 import { assembleExploreFiles } from "./assembly.js";
 import {
   fileStem,
@@ -69,8 +70,6 @@ type ScoredNode = {
   isRoot: boolean;
   depth: number;
 };
-
-type ExploreRankingLink = { src: string; dst: string; weight: number };
 
 type ExploreHierarchyReader = GraphReader & {
   hierarchyDiverse?: (
@@ -1491,13 +1490,14 @@ export function exploreSubgraph(
     representativeMemberIds,
     Math.max(8, Math.min(24, Math.floor(maxNodes * 0.12))),
   );
-  const componentDependencies = glueComponentImportDependencies(
+  const componentImports = collectComponentImportEvidence(
     graph,
     storage,
-    selected,
     rootIds,
     Math.max(4, Math.min(24, Math.floor(maxNodes * 0.2))),
+    COMPONENT_IMPORT_POLICY.rankingWeight,
   );
+  for (const id of componentImports.nodeIds) absorb(selected, { id }, false, 1);
 
   const perRootBudget = Math.max(
     8,
@@ -1576,7 +1576,7 @@ export function exploreSubgraph(
     ...representativeDependencies.slice(0, 12),
     ...callPaths.flatMap((path) => path.nodes),
     ...hierarchyGlueIds,
-    ...componentDependencies
+    ...componentImports.rankingLinks
       .slice(0, COMPONENT_IMPORT_POLICY.protectedNodes)
       .map((dependency) => dependency.dst),
     // Preserve only a small integration spine. The rest remains subject to
@@ -1606,7 +1606,7 @@ export function exploreSubgraph(
   const edgeBudget = exploreEdgeBudget(maxNodes);
   const induced = collectExploreEdges(graph, selected, edgeBudget);
   const edges = induced.edges;
-  const rankingLinks = componentDependencies.filter(
+  const rankingLinks = componentImports.rankingLinks.filter(
     (dependency) =>
       selected.has(dependency.src) && selected.has(dependency.dst),
   );
@@ -1625,45 +1625,6 @@ export function exploreSubgraph(
       rankingLinks,
     ),
   };
-}
-
-/**
- * Component files own their script imports, while Explore starts from the
- * component symbol. Bridge only exact resolved import bindings so Vue/Svelte
- * roots can reach stores, composables and helpers without pulling every
- * symbol from every imported module into the context pack.
- */
-function glueComponentImportDependencies(
-  graph: GraphReader,
-  storage: ExploreSubgraphStorage,
-  selected: Map<string, ScoredNode>,
-  rootIds: readonly string[],
-  limit: number,
-): ExploreRankingLink[] {
-  if (!graph.importedSymbols || limit <= 0) return [];
-  const componentRoots = rootIds.filter((id) => {
-    const metadata = storage.getEntity(id)?.entity.metadata;
-    return metadata?.kind === "code" && metadata.symbolType === "component";
-  });
-  if (componentRoots.length === 0) return [];
-
-  const dependencies: ExploreRankingLink[] = [];
-  const perRootLimit = Math.max(2, Math.ceil(limit / componentRoots.length));
-  for (const rootId of componentRoots) {
-    const fileId = storage.getEntity(rootId)?.file.id;
-    if (!fileId) continue;
-    for (const dependency of graph.importedSymbols([fileId], perRootLimit)) {
-      if (!storage.getEntity(dependency.id)) continue;
-      absorb(selected, dependency, false, 1);
-      dependencies.push({
-        src: rootId,
-        dst: dependency.id,
-        weight: COMPONENT_IMPORT_POLICY.rankingWeight,
-      });
-      if (dependencies.length >= limit) return dependencies;
-    }
-  }
-  return dependencies;
 }
 
 function shouldSelectRepresentativeMembers(
