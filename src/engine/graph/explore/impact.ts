@@ -1,5 +1,4 @@
 import type { StoredEntity } from "../../storage/index.js";
-import type { GraphQueryStorage } from "../ports.js";
 import { isLowValuePath, isTestPath } from "../path-policy.js";
 import { includeSameFileGenericTypeFragments } from "../symbol-lookup.js";
 import type { GraphReader } from "../types.js";
@@ -13,7 +12,7 @@ import { isTypeishKind, symbolName } from "./policy.js";
 
 export function collectBlastRadius(
   graph: GraphReader,
-  storage: GraphQueryStorage,
+  storage: GraphReader,
   rootIds: readonly string[],
   limit: number,
 ): ExploreBlastRadius[] {
@@ -219,7 +218,7 @@ function pathDepth(path: string): number {
 
 export function collectChangeSurface(input: {
   graph: GraphReader;
-  storage: GraphQueryStorage;
+  storage: GraphReader;
   rootIds: readonly string[];
   nodes: readonly ExploreNode[];
   nodeScores: ReadonlyMap<string, number>;
@@ -341,7 +340,7 @@ export function collectChangeSurface(input: {
       string,
       {
         ref: (typeof refs)[number];
-        entity: NonNullable<ReturnType<GraphQueryStorage["getEntity"]>>;
+        entity: NonNullable<ReturnType<GraphReader["getEntity"]>>;
         count: number;
         structural: boolean;
       }
@@ -478,13 +477,13 @@ export function includeChangeSurfaceNodes(
   nodes: readonly ExploreNode[],
   changeSurface: readonly ExploreChangeSurfaceRef[],
   graph: GraphReader,
-  storage: GraphQueryStorage,
+  storage: GraphReader,
 ): ExploreNode[] {
   const out = [...nodes];
   const seen = new Set(nodes.map((node) => node.id));
   let additions = 0;
   const addEntity = (
-    entity: NonNullable<ReturnType<GraphQueryStorage["getEntity"]>>,
+    entity: NonNullable<ReturnType<GraphReader["getEntity"]>>,
   ): void => {
     if (seen.has(entity.entity.id) || additions >= 64) return;
     seen.add(entity.entity.id);

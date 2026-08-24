@@ -44,7 +44,8 @@ test("exploreSubgraph expands and RWR-scores multiple seeds without context asse
     entity("right", "right", "flow.ts"),
   ]);
 
-  const result = exploreSubgraph(graph, storage, {
+  Object.assign(graph, storage);
+  const result = exploreSubgraph(graph, {
     seedIds: ["left", "right"],
     seedWeights: new Map([
       ["left", 9],
@@ -80,7 +81,8 @@ test("exploreSubgraph bounds failed call-path attempts and edge reads", () => {
   const rootIds = Array.from({ length: 32 }, (_, index) => `isolated-${index}`);
   const storage = storageFrom(rootIds.map((id) => entity(id, id, `${id}.ts`)));
 
-  const result = exploreSubgraph(graph, storage, {
+  Object.assign(graph, storage);
+  const result = exploreSubgraph(graph, {
     seedIds: rootIds,
     traversalDepth: 3,
     maxNodes: 16,
@@ -124,7 +126,8 @@ test("explore reports truncated dynamic boundary output", () => {
   );
   const storage = storageFrom([entity("root", "root", "root.ts")]);
 
-  const result = exploreGraph(graph, storage, {
+  Object.assign(graph, storage);
+  const result = exploreGraph(graph, {
     query: "root",
     maxNodes: 16,
   });
@@ -174,7 +177,8 @@ test("exploreSubgraph drops call paths that exceed the retained node budget", ()
     ...rootIds.map((id) => entity(id, id, "paths.ts")),
     entity("bridge", "bridge", "paths.ts"),
   ]);
-  const result = exploreSubgraph(graph, storage, {
+  Object.assign(graph, storage);
+  const result = exploreSubgraph(graph, {
     seedIds: rootIds,
     maxNodes: 16,
     includeCallPaths: true,
@@ -212,7 +216,8 @@ test("explore maxChars is a hard source-text budget", () => {
       text: `export function large() {\n${"x".repeat(8_000)}\n}`,
     }),
   ]);
-  const result = exploreGraph(graph, storage, {
+  Object.assign(graph, storage);
+  const result = exploreGraph(graph, {
     query: "large",
     maxChars: 1_000,
     maxFiles: 1,
@@ -270,7 +275,8 @@ test("exploreSubgraph gives CALLS more RWR weight than REFS", () => {
     }),
   ]);
 
-  const result = exploreSubgraph(graph, storage, {
+  Object.assign(graph, storage);
+  const result = exploreSubgraph(graph, {
     seedIds: ["root"],
     maxNodes: 16,
   });
@@ -316,7 +322,8 @@ test("exploreSubgraph preserves parallel edge kinds between the same nodes", () 
     entity("target", "target", "parallel.ts"),
   ]);
 
-  const result = exploreSubgraph(graph, storage, {
+  Object.assign(graph, storage);
+  const result = exploreSubgraph(graph, {
     seedIds: ["root"],
     maxNodes: 16,
   });
@@ -462,7 +469,8 @@ test("exploreGraph expands hierarchy, ranks files, assembles zvec content", () =
     entity("Other", "Other", "sib.ts"),
   ]);
 
-  const result = exploreGraph(graph, storage, {
+  Object.assign(graph, storage);
+  const result = exploreGraph(graph, {
     query: "Child",
     maxFiles: 4,
     traversalDepth: 2,
@@ -563,7 +571,8 @@ test("exploreGraph rescues a buried callable signature type as change surface", 
     }),
   ]);
 
-  const result = exploreGraph(graph, storage, {
+  Object.assign(graph, storage);
+  const result = exploreGraph(graph, {
     query: "execute workflow",
     seedId: "create",
     searchLimit: 1,
@@ -609,7 +618,8 @@ test("queryGraphNeighborhood supports impact direction", () => {
     entity("target", "target", "a.ts", { symbolType: "function" }),
   ]);
 
-  const result = queryGraphNeighborhood(graph, storage, {
+  Object.assign(graph, storage);
+  const result = queryGraphNeighborhood(graph, {
     direction: "impact",
     query: "target",
   });
@@ -686,7 +696,8 @@ test("exploreGraph reports graph_unavailable", () => {
       };
     },
   };
-  const result = exploreGraph(graph, storageFrom([]), { query: "X" });
+  Object.assign(graph, storageFrom([]));
+  const result = exploreGraph(graph, { query: "X" });
   assert.equal(result.available, false);
   assert.equal(result.emptyReason, "graph_unavailable");
 });
@@ -787,7 +798,8 @@ test("exploreGraph recalls natural-language seeds, preserves call paths, and rep
     }),
   ]);
 
-  const result = exploreGraph(graph, storage, {
+  Object.assign(graph, storage);
+  const result = exploreGraph(graph, {
     query: "how does login reach validateToken",
     searchLimit: 2,
     maxNodes: 16,

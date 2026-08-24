@@ -11,6 +11,5 @@ export type {
   ExploreResult,
   ExploreSubgraphOptions,
   ExploreSubgraphResult,
-  ExploreSubgraphStorage,
   ExploreSymbolSnippet,
 } from "./explore/types.js";

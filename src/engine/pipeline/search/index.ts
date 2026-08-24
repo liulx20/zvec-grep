@@ -1679,7 +1679,7 @@ function expandGraphNeighbors(input: {
     };
   }
 
-  const subgraph = exploreSubgraph(input.graph, input.storage, {
+  const subgraph = exploreSubgraph(input.graph, {
     seedIds: seeds.map((seed) => seed.id),
     seedWeights: new Map(
       seeds.map((seed) => [seed.id, 1 / (RRF_K + seed.rank)]),

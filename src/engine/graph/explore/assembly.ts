@@ -1,5 +1,5 @@
 import type { Range } from "../../types.js";
-import type { GraphQueryStorage } from "../ports.js";
+import type { GraphReader } from "../types.js";
 import { isLowValuePath, isTestPath } from "../path-policy.js";
 import type {
   ExploreEdge,
@@ -20,7 +20,7 @@ import { selectExploreFiles } from "./file-selection.js";
 
 export function assembleExploreFiles(input: {
   query: string;
-  storage: GraphQueryStorage;
+  storage: GraphReader;
   nodes: readonly ExploreNode[];
   edges: readonly ExploreEdge[];
   callPaths: readonly ExploreCallPath[];

@@ -1,5 +1,4 @@
 import type { GraphReader } from "../types.js";
-import type { ExploreSubgraphStorage } from "./types.js";
 
 export type ExploreRankingLink = {
   src: string;
@@ -19,7 +18,7 @@ export type ComponentImportEvidence = {
  */
 export function collectComponentImportEvidence(
   graph: GraphReader,
-  storage: ExploreSubgraphStorage,
+  storage: GraphReader,
   rootIds: readonly string[],
   limit: number,
   weight: number,

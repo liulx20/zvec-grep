@@ -42,7 +42,6 @@ import { exploreGraph } from "../graph/explore.js";
 import { openGraphStorage } from "../graph/open.js";
 import type { GraphReader } from "../graph/public-types.js";
 import { queryGraphNeighborhood } from "../graph/query.js";
-import type { GraphQueryStorage } from "../graph/ports.js";
 import type { StoredEntity } from "../storage/index.js";
 import { resolveWorkspaceIndexLayout } from "../storage/layout.js";
 import {
@@ -214,7 +213,7 @@ export function openWorkspaceGraphReadSession(
     async explore(options) {
       assertReadSessionOpen(closed);
       return await withHomeReadLock(location.home, "daemon.explore", () =>
-        exploreOpenWorkspaceIndex(location.root, graph, graph, options),
+        exploreOpenWorkspaceIndex(location.root, graph, options),
       );
     },
     async graphNeighborhood(options) {
@@ -223,12 +222,7 @@ export function openWorkspaceGraphReadSession(
         location.home,
         "daemon.graph-neighborhood",
         () =>
-          graphNeighborhoodOpenWorkspaceIndex(
-            location.root,
-            graph,
-            graph,
-            options,
-          ),
+          graphNeighborhoodOpenWorkspaceIndex(location.root, graph, options),
       );
     },
     async close() {
@@ -501,7 +495,7 @@ class ZvecGrepService implements ZvecGrep {
     return await this.withGraphWorkspace(
       options.root ?? this.root,
       "explore",
-      (root, graph) => exploreOpenWorkspaceIndex(root, graph, graph, options),
+      (root, graph) => exploreOpenWorkspaceIndex(root, graph, options),
     );
   }
 
@@ -513,7 +507,7 @@ class ZvecGrepService implements ZvecGrep {
       options.root ?? this.root,
       "graph-neighborhood",
       (root, graph) =>
-        graphNeighborhoodOpenWorkspaceIndex(root, graph, graph, options),
+        graphNeighborhoodOpenWorkspaceIndex(root, graph, options),
     );
   }
 
@@ -1146,10 +1140,9 @@ function assertReadSessionOpen(closed: boolean): void {
 async function exploreOpenWorkspaceIndex(
   root: string,
   graph: GraphReader,
-  storage: GraphQueryStorage,
   options: ZvecGrepExploreOptions,
 ): Promise<ZvecGrepExploreResult> {
-  const result = exploreGraph(graph, storage, options);
+  const result = exploreGraph(graph, options);
   return {
     root,
     available: result.available,
@@ -1210,7 +1203,7 @@ async function exploreOpenWorkspaceIndex(
       candidatesTruncated: boundary.candidatesTruncated,
       occurrenceCount: boundary.occurrenceCount,
       candidateDetails: boundary.candidateDetails.map((candidate) => {
-        const entity = storage.getEntity(candidate.targetId);
+        const entity = graph.getEntity(candidate.targetId);
         return {
           ...candidate,
           filePath: entity?.file.relativePath,
@@ -1237,10 +1230,9 @@ async function exploreOpenWorkspaceIndex(
 async function graphNeighborhoodOpenWorkspaceIndex(
   root: string,
   graph: GraphReader,
-  storage: GraphQueryStorage,
   options: ZvecGrepGraphNeighborhoodOptions,
 ): Promise<ZvecGrepGraphNeighborhoodResult> {
-  const result = queryGraphNeighborhood(graph, storage, options);
+  const result = queryGraphNeighborhood(graph, options);
   return {
     root,
     available: result.available,

@@ -55,7 +55,6 @@ export type {
   GraphNeighborhoodResult,
   GraphNeighborhoodGroup,
   GraphQueryDirection,
-  GraphQueryStorage,
   GraphSeedMatch,
 } from "./query.js";
 export {
@@ -74,6 +73,5 @@ export type {
   ExploreResult,
   ExploreSubgraphOptions,
   ExploreSubgraphResult,
-  ExploreSubgraphStorage,
   ExploreSymbolSnippet,
 } from "./explore.js";

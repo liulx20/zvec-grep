@@ -1,5 +1,4 @@
 import type { StoredEntity } from "../../storage/index.js";
-import type { GraphQueryStorage } from "../ports.js";
 import {
   isLowValuePath,
   isTestPath,
@@ -12,7 +11,7 @@ import {
   preferExactSymbolCase,
   symbolLookupLeaf,
 } from "../symbol-lookup.js";
-import type { GraphEdgeKind } from "../types.js";
+import type { GraphEdgeKind, GraphReader } from "../types.js";
 import { TYPE_SYMBOL_KIND_SET } from "../symbol-kinds.js";
 
 const TYPEISH_KINDS = TYPE_SYMBOL_KIND_SET;
@@ -106,7 +105,7 @@ export function queryTargetsPath(query: string, path: string): boolean {
 }
 
 export function resolveExploreSeeds(
-  storage: GraphQueryStorage,
+  storage: GraphReader,
   query: string,
   seedId: string | undefined,
   limit: number,
@@ -481,7 +480,7 @@ export type ExploreSeedGroup = {
  * should continue through the ordinary multi-seed relevance path.
  */
 export function resolveExactExploreSeedGroups(
-  storage: GraphQueryStorage,
+  storage: GraphReader,
   query: string,
   limit: number,
 ): ExploreSeedGroup[] | null {

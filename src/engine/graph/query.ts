@@ -1,5 +1,4 @@
 import type { StoredEntity } from "../storage/index.js";
-import type { GraphQueryStorage } from "./ports.js";
 import { isLowValuePath } from "./path-policy.js";
 import {
   collapseConstructorOverloads,
@@ -11,9 +10,6 @@ import {
 } from "./symbol-lookup.js";
 import type { GraphReader, SymRef } from "./types.js";
 import { TYPE_SYMBOL_KIND_SET } from "./symbol-kinds.js";
-
-export type { GraphQueryStorage } from "./ports.js";
-
 export type GraphQueryDirection = "callers" | "callees" | "impact";
 
 export type GraphSeedMatch = {
@@ -73,9 +69,9 @@ const NEIGHBOR_CANDIDATE_MULTIPLIER = 8;
 
 export function queryGraphNeighborhood(
   graph: GraphReader,
-  storage: GraphQueryStorage,
   options: GraphNeighborhoodOptions,
 ): GraphNeighborhoodResult {
+  const storage = graph;
   const defaultDepth =
     options.direction === "impact" ? DEFAULT_IMPACT_DEPTH : DEFAULT_DEPTH;
   const depth = clampInt(options.depth ?? defaultDepth, 1, 10);
@@ -172,7 +168,7 @@ type ResolvedSeedGroup = {
 
 function queryNeighborhoodGroup(
   graph: GraphReader,
-  storage: GraphQueryStorage,
+  storage: GraphReader,
   direction: GraphQueryDirection,
   group: ResolvedSeedGroup,
   budget: { depth: number; limit: number },
@@ -269,7 +265,7 @@ function impactTypeMembers(
 }
 
 function resolveSeeds(
-  storage: GraphQueryStorage,
+  storage: GraphReader,
   query: string,
   seedId: string | undefined,
   file: string | undefined,
@@ -402,7 +398,7 @@ function rankNeighborhoodRefs(
 }
 
 function enrichSymRefs(
-  storage: GraphQueryStorage,
+  storage: GraphReader,
   refs: readonly SymRef[],
 ): EnrichedSymRef[] {
   return refs.map((ref) => ({

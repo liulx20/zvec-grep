@@ -2413,7 +2413,8 @@ function verifyExplore(spec, analyses, input, graph, failures) {
         .text;
     },
   };
-  const result = exploreGraph(graph, storage, {
+  Object.assign(graph, storage);
+  const result = exploreGraph(graph, {
     query: rootName,
     searchLimit: 8,
     traversalDepth: 2,

@@ -1,5 +1,4 @@
 import type { StoredEntity } from "../../storage/index.js";
-import type { GraphQueryStorage } from "../ports.js";
 import { isLowValuePath, isTestPath } from "../path-policy.js";
 import { groupSemanticSymbols } from "../symbol-lookup.js";
 import { isCallableSymbolKind } from "../symbol-kinds.js";
@@ -45,7 +44,6 @@ import type {
   ExploreResult,
   ExploreSubgraphOptions,
   ExploreSubgraphResult,
-  ExploreSubgraphStorage,
 } from "./types.js";
 
 const DEFAULT_SEARCH_LIMIT = EXPLORE_POLICY.searchLimit;
@@ -85,9 +83,9 @@ type ExploreHierarchyReader = GraphReader & {
  */
 export function exploreGraph(
   graph: GraphReader,
-  storage: GraphQueryStorage,
   options: ExploreOptions,
 ): ExploreResult {
+  const storage = graph;
   const query = options.query.trim();
   const searchLimit = clampInt(
     options.searchLimit ?? DEFAULT_SEARCH_LIMIT,
@@ -150,7 +148,7 @@ export function exploreGraph(
     2_000,
   );
 
-  const subgraph = exploreSubgraph(graph, storage, {
+  const subgraph = exploreSubgraph(graph, {
     seedIds: rootIds,
     traversalDepth,
     maxNodes,
@@ -404,7 +402,7 @@ export function exploreGraph(
 function collectImpactSourceDeclarations(
   pool: ExploreCandidatePool,
   originalNodes: readonly ExploreNode[],
-  storage: GraphQueryStorage,
+  storage: GraphReader,
   nodeScores: Map<string, number>,
   limit: number,
 ): ReadonlySet<string> {
@@ -469,7 +467,7 @@ function collectImpactSourceDeclarations(
 
 function rootSemanticCounterpartNodeIds(
   nodes: readonly ExploreNode[],
-  storage: GraphQueryStorage,
+  storage: GraphReader,
   rootIds: readonly string[],
 ): Set<string> {
   const roots = rootIds
@@ -508,7 +506,7 @@ function rootSemanticCounterpartNodeIds(
 function collectModuleEntrypointNodes(
   pool: ExploreCandidatePool,
   graph: GraphReader,
-  storage: GraphQueryStorage,
+  storage: GraphReader,
   rootIds: readonly string[],
   query: string,
   limit: number,
@@ -634,7 +632,7 @@ function collectDirectCallCollaborators(
   pool: ExploreCandidatePool,
   sourceNodes: readonly ExploreNode[],
   graph: GraphReader,
-  storage: GraphQueryStorage,
+  storage: GraphReader,
   nodeScores: Map<string, number>,
   rootIds: readonly string[],
   query: string,
@@ -728,7 +726,7 @@ function collectDirectCallCollaborators(
 function collectCounterpartSourceNodes(
   pool: ExploreCandidatePool,
   graph: GraphReader,
-  storage: GraphQueryStorage,
+  storage: GraphReader,
   nodeScores: Map<string, number>,
   rootIds: readonly string[],
   maxFiles: number,
@@ -1115,7 +1113,7 @@ function collectCounterpartSourceNodes(
 function collectCounterpartCallSpine(
   pool: ExploreCandidatePool,
   graph: GraphReader,
-  storage: GraphQueryStorage,
+  storage: GraphReader,
   counterpartNodeIds: ReadonlySet<string>,
   limit: number,
 ): void {
@@ -1308,9 +1306,9 @@ function relevantDynamicBoundaryFileIds(
  */
 export function exploreSubgraph(
   graph: GraphReader,
-  storage: ExploreSubgraphStorage,
   options: ExploreSubgraphOptions,
 ): ExploreSubgraphResult {
+  const storage = graph;
   if (!graph.available) {
     return emptySubgraph(false);
   }
@@ -1518,7 +1516,7 @@ export function exploreSubgraph(
 }
 
 function shouldSelectRepresentativeMembers(
-  storage: ExploreSubgraphStorage,
+  storage: GraphReader,
   rootIds: readonly string[],
 ): boolean {
   if (rootIds.length === 0) return false;
@@ -1542,7 +1540,7 @@ function shouldSelectRepresentativeMembers(
 
 function glueRepresentativeMembers(
   graph: GraphReader,
-  storage: ExploreSubgraphStorage,
+  storage: GraphReader,
   selected: Map<string, ScoredNode>,
   rootIds: readonly string[],
   limit: number,
@@ -1638,7 +1636,7 @@ function glueRepresentativeMembers(
 
 function glueRepresentativeMemberDependencies(
   graph: GraphReader,
-  storage: ExploreSubgraphStorage,
+  storage: GraphReader,
   selected: Map<string, ScoredNode>,
   memberIds: readonly string[],
   limit: number,
@@ -1681,7 +1679,7 @@ function glueRepresentativeMemberDependencies(
 
 function glueImpactNeighbors(
   graph: GraphReader,
-  storage: ExploreSubgraphStorage,
+  storage: GraphReader,
   selected: Map<string, ScoredNode>,
   rootIds: readonly string[],
   limit: number,
@@ -1735,7 +1733,7 @@ function glueImpactNeighbors(
 
 function rankDirectImpactSources(
   refs: readonly SymRef[],
-  storage: ExploreSubgraphStorage,
+  storage: GraphReader,
   rootPath: string,
 ): SymRef[] {
   const unique = [...new Map(refs.map((ref) => [ref.id, ref])).values()];
@@ -1766,7 +1764,7 @@ function emptySubgraph(available: boolean): ExploreSubgraphResult {
 
 function expandHierarchy(
   graph: GraphReader,
-  storage: ExploreSubgraphStorage,
+  storage: GraphReader,
   selected: Map<string, ScoredNode>,
   rootIds: readonly string[],
   budget: number,
@@ -1838,7 +1836,7 @@ function expandHierarchy(
 
 function hierarchySample(
   graph: ExploreHierarchyReader,
-  storage: ExploreSubgraphStorage,
+  storage: GraphReader,
   id: string,
   direction: "bases" | "derived",
   limit: number,
@@ -1877,7 +1875,7 @@ function hierarchySample(
  */
 function diverseRefsByFile(
   refs: readonly SymRef[],
-  storage: ExploreSubgraphStorage,
+  storage: GraphReader,
   limit: number,
 ): SymRef[] {
   if (limit <= 0) return [];
@@ -1908,7 +1906,7 @@ function diverseRefsByFile(
 
 function glueCallNeighbors(
   graph: GraphReader,
-  storage: ExploreSubgraphStorage,
+  storage: GraphReader,
   selected: Map<string, ScoredNode>,
   rootIds: readonly string[],
   limit: number,
@@ -1990,7 +1988,7 @@ function glueCallNeighbors(
 
 function selectRelevantDynamicSources(
   refs: readonly SymRef[],
-  storage: ExploreSubgraphStorage,
+  storage: GraphReader,
   rootPath: string,
   limit: number,
   maxFiles: number,
@@ -2018,10 +2016,7 @@ function selectRelevantDynamicSources(
   return selected;
 }
 
-function symbolName(
-  storage: ExploreSubgraphStorage,
-  id: string,
-): string | undefined {
+function symbolName(storage: GraphReader, id: string): string | undefined {
   const metadata = storage.getEntity(id)?.entity.metadata;
   return metadata?.kind === "code"
     ? (metadata.symbolName ?? undefined)

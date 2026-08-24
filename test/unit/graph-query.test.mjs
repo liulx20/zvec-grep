@@ -81,7 +81,8 @@ test("queryGraphNeighborhood enriches callers from storage", () => {
     },
   };
 
-  const result = queryGraphNeighborhood(graph, storage, {
+  Object.assign(graph, storage);
+  const result = queryGraphNeighborhood(graph, {
     direction: "callers",
     query: "target",
   });
@@ -95,7 +96,7 @@ test("queryGraphNeighborhood enriches callers from storage", () => {
     "caller",
   );
 
-  const callees = queryGraphNeighborhood(graph, storage, {
+  const callees = queryGraphNeighborhood(graph, {
     direction: "callees",
     query: "caller",
   });

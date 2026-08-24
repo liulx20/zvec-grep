@@ -218,6 +218,11 @@ export interface GraphReader {
   /** Lightweight entity projection; does not open the vector collection. */
   getEntity(entityId: string): StoredEntity | null;
   findSymbolsByName(name: string, limit: number): StoredEntity[];
+  /** Optional accelerated lookup for declaration/implementation pairing. */
+  findSymbolsByFileStems?(
+    stems: readonly string[],
+    limitPerStem: number,
+  ): ReadonlyMap<string, readonly StoredEntity[]>;
   findSymbolsByQuery?(query: string, limit: number): StoredEntity[];
   readFileText?(file: FileInfo): string | null;
 

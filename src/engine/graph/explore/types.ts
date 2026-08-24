@@ -1,6 +1,5 @@
 import type { StoredEntity } from "../../storage/index.js";
 import type { FileInfo, Range } from "../../types.js";
-import type { GraphQueryStorage } from "../ports.js";
 import type { DynamicBoundary, GraphEdgeKind } from "../types.js";
 
 export type ExploreOptions = {
@@ -20,8 +19,6 @@ export type ExploreSubgraphOptions = {
   maxNodes?: number;
   includeCallPaths?: boolean;
 };
-
-export type ExploreSubgraphStorage = Pick<GraphQueryStorage, "getEntity">;
 
 export type ExploreNode = {
   id: string;

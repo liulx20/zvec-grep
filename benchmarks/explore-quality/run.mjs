@@ -165,7 +165,8 @@ function runCase(spec) {
       graph.upsertFileGraph(file.id, file.nodes, file.edges, []);
     }
     const storage = fixtureStorage(spec.files);
-    const result = exploreGraph(graph, storage, {
+    Object.assign(graph, storage);
+    const result = exploreGraph(graph, {
       query: spec.query,
       searchLimit: 8,
       traversalDepth: 2,
