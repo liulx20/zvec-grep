@@ -1,4 +1,5 @@
 import type { StoredEntity } from "../../storage/index.js";
+import { escapeRegExp } from "../../utils/regex.js";
 import type { GraphQueryStorage } from "../ports.js";
 import {
   isLowValuePath,
@@ -512,10 +513,6 @@ function resolveCanonicalTypeFamily(
     .filter((entity) => symbolName(entity).toLowerCase() === canonicalName)
     .slice(0, limit)
     .map((entity) => entity.entity.id);
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 export type ExploreSeedGroup = {

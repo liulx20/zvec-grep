@@ -17,6 +17,7 @@ import {
   isHeaderPath,
   isSourcePath,
   platformDeclarationCounterparts,
+  semanticPathAffinity,
 } from "./counterpart-policy.js";
 import {
   collectBlastRadius,
@@ -782,13 +783,44 @@ function includeCounterpartSourceNodes(
     }
     return entities;
   };
-  const addCounterpart = (
-    entity: ReturnType<GraphQueryStorage["findSymbolsByName"]>[number],
-    headerPath: string,
+  const hasCounterpartBudget = (): boolean =>
+    additions.length < maxAdditions && addedFiles.size < maxCounterpartFiles;
+  const stemCandidatesFor = (
+    candidates: readonly ExploreNode[],
+  ): ((node: ExploreNode) => readonly StoredEntity[]) => {
+    const byStem = storage.findSymbolsByFileStems?.(
+      candidates.flatMap((node) => {
+        const stem = fileStem(node.entity?.file.relativePath ?? "");
+        return stem ? [stem] : [];
+      }),
+      128,
+    );
+    return (node) => {
+      const stem = fileStem(node.entity?.file.relativePath ?? "");
+      if (!stem) return [];
+      return (
+        byStem?.get(stem.toLowerCase()) ??
+        storage.findSymbolsByQuery?.(stem, 128) ??
+        []
+      );
+    };
+  };
+  const addCandidate = (
+    entity: StoredEntity,
     score: number,
-    reserve: boolean,
+    options: {
+      direct: boolean;
+      scoreFactor: number;
+      headerPath?: string;
+      directLine?: number;
+    },
   ): void => {
-    if (!isCounterpartSourcePath(headerPath, entity.file.relativePath)) return;
+    if (
+      options.headerPath &&
+      !isCounterpartSourcePath(options.headerPath, entity.file.relativePath)
+    )
+      return;
+    const reserve = options.direct && !isHeaderPath(entity.file.relativePath);
     if (existing.has(entity.entity.id)) {
       if (reserve) {
         directCounterpartFileIds.add(entity.file.id);
@@ -816,51 +848,38 @@ function includeCounterpartSourceNodes(
       directCounterpartFileIds.add(entity.file.id);
       directCounterpartNodeIds.add(entity.entity.id);
     }
-    nodeScores.set(entity.entity.id, Math.max(0.025, score * 0.35));
+    const callSiteBoost =
+      reserve && options.directLine !== undefined
+        ? 0.08 / (1 + options.directLine / 50)
+        : 0;
+    nodeScores.set(
+      entity.entity.id,
+      Math.max(0.025, score * options.scoreFactor + callSiteBoost),
+    );
+  };
+  const addCounterpart = (
+    entity: StoredEntity,
+    headerPath: string,
+    score: number,
+    direct: boolean,
+  ): void => {
+    addCandidate(entity, score, {
+      direct,
+      scoreFactor: 0.35,
+      headerPath,
+    });
   };
   const addSemanticCounterpart = (
-    entity: ReturnType<GraphQueryStorage["findSymbolsByName"]>[number],
+    entity: StoredEntity,
     score: number,
     direct: boolean,
     directLine?: number,
   ): void => {
-    if (existing.has(entity.entity.id)) {
-      if (direct && !isHeaderPath(entity.file.relativePath)) {
-        directCounterpartFileIds.add(entity.file.id);
-        directCounterpartNodeIds.add(entity.entity.id);
-      }
-      return;
-    }
-    if (
-      !addedFiles.has(entity.file.id) &&
-      addedFiles.size >= maxCounterpartFiles
-    )
-      return;
-    existing.add(entity.entity.id);
-    addedFiles.add(entity.file.id);
-    additions.push({
-      id: entity.entity.id,
-      kind:
-        entity.entity.metadata?.kind === "code"
-          ? entity.entity.metadata.symbolType
-          : undefined,
-      isRoot: false,
-      entity,
+    addCandidate(entity, score, {
+      direct,
+      scoreFactor: 0.45,
+      directLine,
     });
-    // A semantic group can contain several declaration fragments in the same
-    // header. Only reserve a distinct implementation file as a counterpart;
-    // otherwise an unselected sibling declaration consumes the slot intended
-    // for the source definition.
-    if (direct && !isHeaderPath(entity.file.relativePath)) {
-      directCounterpartFileIds.add(entity.file.id);
-      directCounterpartNodeIds.add(entity.entity.id);
-    }
-    const callSiteBoost =
-      direct && directLine !== undefined ? 0.08 / (1 + directLine / 50) : 0;
-    nodeScores.set(
-      entity.entity.id,
-      Math.max(0.025, score * 0.45 + callSiteBoost),
-    );
   };
 
   // Resolve declaration/definition counterparts by semantic identity before
@@ -896,25 +915,57 @@ function includeCounterpartSourceNodes(
       isTypeishKind(metadata.symbolType ?? "")
     );
   });
+  const containerVariants = (id: string): string[] => {
+    const container = storage.getEntity(id);
+    const metadata = container?.entity.metadata;
+    const name = metadata?.kind === "code" ? metadata.symbolName : undefined;
+    if (!container || !name) return [id];
+    const variants = findSymbolsByName(name)
+      .filter(
+        (entity) =>
+          entity.file.id === container.file.id &&
+          entity.entity.metadata?.kind === "code" &&
+          isTypeishKind(entity.entity.metadata.symbolType ?? ""),
+      )
+      .map((entity) => entity.entity.id);
+    return variants.length > 0 ? variants : [id];
+  };
   const rootAdjacentMemberIds = new Set<string>();
   for (const id of rootAdjacentHeaderTypeIds) {
-    const adjacent = storage.getEntity(id)!;
-    const metadata = adjacent.entity.metadata;
-    const name = metadata?.kind === "code" ? metadata.symbolName : undefined;
-    const variants = name
-      ? findSymbolsByName(name)
-          .filter(
-            (entity) =>
-              entity.file.id === adjacent.file.id &&
-              entity.entity.metadata?.kind === "code" &&
-              isTypeishKind(entity.entity.metadata.symbolType ?? ""),
-          )
-          .map((entity) => entity.entity.id)
-      : [id];
-    for (const variant of variants)
+    for (const variant of containerVariants(id))
       for (const member of graph.members(variant))
         rootAdjacentMemberIds.add(member.id);
   }
+  const addContainerMemberCounterparts = (
+    containerId: string,
+    reserve: (entity: StoredEntity) => boolean,
+    includeVariants = false,
+  ): void => {
+    const container = storage.getEntity(containerId);
+    const headerPath = container?.file.relativePath;
+    if (!headerPath || !isHeaderPath(headerPath)) return;
+    const members = [
+      ...new Map(
+        (includeVariants ? containerVariants(containerId) : [containerId])
+          .flatMap((id) => graph.members(id))
+          .map((member) => [member.id, member]),
+      ).values(),
+    ].slice(0, 64);
+    for (const member of members) {
+      const metadata = storage.getEntity(member.id)?.entity.metadata;
+      const name = metadata?.kind === "code" ? metadata.symbolName : undefined;
+      if (!name) continue;
+      for (const entity of findSymbolsByName(name)) {
+        addCounterpart(
+          entity,
+          headerPath,
+          nodeScores.get(containerId) ?? 0,
+          reserve(entity),
+        );
+        if (additions.length >= maxAdditions) return;
+      }
+    }
+  };
   const semanticCandidates = [...nodes]
     .filter(
       (node) =>
@@ -937,11 +988,7 @@ function includeCounterpartSourceNodes(
   >();
   const semanticEntitiesByName = new Map<string, StoredEntity[]>();
   for (const node of semanticCandidates) {
-    if (
-      additions.length >= maxAdditions ||
-      addedFiles.size >= maxCounterpartFiles
-    )
-      break;
+    if (!hasCounterpartBudget()) break;
     const metadata = node.entity?.entity.metadata;
     const name = metadata?.kind === "code" ? metadata.symbolName : undefined;
     if (!name) continue;
@@ -990,26 +1037,12 @@ function includeCounterpartSourceNodes(
   // unrelated modules from being merged.
   for (const rootId of rootIds) {
     if (additions.length >= maxAdditions) break;
-    const root = storage.getEntity(rootId);
-    const headerPath = root?.file.relativePath;
-    if (!headerPath || !isHeaderPath(headerPath)) continue;
-    const score = nodeScores.get(rootId) ?? 0;
-    for (const member of graph.members(rootId)) {
-      const metadata = storage.getEntity(member.id)?.entity.metadata;
-      const name = metadata?.kind === "code" ? metadata.symbolName : undefined;
-      if (!name) continue;
-      for (const entity of findSymbolsByName(name)) {
-        addCounterpart(entity, headerPath, score, true);
-        if (additions.length >= maxAdditions) break;
-      }
-      if (additions.length >= maxAdditions) break;
-    }
+    addContainerMemberCounterparts(rootId, () => true);
   }
 
-  // A directly related header type can be as important as the root itself
-  // (IOperator <- Pipeline). Pair its declared members with out-of-line
-  // definitions before the filename/FTS fallback, using the same strict path
-  // affinity as root counterparts and a bounded reservation budget.
+  // A directly related header type can be as important as the root itself.
+  // Pair its declared members with out-of-line definitions before the
+  // filename/FTS fallback, using the same bounded policy as root containers.
   const adjacentHeaderIds = nodes
     .filter((node) => rootAdjacentHeaderTypeIds.includes(node.id))
     .sort(
@@ -1020,50 +1053,11 @@ function includeCounterpartSourceNodes(
     .map((node) => node.id);
   for (const adjacentId of adjacentHeaderIds.slice(0, 8)) {
     if (additions.length >= maxAdditions) break;
-    const adjacent = storage.getEntity(adjacentId);
-    const headerPath = adjacent?.file.relativePath;
-    const metadata = adjacent?.entity.metadata;
-    if (
-      !headerPath ||
-      !isHeaderPath(headerPath) ||
-      metadata?.kind !== "code" ||
-      !isTypeishKind(metadata.symbolType ?? "")
-    )
-      continue;
-    const adjacentName = metadata.symbolName;
-    const adjacentVariants = adjacentName
-      ? findSymbolsByName(adjacentName)
-          .filter(
-            (entity) =>
-              entity.file.id === adjacent.file.id &&
-              entity.entity.metadata?.kind === "code" &&
-              isTypeishKind(entity.entity.metadata.symbolType ?? ""),
-          )
-          .map((entity) => entity.entity.id)
-      : [adjacentId];
-    const members = [
-      ...new Map(
-        adjacentVariants
-          .flatMap((id) => graph.members(id))
-          .map((member) => [member.id, member]),
-      ).values(),
-    ].slice(0, 64);
-    for (const member of members) {
-      const memberMetadata = storage.getEntity(member.id)?.entity.metadata;
-      const name =
-        memberMetadata?.kind === "code" ? memberMetadata.symbolName : undefined;
-      if (!name) continue;
-      for (const entity of findSymbolsByName(name)) {
-        addCounterpart(
-          entity,
-          headerPath,
-          nodeScores.get(adjacentId) ?? 0,
-          directCounterpartFileIds.size < 2,
-        );
-        if (additions.length >= maxAdditions) break;
-      }
-      if (additions.length >= maxAdditions) break;
-    }
+    addContainerMemberCounterparts(
+      adjacentId,
+      () => directCounterpartFileIds.size < 2,
+      true,
+    );
   }
 
   if (!storage.findSymbolsByQuery)
@@ -1090,34 +1084,17 @@ function includeCounterpartSourceNodes(
       return Boolean(stem);
     })
     .slice(0, 12);
-  const symbolsByStem = storage.findSymbolsByFileStems?.(
-    rankedCounterparts.flatMap((node) => {
-      const path = node.entity?.file.relativePath;
-      const stem = path ? fileStem(path) : "";
-      return stem ? [stem] : [];
-    }),
-    128,
-  );
+  const forwardStemCandidates = stemCandidatesFor(rankedCounterparts);
   for (const node of ranked) {
-    if (
-      paths.size >= 12 ||
-      additions.length >= maxAdditions ||
-      addedFiles.size >= maxCounterpartFiles
-    )
-      break;
+    if (paths.size >= 12 || !hasCounterpartBudget()) break;
     const path = node.entity?.file.relativePath;
     if (!path || paths.has(path)) continue;
     paths.add(path);
     const stem = fileStem(path);
     if (!stem) continue;
-    const candidates =
-      symbolsByStem?.get(stem.toLowerCase()) ??
-      storage.findSymbolsByQuery(stem, 128);
-    for (const entity of candidates) {
-      // Reserve at most two of the strongest exact-stem counterparts. This
-      // keeps a related declaration's implementation visible (Pipeline.h ->
-      // pipeline.cc) without allowing every incidental header to consume the
-      // complete file budget.
+    for (const entity of forwardStemCandidates(node)) {
+      // Reserve at most two of the strongest exact-stem counterparts without
+      // allowing incidental headers to consume the complete file budget.
       const reserve =
         rootAdjacentIds.has(node.id) && directCounterpartFileIds.size < 2;
       addCounterpart(entity, path, nodeScores.get(node.id) ?? 0, reserve);
@@ -1145,28 +1122,14 @@ function includeCounterpartSourceNodes(
         left.id.localeCompare(right.id),
     )
     .slice(0, 12);
-  const reverseCounterparts = storage.findSymbolsByFileStems?.(
-    adjacentSources.flatMap((node) => {
-      const stem = fileStem(node.entity?.file.relativePath ?? "");
-      return stem ? [stem] : [];
-    }),
-    128,
-  );
+  const reverseStemCandidates = stemCandidatesFor(adjacentSources);
   for (const sourceNode of adjacentSources) {
-    if (
-      additions.length >= maxAdditions ||
-      addedFiles.size >= maxCounterpartFiles
-    )
-      break;
+    if (!hasCounterpartBudget()) break;
     const sourcePath = sourceNode.entity?.file.relativePath;
     const sourceMetadata = sourceNode.entity?.entity.metadata;
     const stem = sourcePath ? fileStem(sourcePath) : "";
     if (!sourcePath || !stem || sourceMetadata?.kind !== "code") continue;
-    const candidates =
-      reverseCounterparts?.get(stem.toLowerCase()) ??
-      storage.findSymbolsByQuery?.(stem, 128) ??
-      [];
-    for (const entity of candidates) {
+    for (const entity of reverseStemCandidates(sourceNode)) {
       const candidateMetadata = entity.entity.metadata;
       if (
         !isHeaderPath(entity.file.relativePath) ||
@@ -2185,23 +2148,6 @@ function selectRelevantDynamicSources(
     if (selected.length >= limit) break;
   }
   return selected;
-}
-
-function semanticPathAffinity(left: string, right: string): number {
-  const ignored = new Set(["include", "src", "source", "lib", "neug", "main"]);
-  const parts = (path: string): Set<string> =>
-    new Set(
-      path
-        .toLowerCase()
-        .replaceAll("\\", "/")
-        .split("/")
-        .slice(0, -1)
-        .filter((part) => part && !ignored.has(part)),
-    );
-  const leftParts = parts(left);
-  let score = 0;
-  for (const part of parts(right)) if (leftParts.has(part)) score += 1;
-  return score;
 }
 
 function symbolName(

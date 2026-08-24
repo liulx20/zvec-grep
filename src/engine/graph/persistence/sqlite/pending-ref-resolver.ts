@@ -1,5 +1,6 @@
 import { performance } from "node:perf_hooks";
 import { dirname } from "node:path";
+import { escapeRegExp } from "../../../utils/regex.js";
 import { FilePathIndex } from "../../imports/path-index.js";
 import { resolveImportPath } from "../../imports/resolve-path.js";
 import { NameIndex } from "../../name-index.js";
@@ -1735,10 +1736,6 @@ function firstTopLevelTypeArgument(value: string): string | undefined {
       return value.slice(0, index).trim() || undefined;
   }
   return value.trim() || undefined;
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 /** Normalize a source-language type spelling to the symbol-table leaf name. */
