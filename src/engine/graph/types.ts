@@ -51,6 +51,7 @@ export type GraphEdgeKind =
   | "CONTAINS"
   | "DEFINES"
   | "IMPORTS"
+  | "COUNTERPART"
   | "INSTANTIATES";
 
 export type ResolutionEvidence =
@@ -144,7 +145,8 @@ export type LocalEdge = {
   count: number;
   first_line: number;
   ref_name: string;
-  kind: "CALLS" | "REFS" | "INHERITS" | "CONTAINS" | "INSTANTIATES";
+  kind:
+    "CALLS" | "REFS" | "INHERITS" | "CONTAINS" | "COUNTERPART" | "INSTANTIATES";
   source_language?: string;
   target?: ReferenceTarget;
 };

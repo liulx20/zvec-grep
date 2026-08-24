@@ -2011,6 +2011,7 @@ function selectGraphRelationships(
     CONTAINS: 2,
     REFS: 3,
     IMPORTS: 4,
+    COUNTERPART: 2,
     INSTANTIATES: 2,
   };
   const eligible = relations

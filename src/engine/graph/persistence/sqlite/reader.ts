@@ -30,7 +30,8 @@ import type {
 export type EdgeRow = {
   src_id: string;
   dst_id: string;
-  kind: "CALLS" | "REFS" | "INHERITS" | "IMPORTS" | "INSTANTIATES";
+  kind:
+    "CALLS" | "REFS" | "INHERITS" | "IMPORTS" | "COUNTERPART" | "INSTANTIATES";
   rel: string;
   count: number;
   first_line: number;
@@ -105,7 +106,12 @@ type EntityProjectionRow = SymbolRow & {
   format: string;
 };
 type StemFileRow = { stem: string; file_id: string };
-const REL_KINDS = new Set<GraphEdgeKind>(["CALLS", "REFS", "INHERITS"]);
+const REL_KINDS = new Set<GraphEdgeKind>([
+  "CALLS",
+  "REFS",
+  "INHERITS",
+  "COUNTERPART",
+]);
 const ALL_EDGE_KINDS: readonly GraphEdgeKind[] = [
   "CALLS",
   "REFS",

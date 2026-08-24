@@ -71,6 +71,7 @@ export const EXPLORE_POLICY = {
     "REFS",
     "INHERITS",
     "CONTAINS",
+    "COUNTERPART",
     "INSTANTIATES",
   ] as const,
   rwrEdgeWeights: {
@@ -83,6 +84,7 @@ export const EXPLORE_POLICY = {
     REFS: 0.5,
     DEFINES: 0.4,
     IMPORTS: 0.4,
+    COUNTERPART: 0.7,
     INSTANTIATES: 0.6,
   } satisfies Readonly<Record<GraphEdgeKind, number>>,
 };

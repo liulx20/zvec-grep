@@ -1,4 +1,4 @@
-export const SQLITE_GRAPH_SCHEMA_VERSION = 4;
+export const SQLITE_GRAPH_SCHEMA_VERSION = 5;
 
 export const SQLITE_GRAPH_INDEXES = `
 CREATE INDEX IF NOT EXISTS symbols_file_id_idx ON symbols(file_id);
@@ -50,7 +50,7 @@ CREATE TABLE IF NOT EXISTS edges (
  src_id TEXT NOT NULL, dst_id TEXT NOT NULL,
  src_is_file INTEGER NOT NULL CHECK(src_is_file IN (0,1)),
  dst_is_file INTEGER NOT NULL CHECK(dst_is_file IN (0,1)),
- kind TEXT NOT NULL CHECK (kind IN ('CALLS','REFS','INHERITS','IMPORTS','INSTANTIATES')),
+ kind TEXT NOT NULL CHECK (kind IN ('CALLS','REFS','INHERITS','IMPORTS','COUNTERPART','INSTANTIATES')),
  rel TEXT NOT NULL, count INTEGER NOT NULL DEFAULT 1,
  first_line INTEGER NOT NULL DEFAULT 0, ref_name TEXT NOT NULL DEFAULT '',
  source_language TEXT, imported_name TEXT, local_name TEXT,

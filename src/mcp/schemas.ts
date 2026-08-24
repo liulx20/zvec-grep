@@ -418,6 +418,7 @@ const searchResultSchema = z.object({
           "INHERITS",
           "CONTAINS",
           "IMPORTS",
+          "COUNTERPART",
           "INSTANTIATES",
         ]),
         scope: z.enum(["symbol", "file"]),

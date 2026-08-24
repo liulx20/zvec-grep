@@ -1,6 +1,4 @@
-import type { StoredEntity } from "../../storage/index.js";
 import { isLowValuePath, isTestPath } from "../path-policy.js";
-import { groupSemanticSymbols } from "../symbol-lookup.js";
 import { isCallableSymbolKind } from "../symbol-kinds.js";
 import type {
   DynamicBoundary,
@@ -12,14 +10,7 @@ import { collectCallPaths } from "./paths.js";
 import { collectComponentImportEvidence } from "./component-imports.js";
 import { ExploreCandidatePool } from "./candidate-pool.js";
 import { assembleExploreFiles } from "./assembly.js";
-import {
-  fileStem,
-  isCounterpartSourcePath,
-  isHeaderPath,
-  isSourcePath,
-  platformDeclarationCounterparts,
-  semanticPathAffinity,
-} from "./counterpart-policy.js";
+import { semanticPathAffinity } from "../counterpart-policy.js";
 import {
   collectBlastRadius,
   collectChangeSurface,
@@ -157,24 +148,6 @@ export function exploreGraph(
   const { callPaths } = subgraph;
   const nodeScores = new Map(subgraph.nodeScores);
   const candidates = new ExploreCandidatePool(subgraph.nodes, nodeScores);
-  const counterpartExpansion = collectCounterpartSourceNodes(
-    candidates,
-    graph,
-    storage,
-    nodeScores,
-    rootIds,
-    maxFiles,
-  );
-  collectCounterpartCallSpine(
-    candidates,
-    graph,
-    storage,
-    new Set([
-      ...rootSemanticCounterpartNodeIds(candidates.nodes, storage, rootIds),
-      ...counterpartExpansion.directCounterpartNodeIds,
-    ]),
-    24,
-  );
   const moduleEntrypoints = collectModuleEntrypointNodes(
     candidates,
     graph,
@@ -193,8 +166,6 @@ export function exploreGraph(
     query,
     8,
   );
-  for (const fileId of counterpartExpansion.directCounterpartFileIds)
-    candidates.addFileEvidence(fileId, "counterpart");
   for (const fileId of moduleEntrypoints.fileIds)
     candidates.addFileEvidence(fileId, "counterpart");
   for (const fileId of collaborators.fileIds)
@@ -212,6 +183,7 @@ export function exploreGraph(
     ? counterpartEdges.edges.map(toExploreEdge)
     : subgraph.edges;
   let edgesTruncated = counterpartEdges?.truncated ?? subgraph.edgesTruncated;
+  addCounterpartEvidence(candidates, edges);
   const roots = exactGroups?.[0]
     ? nodes.filter(
         (node) => node.id === exactGroups[0]!.representative.entity.id,
@@ -256,16 +228,8 @@ export function exploreGraph(
     nodeScores,
     candidates.fileEvidence,
   );
-  const impactCounterpartFileIds = collectImpactSourceDeclarations(
-    impactCandidates,
-    nodes,
-    storage,
-    nodeScores,
-    4,
-  );
+  includePersistedCounterparts(impactCandidates, graph, nodeScores, 32);
   const contextNodes = impactCandidates.nodes;
-  for (const fileId of impactCounterpartFileIds)
-    impactCandidates.addFileEvidence(fileId, "counterpart");
   if (contextNodes.length !== nodes.length) {
     const impactEdges = graph.edges(
       contextNodes.map((node) => node.id),
@@ -405,110 +369,6 @@ export function exploreGraph(
  * normal counterpart discovery: names must match exactly, C-family
  * stem/directory affinity remains mandatory, and only four files can be
  * reserved.
- */
-function collectImpactSourceDeclarations(
-  pool: ExploreCandidatePool,
-  originalNodes: readonly ExploreNode[],
-  storage: GraphReader,
-  nodeScores: Map<string, number>,
-  limit: number,
-): ReadonlySet<string> {
-  if (limit <= 0) return new Set();
-  const impactNodes = pool.nodes;
-  const initialSize = pool.size;
-  const originalIds = new Set(originalNodes.map((node) => node.id));
-  const fileIds = new Set<string>();
-  const candidatesByName = new Map<string, StoredEntity[]>();
-
-  const sources = impactNodes
-    .filter((node) => {
-      const metadata = node.entity?.entity.metadata;
-      return (
-        isSourcePath(node.entity?.file.relativePath ?? "") &&
-        metadata?.kind === "code" &&
-        isCallableSymbolKind(metadata.symbolType ?? "") &&
-        Boolean(metadata.symbolName)
-      );
-    })
-    .sort(
-      (left, right) =>
-        Number(!originalIds.has(right.id)) -
-          Number(!originalIds.has(left.id)) ||
-        (nodeScores.get(right.id) ?? 0) - (nodeScores.get(left.id) ?? 0) ||
-        left.id.localeCompare(right.id),
-    )
-    .slice(0, 24);
-
-  for (const source of sources) {
-    if (pool.size - initialSize >= limit) break;
-    const metadata = source.entity!.entity.metadata;
-    if (metadata?.kind !== "code" || !metadata.symbolName) continue;
-    const sourcePath = source.entity!.file.relativePath;
-    let candidates = candidatesByName.get(metadata.symbolName);
-    if (!candidates) {
-      candidates = storage.findSymbolsByName(metadata.symbolName, 64);
-      candidatesByName.set(metadata.symbolName, candidates);
-    }
-    for (const candidate of candidates) {
-      const candidateMetadata = candidate.entity.metadata;
-      if (
-        pool.has(candidate.entity.id) ||
-        !isHeaderPath(candidate.file.relativePath) ||
-        !isCounterpartSourcePath(candidate.file.relativePath, sourcePath) ||
-        candidateMetadata?.kind !== "code" ||
-        candidateMetadata.symbolName !== metadata.symbolName ||
-        (candidateMetadata.symbolType !== metadata.symbolType &&
-          !isTypeishKind(candidateMetadata.symbolType ?? ""))
-      )
-        continue;
-      fileIds.add(candidate.file.id);
-      pool.add(
-        candidate,
-        Math.max(0.02, (nodeScores.get(source.id) ?? 0) * 0.45),
-      );
-      break;
-    }
-  }
-  return fileIds;
-}
-
-function rootSemanticCounterpartNodeIds(
-  nodes: readonly ExploreNode[],
-  storage: GraphReader,
-  rootIds: readonly string[],
-): Set<string> {
-  const roots = rootIds
-    .map((id) => storage.getEntity(id))
-    .filter((entity): entity is StoredEntity => Boolean(entity));
-  const result = new Set<string>();
-  for (const node of nodes) {
-    if (!node.entity || rootIds.includes(node.id)) continue;
-    const metadata = node.entity.entity.metadata;
-    if (metadata?.kind !== "code") continue;
-    if (
-      roots.some((root) => {
-        const rootMetadata = root.entity.metadata;
-        return (
-          rootMetadata?.kind === "code" &&
-          rootMetadata.symbolName === metadata.symbolName &&
-          rootMetadata.scope === metadata.scope &&
-          isCounterpartSourcePath(
-            root.file.relativePath,
-            node.entity!.file.relativePath,
-          )
-        );
-      })
-    )
-      result.add(node.id);
-  }
-  return result;
-}
-
-/**
- * Explicit member queries describe a module API (`app.listen app.use`). When
- * another production file imports that API's defining file, keep a bounded
- * set of its top-level definitions as the public entrypoint counterpart.
- * IMPORTS is durable evidence; no filename or framework convention is used.
  */
 function collectModuleEntrypointNodes(
   pool: ExploreCandidatePool,
@@ -723,440 +583,57 @@ function collectDirectCallCollaborators(
   return { fileIds };
 }
 
-/**
- * Add a small number of declaration/implementation counterpart entities.
- * C/C++ headers commonly have no graph edge to their translation unit; path
- * identity is the durable language-neutral evidence available at query time.
- * Search is bounded by high-ranked files and every result must pass an exact
- * stem plus directory-affinity check.
- */
-function collectCounterpartSourceNodes(
+function includePersistedCounterparts(
   pool: ExploreCandidatePool,
   graph: GraphReader,
-  storage: GraphReader,
-  nodeScores: Map<string, number>,
-  rootIds: readonly string[],
-  maxFiles: number,
-): {
-  directCounterpartFileIds: ReadonlySet<string>;
-  directCounterpartNodeIds: ReadonlySet<string>;
-} {
-  const nodes = pool.nodes;
-  const paths = new Set<string>();
-  const addedFiles = new Set<string>();
-  let added = 0;
-  const maxAdditions = 64;
-  const maxCounterpartFiles = Math.min(8, maxFiles);
-  const directCounterpartFileIds = new Set<string>();
-  const directCounterpartNodeIds = new Set<string>();
-  const symbolsByName = new Map<string, StoredEntity[]>();
-  const findSymbolsByName = (name: string): StoredEntity[] => {
-    const key = name.toLowerCase();
-    let entities = symbolsByName.get(key);
-    if (!entities) {
-      entities = storage.findSymbolsByName(name, 128);
-      symbolsByName.set(key, entities);
-    }
-    return entities;
-  };
-  const hasCounterpartBudget = (): boolean =>
-    added < maxAdditions && addedFiles.size < maxCounterpartFiles;
-  const stemCandidatesFor = (
-    candidates: readonly ExploreNode[],
-  ): ((node: ExploreNode) => readonly StoredEntity[]) => {
-    const byStem = storage.findSymbolsByFileStems?.(
-      candidates.flatMap((node) => {
-        const stem = fileStem(node.entity?.file.relativePath ?? "");
-        return stem ? [stem] : [];
-      }),
-      128,
-    );
-    return (node) => {
-      const stem = fileStem(node.entity?.file.relativePath ?? "");
-      if (!stem) return [];
-      return (
-        byStem?.get(stem.toLowerCase()) ??
-        storage.findSymbolsByQuery?.(stem, 128) ??
-        []
-      );
-    };
-  };
-  const addCandidate = (
-    entity: StoredEntity,
-    score: number,
-    options: {
-      direct: boolean;
-      scoreFactor: number;
-      headerPath?: string;
-      directLine?: number;
-    },
-  ): void => {
-    if (
-      options.headerPath &&
-      !isCounterpartSourcePath(options.headerPath, entity.file.relativePath)
-    )
-      return;
-    const reserve = options.direct && !isHeaderPath(entity.file.relativePath);
-    if (pool.has(entity.entity.id)) {
-      if (reserve) {
-        directCounterpartFileIds.add(entity.file.id);
-        directCounterpartNodeIds.add(entity.entity.id);
-      }
-      return;
-    }
-    if (
-      !addedFiles.has(entity.file.id) &&
-      addedFiles.size >= maxCounterpartFiles
-    )
-      return;
-    addedFiles.add(entity.file.id);
-    if (reserve) {
-      directCounterpartFileIds.add(entity.file.id);
-      directCounterpartNodeIds.add(entity.entity.id);
-    }
-    const callSiteBoost =
-      reserve && options.directLine !== undefined
-        ? 0.08 / (1 + options.directLine / 50)
-        : 0;
-    if (
-      pool.add(
-        entity,
-        Math.max(0.025, score * options.scoreFactor + callSiteBoost),
-      )
-    )
-      added += 1;
-  };
-  const addCounterpart = (
-    entity: StoredEntity,
-    headerPath: string,
-    score: number,
-    direct: boolean,
-  ): void => {
-    addCandidate(entity, score, {
-      direct,
-      scoreFactor: 0.35,
-      headerPath,
-    });
-  };
-  const addSemanticCounterpart = (
-    entity: StoredEntity,
-    score: number,
-    direct: boolean,
-    directLine?: number,
-  ): void => {
-    addCandidate(entity, score, {
-      direct,
-      scoreFactor: 0.45,
-      directLine,
-    });
-  };
-
-  // Resolve declaration/definition counterparts by semantic identity before
-  // falling back to filename conventions. The shared grouping policy keeps
-  // this consistent with callers/callees seed resolution.
-  const directCallTargetLines = new Map<string, number>();
-  for (const edge of graph.outgoingEdges(rootIds, ["CALLS"], 256))
-    directCallTargetLines.set(
-      edge.dst,
-      Math.min(
-        directCallTargetLines.get(edge.dst) ?? Infinity,
-        edge.first_line,
-      ),
-    );
-  const rootAdjacentIds = new Set([
-    ...graph
-      .incomingEdges(rootIds, ["CALLS", "REFS", "INHERITS"], 256)
-      .map((edge) => edge.src),
-    ...graph
-      .outgoingEdges(rootIds, ["CALLS", "REFS", "INHERITS"], 256)
-      .map((edge) => edge.dst),
-  ]);
-  const rootAdjacentHeaderTypeIds = [...rootAdjacentIds].filter((id) => {
-    const entity = storage.getEntity(id);
-    const metadata = entity?.entity.metadata;
-    return (
-      isHeaderPath(entity?.file.relativePath ?? "") &&
-      metadata?.kind === "code" &&
-      isTypeishKind(metadata.symbolType ?? "")
-    );
-  });
-  const containerVariants = (id: string): string[] => {
-    const container = storage.getEntity(id);
-    const metadata = container?.entity.metadata;
-    const name = metadata?.kind === "code" ? metadata.symbolName : undefined;
-    if (!container || !name) return [id];
-    const variants = findSymbolsByName(name)
-      .filter(
-        (entity) =>
-          entity.file.id === container.file.id &&
-          entity.entity.metadata?.kind === "code" &&
-          isTypeishKind(entity.entity.metadata.symbolType ?? ""),
-      )
-      .map((entity) => entity.entity.id);
-    return variants.length > 0 ? variants : [id];
-  };
-  const rootAdjacentMemberIds = new Set<string>();
-  for (const id of rootAdjacentHeaderTypeIds) {
-    for (const variant of containerVariants(id))
-      for (const member of graph.members(variant))
-        rootAdjacentMemberIds.add(member.id);
-  }
-  const addContainerMemberCounterparts = (
-    containerId: string,
-    reserve: (entity: StoredEntity) => boolean,
-    includeVariants = false,
-  ): void => {
-    const container = storage.getEntity(containerId);
-    const headerPath = container?.file.relativePath;
-    if (!headerPath || !isHeaderPath(headerPath)) return;
-    const members = [
-      ...new Map(
-        (includeVariants ? containerVariants(containerId) : [containerId])
-          .flatMap((id) => graph.members(id))
-          .map((member) => [member.id, member]),
-      ).values(),
-    ].slice(0, 64);
-    for (const member of members) {
-      const metadata = storage.getEntity(member.id)?.entity.metadata;
-      const name = metadata?.kind === "code" ? metadata.symbolName : undefined;
-      if (!name) continue;
-      for (const entity of findSymbolsByName(name)) {
-        addCounterpart(
-          entity,
-          headerPath,
-          nodeScores.get(containerId) ?? 0,
-          reserve(entity),
-        );
-        if (added >= maxAdditions) return;
-      }
-    }
-  };
-  const semanticCandidates = [...nodes]
-    .filter(
-      (node) =>
-        isHeaderPath(node.entity?.file.relativePath ?? "") &&
-        isCallableSymbolKind(node.kind),
-    )
-    .sort(
-      (left, right) =>
-        Number(directCallTargetLines.has(right.id)) -
-          Number(directCallTargetLines.has(left.id)) ||
-        (directCallTargetLines.get(left.id) ?? Infinity) -
-          (directCallTargetLines.get(right.id) ?? Infinity) ||
-        (nodeScores.get(right.id) ?? 0) - (nodeScores.get(left.id) ?? 0) ||
-        left.id.localeCompare(right.id),
-    )
-    .slice(0, 48);
-  const semanticGroupsByName = new Map<
-    string,
-    ReturnType<typeof groupSemanticSymbols>
-  >();
-  const semanticEntitiesByName = new Map<string, StoredEntity[]>();
-  for (const node of semanticCandidates) {
-    if (!hasCounterpartBudget()) break;
-    const metadata = node.entity?.entity.metadata;
-    const name = metadata?.kind === "code" ? metadata.symbolName : undefined;
-    if (!name) continue;
-    let groups = semanticGroupsByName.get(name);
-    if (!groups) {
-      const entities = findSymbolsByName(name);
-      semanticEntitiesByName.set(name, entities);
-      groups = groupSemanticSymbols(entities);
-      semanticGroupsByName.set(name, groups);
-    }
-    const group = groups.find((candidate) =>
-      candidate.entities.some((entity) => entity.entity.id === node.id),
-    );
-    if (group && group.entities.length >= 2)
-      for (const entity of group.entities) {
-        const reserve =
-          directCallTargetLines.has(node.id) ||
-          rootAdjacentMemberIds.has(node.id);
-        addSemanticCounterpart(
-          entity,
-          nodeScores.get(node.id) ?? 0,
-          reserve,
-          directCallTargetLines.get(node.id),
-        );
-        if (added >= maxAdditions) break;
-      }
-    if (directCallTargetLines.has(node.id)) {
-      for (const entity of platformDeclarationCounterparts(
-        node.entity!,
-        semanticEntitiesByName.get(name) ?? [],
-      )) {
-        addSemanticCounterpart(
-          entity,
-          nodeScores.get(node.id) ?? 0,
-          true,
-          directCallTargetLines.get(node.id),
-        );
-        if (added >= maxAdditions) break;
-      }
-    }
-  }
-
-  // Prefer exact member identity. This joins a declaration container to its
-  // out-of-line method definitions without inventing a broad filename-only
-  // graph relationship. The path check still prevents same-named APIs in
-  // unrelated modules from being merged.
-  for (const rootId of rootIds) {
-    if (added >= maxAdditions) break;
-    addContainerMemberCounterparts(rootId, () => true);
-  }
-
-  // A directly related header type can be as important as the root itself.
-  // Pair its declared members with out-of-line definitions before the
-  // filename/FTS fallback, using the same bounded policy as root containers.
-  const adjacentHeaderIds = nodes
-    .filter((node) => rootAdjacentHeaderTypeIds.includes(node.id))
-    .sort(
-      (left, right) =>
-        (nodeScores.get(right.id) ?? 0) - (nodeScores.get(left.id) ?? 0) ||
-        left.id.localeCompare(right.id),
-    )
-    .map((node) => node.id);
-  for (const adjacentId of adjacentHeaderIds.slice(0, 8)) {
-    if (added >= maxAdditions) break;
-    addContainerMemberCounterparts(
-      adjacentId,
-      () => directCounterpartFileIds.size < 2,
-      true,
-    );
-  }
-
-  if (!storage.findSymbolsByQuery)
-    return {
-      directCounterpartFileIds,
-      directCounterpartNodeIds,
-    };
-
-  const ranked = [...nodes]
-    .filter((node) => isHeaderPath(node.entity?.file.relativePath ?? ""))
-    .sort(
-      (left, right) =>
-        Number(rootAdjacentIds.has(right.id)) -
-          Number(rootAdjacentIds.has(left.id)) ||
-        (nodeScores.get(right.id) ?? 0) - (nodeScores.get(left.id) ?? 0) ||
-        left.id.localeCompare(right.id),
-    );
-  const rankedCounterparts = ranked
-    .filter((node) => {
-      const path = node.entity?.file.relativePath;
-      if (!path || paths.has(path)) return false;
-      const stem = fileStem(path);
-      return Boolean(stem);
-    })
-    .slice(0, 12);
-  const forwardStemCandidates = stemCandidatesFor(rankedCounterparts);
-  for (const node of ranked) {
-    if (paths.size >= 12 || !hasCounterpartBudget()) break;
-    const path = node.entity?.file.relativePath;
-    if (!path || paths.has(path)) continue;
-    paths.add(path);
-    const stem = fileStem(path);
-    if (!stem) continue;
-    for (const entity of forwardStemCandidates(node)) {
-      // Reserve at most two of the strongest exact-stem counterparts without
-      // allowing incidental headers to consume the complete file budget.
-      const reserve =
-        rootAdjacentIds.has(node.id) && directCounterpartFileIds.size < 2;
-      addCounterpart(entity, path, nodeScores.get(node.id) ?? 0, reserve);
-      if (added >= maxAdditions) break;
-    }
-  }
-
-  // Graph expansion often reaches a service/orchestration implementation
-  // before its public declaration. Pair a bounded set of retained source
-  // symbols back to a same-stem header using semantic identity and directory
-  // affinity. Direct root neighbors rank first; non-adjacent sources still
-  // require an exact symbol match (including constructor -> owner type), so
-  // filename similarity alone cannot create a counterpart.
-  const adjacentSources = nodes
-    .filter(
-      (node) =>
-        rootAdjacentIds.has(node.id) &&
-        isSourcePath(node.entity?.file.relativePath ?? ""),
-    )
-    .sort(
-      (left, right) =>
-        Number(rootAdjacentIds.has(right.id)) -
-          Number(rootAdjacentIds.has(left.id)) ||
-        (nodeScores.get(right.id) ?? 0) - (nodeScores.get(left.id) ?? 0) ||
-        left.id.localeCompare(right.id),
-    )
-    .slice(0, 12);
-  const reverseStemCandidates = stemCandidatesFor(adjacentSources);
-  for (const sourceNode of adjacentSources) {
-    if (!hasCounterpartBudget()) break;
-    const sourcePath = sourceNode.entity?.file.relativePath;
-    const sourceMetadata = sourceNode.entity?.entity.metadata;
-    const stem = sourcePath ? fileStem(sourcePath) : "";
-    if (!sourcePath || !stem || sourceMetadata?.kind !== "code") continue;
-    for (const entity of reverseStemCandidates(sourceNode)) {
-      const candidateMetadata = entity.entity.metadata;
-      if (
-        !isHeaderPath(entity.file.relativePath) ||
-        !isCounterpartSourcePath(entity.file.relativePath, sourcePath) ||
-        candidateMetadata?.kind !== "code" ||
-        candidateMetadata.symbolName !== sourceMetadata.symbolName ||
-        candidateMetadata.symbolType !== sourceMetadata.symbolType
-      )
-        continue;
-      addSemanticCounterpart(
-        entity,
-        nodeScores.get(sourceNode.id) ?? 0,
-        directCounterpartFileIds.size < 3,
-      );
-    }
-  }
-
-  return {
-    directCounterpartFileIds,
-    directCounterpartNodeIds,
-  };
-}
-
-function collectCounterpartCallSpine(
-  pool: ExploreCandidatePool,
-  graph: GraphReader,
-  storage: GraphReader,
-  counterpartNodeIds: ReadonlySet<string>,
+  nodeScores: ReadonlyMap<string, number>,
   limit: number,
 ): void {
-  if (counterpartNodeIds.size === 0 || limit <= 0) return;
-  const add = (id: string): boolean => {
-    if (pool.has(id)) return false;
-    const entity = storage.getEntity(id);
-    if (!entity) return false;
-    return pool.add(entity, 0.02);
-  };
+  if (limit <= 0) return;
+  const ids = pool.nodes.map((node) => node.id);
+  const edges = [
+    ...graph.outgoingEdges(ids, ["COUNTERPART"], limit * 4),
+    ...graph.incomingEdges(ids, ["COUNTERPART"], limit * 4),
+  ]
+    .filter((edge) => edge.rel === "counterpart")
+    .sort(
+      (left, right) =>
+        Math.max(
+          nodeScores.get(right.src) ?? 0,
+          nodeScores.get(right.dst) ?? 0,
+        ) -
+          Math.max(
+            nodeScores.get(left.src) ?? 0,
+            nodeScores.get(left.dst) ?? 0,
+          ) ||
+        left.src.localeCompare(right.src) ||
+        left.dst.localeCompare(right.dst),
+    );
   let added = 0;
-  for (const sourceId of counterpartNodeIds) {
+  for (const edge of edges) {
+    const counterpartId = pool.has(edge.src) ? edge.dst : edge.src;
+    const entity = graph.getEntity(counterpartId);
+    if (!entity) continue;
+    pool.addFileEvidence(entity.file.id, "counterpart");
+    const sourceScore = Math.max(
+      nodeScores.get(edge.src) ?? 0,
+      nodeScores.get(edge.dst) ?? 0,
+    );
+    if (pool.add(entity, Math.max(0.02, sourceScore * 0.45))) added += 1;
     if (added >= limit) break;
-    const sourceFile = storage.getEntity(sourceId)?.file.id;
-    const direct = graph
-      .outgoingEdges([sourceId], ["CALLS"], 32)
-      .sort(
-        (left, right) =>
-          Number(storage.getEntity(right.dst)?.file.id === sourceFile) -
-            Number(storage.getEntity(left.dst)?.file.id === sourceFile) ||
-          left.dst.localeCompare(right.dst),
-      );
-    const directIds: string[] = [];
-    for (const edge of direct) {
-      directIds.push(edge.dst);
-      if (add(edge.dst)) added += 1;
-      if (added >= limit) break;
-    }
-    if (added >= limit || directIds.length === 0) continue;
-    for (const edge of graph.outgoingEdges(
-      directIds,
-      ["CALLS"],
-      Math.min(32, limit - added),
-    )) {
-      if (add(edge.dst)) added += 1;
-      if (added >= limit) break;
+  }
+}
+
+function addCounterpartEvidence(
+  pool: ExploreCandidatePool,
+  edges: readonly ExploreEdge[],
+): void {
+  const byId = new Map(pool.nodes.map((node) => [node.id, node]));
+  for (const edge of edges) {
+    if (edge.rel !== "counterpart") continue;
+    for (const id of [edge.src, edge.dst]) {
+      const fileId = byId.get(id)?.entity?.file.id;
+      if (fileId) pool.addFileEvidence(fileId, "counterpart");
     }
   }
 }

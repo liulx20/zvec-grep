@@ -167,6 +167,7 @@ export type ZvecGrepGraphEdgeKind =
   | "INHERITS"
   | "DEFINES"
   | "IMPORTS"
+  | "COUNTERPART"
   | "INSTANTIATES";
 
 export type ZvecGrepGraphEdge = {
@@ -377,7 +378,14 @@ export type ZvecGrepGraphRelationship = {
   dstId: string;
   srcLabel: string;
   dstLabel: string;
-  kind: "CALLS" | "REFS" | "INHERITS" | "CONTAINS" | "IMPORTS" | "INSTANTIATES";
+  kind:
+    | "CALLS"
+    | "REFS"
+    | "INHERITS"
+    | "CONTAINS"
+    | "IMPORTS"
+    | "COUNTERPART"
+    | "INSTANTIATES";
   scope: "symbol" | "file";
   srcKind?: string;
   dstKind?: string;

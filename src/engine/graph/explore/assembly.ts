@@ -16,7 +16,6 @@ import {
 } from "./policy.js";
 import { polymorphicSiblingSkeletonNodeIds } from "./adaptive-sizing.js";
 import type { ExploreCandidatePool } from "./candidate-pool.js";
-import { isCounterpartSourcePath } from "./counterpart-policy.js";
 import {
   selectExploreFiles,
   type ExploreFileEvidenceKind,
@@ -113,10 +112,6 @@ export function assembleExploreFiles(input: {
   );
   for (const fileId of hierarchyFileIds)
     input.pool.addFileEvidence(fileId, "hierarchy");
-  const definitionEvidence = definitionFileEvidence(nodes, input.rootFileIds);
-  const definitionFileIds = definitionEvidence.logical;
-  for (const fileId of definitionEvidence.counterparts)
-    input.pool.addFileEvidence(fileId, "counterpart");
   const counterpartFileIds = fileIdsWithEvidence(fileEvidence, "counterpart");
   const changeSurfaceFileIds = fileIdsWithEvidence(
     fileEvidence,
@@ -166,10 +161,8 @@ export function assembleExploreFiles(input: {
   }
   const coCentral =
     rankedFileIds.find((fileId) => counterpartFileIds.has(fileId)) ??
-    rankedFileIds.find(
-      (fileId) =>
-        definitionFileIds.has(fileId) ||
-        fileEvidence.get(fileId)?.has("integration"),
+    rankedFileIds.find((fileId) =>
+      fileEvidence.get(fileId)?.has("integration"),
     );
   if (coCentral && central.size < 2) central.add(coCentral);
 
@@ -262,41 +255,6 @@ function fileIdsWithEvidence(
       .filter(([, values]) => values.has(kind))
       .map(([fileId]) => fileId),
   );
-}
-
-function definitionFileEvidence(
-  nodes: readonly ExploreNode[],
-  rootFileIds: ReadonlySet<string>,
-): { logical: Set<string>; counterparts: Set<string> } {
-  const rootNames = new Set(
-    nodes
-      .filter((node) => node.isRoot)
-      .map((node) => node.entity?.entity.metadata)
-      .filter((metadata) => metadata?.kind === "code")
-      .map((metadata) => metadata.symbolName?.toLowerCase())
-      .filter((name): name is string => Boolean(name)),
-  );
-  const rootPaths = nodes
-    .filter((node) => node.isRoot)
-    .map((node) => node.entity?.file.relativePath)
-    .filter((path): path is string => Boolean(path));
-  const logical = new Set<string>();
-  const counterparts = new Set<string>();
-  for (const node of nodes) {
-    const fileId = node.entity?.file.id;
-    const metadata = node.entity?.entity.metadata;
-    if (!fileId || rootFileIds.has(fileId) || metadata?.kind !== "code")
-      continue;
-    const scopeParts = (metadata.scope ?? "").toLowerCase().split("::");
-    const path = node.entity?.file.relativePath ?? "";
-    const counterpart = rootPaths.some((rootPath) =>
-      isCounterpartSourcePath(rootPath, path),
-    );
-    if (counterpart) counterparts.add(fileId);
-    if (counterpart || [...rootNames].some((name) => scopeParts.includes(name)))
-      logical.add(fileId);
-  }
-  return { logical, counterparts };
 }
 
 function queryAlignedFileIds(
@@ -444,7 +402,7 @@ function directIntegrationFiles(
   const roots = new Set(
     nodes.filter((node) => node.isRoot).map((node) => node.id),
   );
-  const scopeOwners = rootSemanticOwners(nodes, roots);
+  const scopeOwners = rootSemanticOwners(edges, roots);
   let changed = true;
   while (changed) {
     changed = false;
@@ -500,35 +458,25 @@ function directIntegrationFiles(
  * invisible when the selected root is the matching header declaration.
  */
 function rootSemanticOwners(
-  nodes: readonly ExploreNode[],
+  edges: readonly ExploreEdge[],
   roots: ReadonlySet<string>,
 ): Map<string, string> {
   const owners = new Map([...roots].map((id) => [id, id]));
-  const rootNodes = nodes.filter((node) => roots.has(node.id));
-  for (const node of nodes) {
-    if (roots.has(node.id) || !node.entity) continue;
-    const path = node.entity.file.relativePath;
-    const identity = exploreNodeSymbolIdentity(node);
-    if (!identity) continue;
-    const counterpart = rootNodes.find((root) => {
-      const rootIdentity = exploreNodeSymbolIdentity(root);
-      return (
-        rootIdentity === identity &&
-        Boolean(
-          root.entity &&
-          isCounterpartSourcePath(root.entity.file.relativePath, path),
-        )
-      );
-    });
-    if (counterpart) owners.set(node.id, counterpart.id);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const edge of edges) {
+      if (edge.rel !== "counterpart") continue;
+      const owner = owners.get(edge.src) ?? owners.get(edge.dst);
+      if (!owner) continue;
+      for (const id of [edge.src, edge.dst]) {
+        if (owners.has(id)) continue;
+        owners.set(id, owner);
+        changed = true;
+      }
+    }
   }
   return owners;
-}
-
-function exploreNodeSymbolIdentity(node: ExploreNode): string | undefined {
-  const metadata = node.entity?.entity.metadata;
-  if (metadata?.kind !== "code" || !metadata.symbolName) return undefined;
-  return `${metadata.symbolType}\0${metadata.symbolName}`;
 }
 
 function preferNestedSourceSymbols(
@@ -573,6 +521,7 @@ function fileReasons(
     CALLS: "calls",
     INHERITS: "inherits",
     REFS: "references",
+    COUNTERPART: "counterpart",
     INSTANTIATES: "instantiates",
   };
   for (const edge of edges) {

@@ -114,6 +114,7 @@ erDiagram
   SYMBOL ||--o{ SYMBOL : CALLS
   SYMBOL ||--o{ SYMBOL : REFS
   SYMBOL ||--o{ SYMBOL : INHERITS
+  SYMBOL ||--o{ SYMBOL : COUNTERPART
   FILE ||--o{ FILE : IMPORTS
   SYMBOL ||--o{ SYMBOL : INSTANTIATES
   SYMBOL ||--o{ EDGE : SOURCE_SYMBOL
@@ -202,7 +203,7 @@ erDiagram
 | `files` | `id` | 图中存在的文件及 graph-only 展示所需的路径、格式和基础属性 |
 | `symbols` | `id` | 符号及其所属文件、名称、限定名称、种类、导出状态和源码 range |
 | `contains` | `(parent_id, child_id)` | 容器与成员关系 |
-| `edges` | `id` | 已解析的 `CALLS`、`REFS`、`INHERITS`、`IMPORTS`、`INSTANTIATES` occurrence |
+| `edges` | `id` | 已解析的 `CALLS`、`REFS`、`INHERITS`、`COUNTERPART`、`IMPORTS`、`INSTANTIATES` occurrence |
 | `unresolved_refs` | `id` | 尚未解析、外部或动态的源码引用 occurrence |
 | `edge_candidates` | `(edge_id, target_id)` | 动态 occurrence 的候选目标、依据和置信度 |
 
@@ -361,8 +362,8 @@ query 严格按照下面四个阶段执行：
 - 最多取初次融合后的前 5 个种子。
 - 调用与完整 explore 共用的 `exploreSubgraph()`，使用深度 2、最多 80 个节点的小预算。
 - seed 的 restart 权重来自首轮 RRF rank，排名靠前的 seed 权重更高。
-- 子图覆盖层级以及 `CALLS`、`REFS`、`INHERITS`、`CONTAINS`，并通过带权 RWR 对节点排序。
-- RWR 当前边权为 `CALLS=1.0`、`INHERITS=0.9`、`CONTAINS=0.7`、`REFS=0.5`；
+- 子图覆盖层级以及 `CALLS`、`REFS`、`INHERITS`、`COUNTERPART`、`CONTAINS`，并通过带权 RWR 对节点排序。
+- RWR 当前边权为 `CALLS=1.0`、`INHERITS=0.9`、`COUNTERPART=0.7`、`REFS=0.5`、`CONTAINS=0.15`；
   排名图仍按双向关系传播。
 - 文件级 `IMPORTS` 不属于符号子图，仍作为补充路径从相邻文件挑选少量实体。
 - 图 rank 会作为 graph recall evidence 合并到已有候选，也会创建新的图候选，再以惩罚后的
@@ -512,7 +513,8 @@ Explore 按下面的顺序执行：
 1. **选择入口。** 根据 `seedId`、精确符号名或自然语言文本检索选择 roots，默认最多保留 8 个。
 
 2. **建立候选子图。** 先扩展基类、派生类和 sibling types，再沿 `CALLS`、`REFS`、
-   `INHERITS`、`CONTAINS` 双向遍历。随后补充 roots 的直接 callers、callees 和父容器、兄弟成员。
+   `INHERITS`、`COUNTERPART`、`CONTAINS` 双向遍历。声明/定义 counterpart 在索引阶段投影，
+   Explore 不再根据文件名和目录布局重新发现。随后补充 roots 的直接 callers、callees 和父容器、兄弟成员。
 
 3. **补全调用路径。** 在多个 roots 之间寻找可证明的调用路径。路径节点会被优先保留；节点预算
    仍不足以容纳完整路径时，该路径不会进入输出，保证 `callPaths`、`nodes` 和 `edges` 自洽。

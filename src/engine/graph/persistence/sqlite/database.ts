@@ -30,6 +30,7 @@ export class SqliteGraphDatabase {
   private closed = false;
   private resolvedProjections: boolean;
   private bulkLoad = false;
+  private readonly counterpartDirtyFiles = new Set<string>();
   private readonly statements = new Map<
     string,
     ReturnType<NodeDatabaseSync["prepare"]>
@@ -67,6 +68,16 @@ export class SqliteGraphDatabase {
 
   isBulkLoad(): boolean {
     return this.bulkLoad;
+  }
+
+  markCounterpartDirty(fileId: string): void {
+    this.counterpartDirtyFiles.add(fileId);
+  }
+
+  consumeCounterpartDirtyFiles(): string[] {
+    const files = [...this.counterpartDirtyFiles];
+    this.counterpartDirtyFiles.clear();
+    return files;
   }
 
   endBulkLoad(): void {

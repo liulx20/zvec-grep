@@ -62,6 +62,7 @@ export class SqliteGraphWriter {
     file?: FileInfo,
   ): void {
     this.database.assertWritable();
+    this.database.markCounterpartDirty(fileId);
     const oldIds = this.database.isBulkLoad()
       ? []
       : this.symbolIdsForFile(fileId);
@@ -172,6 +173,7 @@ export class SqliteGraphWriter {
 
   deleteFileGraph(fileId: string): void {
     this.database.assertWritable();
+    this.database.markCounterpartDirty(fileId);
     const oldIds = this.symbolIdsForFile(fileId);
     const changedInstantiationTypes = this.changedInstantiationTypes(
       fileId,
@@ -680,6 +682,14 @@ export class SqliteGraphWriter {
       .run(fileId);
     if (symbolIds.length === 0) return;
     const ids = JSON.stringify(symbolIds);
+    this.database
+      .prepare(
+        `DELETE FROM edges
+         WHERE kind='COUNTERPART'
+           AND (src_id IN(SELECT value FROM json_each(?))
+             OR dst_id IN(SELECT value FROM json_each(?)))`,
+      )
+      .run(ids, ids);
     this.database
       .prepare(
         "DELETE FROM unresolved_refs WHERE owner_is_file=0 AND owner_id IN(SELECT value FROM json_each(?))",

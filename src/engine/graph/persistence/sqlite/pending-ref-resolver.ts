@@ -26,6 +26,7 @@ import {
 import { DirectSemanticCandidateIndex } from "./direct-candidate-index.js";
 import { bareName, isExternalReceiverType } from "../../builtins.js";
 import { CppReceiverTypeInference } from "../../cpp-receiver-inference.js";
+import { SqliteCounterpartProjector } from "./counterpart-projector.js";
 
 const PER_NAME_CEILING = 500;
 // Keep enough rows in one transaction to avoid repeatedly sorting the
@@ -103,6 +104,7 @@ type BufferedCandidate = {
 /** Converts pending call/ref/import sites into persisted graph edges. */
 export class SqlitePendingRefResolver {
   private readonly candidates: SemanticCandidateRepository;
+  private readonly counterparts: SqliteCounterpartProjector;
   private directCandidates?: DirectSemanticCandidateIndex;
   private cppReceivers = new CppReceiverTypeInference();
   private readonly semanticCandidateCache = new Map<
@@ -145,6 +147,7 @@ export class SqlitePendingRefResolver {
 
   constructor(private readonly database: SqliteGraphDatabase) {
     this.candidates = new SemanticCandidateRepository(database);
+    this.counterparts = new SqliteCounterpartProjector(database);
   }
 
   private assertWritable(): void {
@@ -168,9 +171,16 @@ export class SqlitePendingRefResolver {
   async resolvePending(options: ResolvePendingOptions = {}): Promise<void> {
     this.assertWritable();
     let startedAt = performance.now();
+    const rebuildCounterparts = this.database.isBulkLoad();
     this.database.endBulkLoad();
     resetImportResolutionCaches();
     options.onTiming?.("graph_bulk_finalize", performance.now() - startedAt);
+    startedAt = performance.now();
+    this.counterparts.refresh(rebuildCounterparts);
+    options.onTiming?.(
+      "graph_counterpart_projection",
+      performance.now() - startedAt,
+    );
     const retryFailed = options.retryFailed ?? true;
     const resolvable =
       this.one<{ count: number }>(

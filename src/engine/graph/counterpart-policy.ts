@@ -1,12 +1,12 @@
-import type { StoredEntity } from "../../storage/index.js";
+import type { StoredEntity } from "../storage/index.js";
 import {
   isHeaderPath,
   isSourcePath,
   platformPathSegment,
-} from "../path-policy.js";
-import { isCallableSymbolKind } from "../symbol-kinds.js";
+} from "./path-policy.js";
+import { isCallableSymbolKind } from "./symbol-kinds.js";
 
-export { isHeaderPath, isSourcePath } from "../path-policy.js";
+export { isHeaderPath, isSourcePath } from "./path-policy.js";
 
 const NON_SEMANTIC_PATH_SEGMENTS: ReadonlySet<string> = new Set([
   "include",

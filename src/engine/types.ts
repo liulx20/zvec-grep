@@ -310,7 +310,14 @@ export type SearchGraphRelation = {
   dstId: string;
   srcLabel: string;
   dstLabel: string;
-  kind: "CALLS" | "REFS" | "INHERITS" | "CONTAINS" | "IMPORTS" | "INSTANTIATES";
+  kind:
+    | "CALLS"
+    | "REFS"
+    | "INHERITS"
+    | "CONTAINS"
+    | "IMPORTS"
+    | "COUNTERPART"
+    | "INSTANTIATES";
   scope: "symbol" | "file";
   srcKind?: string;
   dstKind?: string;

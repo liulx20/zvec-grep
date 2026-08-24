@@ -70,6 +70,87 @@ test("read-only graph open does not create a missing directory", async (t) => {
   await assert.rejects(access(dir));
 });
 
+test("counterpart edges are projected and invalidated at index time", async () => {
+  const graph = new SqliteGraphStorage("", { inMemory: true });
+  const file = (id, relativePath) => ({
+    id,
+    collectionId: "collection",
+    absolutePath: `/repo/${relativePath}`,
+    relativePath,
+    rootPath: "/repo",
+    sizeBytes: 1,
+    lastModifiedTime: 1,
+    kind: "code",
+    format: "cpp",
+  });
+  const header = file("header", "include/pkg/widget.h");
+  const source = file("source", "src/pkg/widget.cc");
+  graph.upsertFileGraph(
+    header.id,
+    [
+      {
+        id: "decl",
+        kind: "function",
+        is_exported: true,
+        name: "open",
+        qualifiedName: "Widget::open",
+        arity: 0,
+      },
+    ],
+    [],
+    [],
+    header,
+  );
+  graph.upsertFileGraph(
+    source.id,
+    [
+      {
+        id: "def",
+        kind: "function",
+        is_exported: true,
+        name: "open",
+        qualifiedName: "Widget::open",
+        arity: 0,
+      },
+    ],
+    [],
+    [],
+    source,
+  );
+  await graph.resolvePending();
+  assert.equal(
+    graph
+      .outgoingEdges(["decl"], ["COUNTERPART"], 10)
+      .some((edge) => edge.dst === "def" && edge.rel === "counterpart"),
+    true,
+  );
+
+  graph.upsertFileGraph(
+    source.id,
+    [
+      {
+        id: "other",
+        kind: "function",
+        is_exported: true,
+        name: "close",
+        qualifiedName: "Widget::close",
+        arity: 0,
+      },
+    ],
+    [],
+    [],
+    source,
+  );
+  await graph.resolvePending();
+  assert.equal(
+    graph
+      .outgoingEdges(["decl"], ["COUNTERPART"], 10)
+      .some((edge) => edge.rel === "counterpart"),
+    false,
+  );
+  graph.close();
+});
+
 test("SQLite graph upsert resolves callers and reattaches incoming edges", async (t) => {
   const dir = await mkdtemp(join(tmpdir(), "zvec-grep-graph-"));
   t.after(async () => {
