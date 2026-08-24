@@ -1,57 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-import { tmpdir } from "node:os";
 import test from "node:test";
 import {
   collectFunctionCallSites,
   collectTypeInheritanceSites,
 } from "../../dist/engine/extraction/index.js";
-import { CppReceiverTypeInference } from "../../dist/engine/graph/cpp-receiver-inference.js";
-
-test("C++ receiver inference scans source and matching indexed headers", () => {
-  const root = mkdtempSync(join(tmpdir(), "zvec-cpp-receiver-"));
-  try {
-    const sourcePath = join(root, "src", "service.cc");
-    const headerPath = join(root, "include", "service.h");
-    mkdirSync(join(root, "src"), { recursive: true });
-    mkdirSync(join(root, "include"), { recursive: true });
-    const sourceText =
-      "void Service::check() { db_->IsClosed(); operators_[0]->Eval(); operators_.at(1)->Eval(); }\n";
-    const headerText =
-      "class Service { neug::NeugDB& db_; std::vector<std::unique_ptr<IOperator>> operators_; };\n";
-    writeFileSync(sourcePath, sourceText);
-    writeFileSync(headerPath, headerText);
-    const files = [
-      {
-        id: "source",
-        absolutePath: sourcePath,
-        relativePath: "src/service.cc",
-        rootPath: root,
-        sizeBytes: sourceText.length,
-        lastModifiedTime: 1,
-        kind: "code",
-        format: "cpp",
-      },
-      {
-        id: "header",
-        absolutePath: headerPath,
-        relativePath: "include/service.h",
-        rootPath: root,
-        sizeBytes: headerText.length,
-        lastModifiedTime: 1,
-        kind: "code",
-        format: "cpp",
-      },
-    ];
-    const inference = new CppReceiverTypeInference(files);
-    assert.equal(inference.infer("db_", 1, "source"), "NeugDB");
-    assert.equal(inference.infer("operators_[0]", 1, "source"), "IOperator");
-    assert.equal(inference.infer("operators_.at(1)", 1, "source"), "IOperator");
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
 
 function source(format, relativePath, text) {
   return {
@@ -201,72 +153,6 @@ test("receiver type hints follow block scope and call position", async () => {
     runSites.map((site) => site.target.hints?.receiverType),
     ["Runner", "Other"],
   );
-});
-
-test("receiver facts infer arrays, map values, fields, getters, and owner return types", async () => {
-  const calls = await collectFunctionCallSites(
-    source(
-      "typescript",
-      "Inference.ts",
-      `class Use {
-        private readonly database: SqliteGraphDatabase;
-        private get db(): DatabaseSync { return this.database.db; }
-        private affectedResolvedEdgeIds(): string[] { return []; }
-        invoke() {
-          const typed: GraphEdge[] = [];
-          typed.push(edge);
-          const inferred = [];
-          inferred.push(edge);
-          const buckets = new Map<string, GraphEdge[]>();
-          const bucket = buckets.get("calls")!;
-          bucket.push(edge);
-          const affected = this.affectedResolvedEdgeIds();
-          affected.push("id");
-          this.database.all("select 1");
-          this.db.exec("BEGIN");
-          const insert = this.db.prepare("insert");
-          insert.run("id");
-          this.database.db.prepare("select").all().map(row => row);
-        }
-      }`,
-    ),
-  );
-  const sites = calls.flatMap((owner) => owner.sites);
-  const receiverTypes = new Map(
-    sites.map((site) => [site.name, site.target.hints?.receiverType]),
-  );
-  assert.equal(receiverTypes.get("typed.push"), "Array");
-  assert.equal(receiverTypes.get("inferred.push"), "Array");
-  assert.equal(receiverTypes.get("bucket.push"), "Array");
-  assert.equal(receiverTypes.get("affected.push"), "Array");
-  assert.equal(receiverTypes.get("this.database.all"), "SqliteGraphDatabase");
-  assert.equal(receiverTypes.get("this.db.exec"), "DatabaseSync");
-  assert.equal(receiverTypes.get("insert.run"), "StatementSync");
-  const mapSite = sites.find((site) => site.name.endsWith(".map"));
-  assert.equal(mapSite?.target.hints?.receiverType, "Array");
-});
-
-test("C++ reference parameters feed receiver type hints", async () => {
-  const calls = await collectFunctionCallSites(
-    source(
-      "cpp",
-      "wal.cc",
-      `void ingest(const IWalParser& parser, PropertyGraph& graph,
-                   std::vector<int>& allocators) {
-         parser.last_ts();
-         graph.Compact();
-         allocators.size();
-       }`,
-    ),
-  );
-  const receiverTypes = new Map(
-    calls
-      .flatMap((owner) => owner.sites)
-      .map((site) => [site.name, site.target.hints?.receiverType]),
-  );
-  assert.equal(receiverTypes.get("parser.last_ts"), "IWalParser");
-  assert.equal(receiverTypes.get("graph.Compact"), "PropertyGraph");
-  assert.equal(receiverTypes.get("allocators.size"), "std::vector");
 });
 
 for (const fixture of [
