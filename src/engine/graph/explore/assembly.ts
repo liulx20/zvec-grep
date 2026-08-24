@@ -110,17 +110,23 @@ export function assembleExploreFiles(input: {
     input.rootFileIds,
     Math.min(4, Math.max(1, input.maxFiles - 1)),
   );
-  const definitionFileIds = logicalDefinitionFileIds(
+  const definitionEvidence = definitionFileEvidence(
     input.nodes,
     input.rootFileIds,
   );
+  const definitionFileIds = definitionEvidence.logical;
   const counterpartFileIds = new Set([
-    ...counterpartDefinitionFileIds(input.nodes, input.rootFileIds),
+    ...definitionEvidence.counterparts,
     ...input.semanticCounterpartFileIds,
   ]);
-  const alignedChangeSurfaceFileIds = queryAlignedChangeSurfaceFileIds(
+  const alignedChangeSurfaceFileIds = queryAlignedFileIds(
     byFile,
     input.changeSurfaceFileIds,
+    input.query,
+  );
+  const alignedFileIds = queryAlignedFileIds(
+    byFile,
+    [...byFile.keys()].filter((fileId) => !input.rootFileIds.has(fileId)),
     input.query,
   );
   const alignedChangeSurfaceWeights = queryAlignmentWeights(
@@ -128,11 +134,6 @@ export function assembleExploreFiles(input: {
     alignedChangeSurfaceFileIds,
     input.query,
     integrationFileWeights,
-  );
-  const alignedFileIds = queryAlignedFileIds(
-    byFile,
-    input.rootFileIds,
-    input.query,
   );
   const rankedFileIds = selectExploreFiles({
     ordered: orderedCandidates,
@@ -256,10 +257,10 @@ export function assembleExploreFiles(input: {
   return bundles;
 }
 
-function logicalDefinitionFileIds(
+function definitionFileEvidence(
   nodes: readonly ExploreNode[],
   rootFileIds: ReadonlySet<string>,
-): Set<string> {
+): { logical: Set<string>; counterparts: Set<string> } {
   const rootNames = new Set(
     nodes
       .filter((node) => node.isRoot)
@@ -272,7 +273,8 @@ function logicalDefinitionFileIds(
     .filter((node) => node.isRoot)
     .map((node) => node.entity?.file.relativePath)
     .filter((path): path is string => Boolean(path));
-  const files = new Set<string>();
+  const logical = new Set<string>();
+  const counterparts = new Set<string>();
   for (const node of nodes) {
     const fileId = node.entity?.file.id;
     const metadata = node.entity?.entity.metadata;
@@ -280,58 +282,25 @@ function logicalDefinitionFileIds(
       continue;
     const scopeParts = (metadata.scope ?? "").toLowerCase().split("::");
     const path = node.entity?.file.relativePath ?? "";
-    if (
-      [...rootNames].some((name) => scopeParts.includes(name)) ||
-      rootPaths.some((rootPath) => isCounterpartSourcePath(rootPath, path))
-    )
-      files.add(fileId);
+    const counterpart = rootPaths.some((rootPath) =>
+      isCounterpartSourcePath(rootPath, path),
+    );
+    if (counterpart) counterparts.add(fileId);
+    if (counterpart || [...rootNames].some((name) => scopeParts.includes(name)))
+      logical.add(fileId);
   }
-  return files;
-}
-
-function counterpartDefinitionFileIds(
-  nodes: readonly ExploreNode[],
-  rootFileIds: ReadonlySet<string>,
-): Set<string> {
-  const rootPaths = nodes
-    .filter((node) => node.isRoot)
-    .map((node) => node.entity?.file.relativePath)
-    .filter((path): path is string => Boolean(path));
-  const files = new Set<string>();
-  for (const node of nodes) {
-    const fileId = node.entity?.file.id;
-    const path = node.entity?.file.relativePath;
-    if (!fileId || !path || rootFileIds.has(fileId)) continue;
-    if (rootPaths.some((rootPath) => isCounterpartSourcePath(rootPath, path)))
-      files.add(fileId);
-  }
-  return files;
+  return { logical, counterparts };
 }
 
 function queryAlignedFileIds(
   byFile: ReadonlyMap<string, readonly ExploreNode[]>,
-  rootFileIds: ReadonlySet<string>,
+  fileIds: Iterable<string>,
   query: string,
 ): Set<string> {
   const terms = queryTerms(query);
   if (terms.length < 2) return new Set();
   const aligned = new Set<string>();
-  for (const [fileId, nodes] of byFile) {
-    if (rootFileIds.has(fileId)) continue;
-    if (fileSemanticCoverage(nodes, terms) >= 2) aligned.add(fileId);
-  }
-  return aligned;
-}
-
-function queryAlignedChangeSurfaceFileIds(
-  byFile: ReadonlyMap<string, readonly ExploreNode[]>,
-  changeSurfaceFileIds: ReadonlySet<string>,
-  query: string,
-): Set<string> {
-  const terms = queryTerms(query);
-  if (terms.length < 2) return new Set();
-  const aligned = new Set<string>();
-  for (const fileId of changeSurfaceFileIds) {
+  for (const fileId of fileIds) {
     const nodes = byFile.get(fileId) ?? [];
     if (fileSemanticCoverage(nodes, terms) >= 2) aligned.add(fileId);
   }

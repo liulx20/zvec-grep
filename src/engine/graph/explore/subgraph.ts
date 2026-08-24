@@ -11,6 +11,7 @@ import type {
 } from "../types.js";
 import { collectCallPaths } from "./paths.js";
 import { collectComponentImportEvidence } from "./component-imports.js";
+import { ExploreCandidatePool } from "./candidate-pool.js";
 import { assembleExploreFiles } from "./assembly.js";
 import {
   fileStem,
@@ -60,7 +61,6 @@ const HIERARCHY_BUDGET_RATIO = EXPLORE_POLICY.hierarchyBudgetRatio;
 const DYNAMIC_BOUNDARY_BUDGET = EXPLORE_POLICY.dynamicBoundaryBudget;
 const COMPONENT_IMPORT_POLICY = EXPLORE_POLICY.componentImport;
 const DYNAMIC_BOUNDARY_FILE_POLICY = EXPLORE_POLICY.dynamicBoundaryFiles;
-const SCORE_BOOSTS = EXPLORE_POLICY.scoreBoosts;
 const TRAVERSE_EDGE_KINDS: readonly GraphEdgeKind[] =
   EXPLORE_POLICY.traverseEdgeKinds;
 
@@ -158,39 +158,35 @@ export function exploreGraph(
   });
   const { callPaths } = subgraph;
   const nodeScores = new Map(subgraph.nodeScores);
-  const counterpartExpansion = includeCounterpartSourceNodes(
-    subgraph.nodes,
+  const candidates = new ExploreCandidatePool(subgraph.nodes, nodeScores);
+  const counterpartExpansion = collectCounterpartSourceNodes(
+    candidates,
     graph,
     storage,
     nodeScores,
     rootIds,
     maxFiles,
   );
-  const counterpartCallSpine = includeCounterpartCallSpine(
-    counterpartExpansion.nodes,
+  collectCounterpartCallSpine(
+    candidates,
     graph,
     storage,
-    nodeScores,
     new Set([
-      ...rootSemanticCounterpartNodeIds(
-        counterpartExpansion.nodes,
-        storage,
-        rootIds,
-      ),
+      ...rootSemanticCounterpartNodeIds(candidates.nodes, storage, rootIds),
       ...counterpartExpansion.directCounterpartNodeIds,
     ]),
     24,
   );
-  const moduleEntrypoints = includeModuleEntrypointNodes(
-    subgraph.nodes,
+  const moduleEntrypoints = collectModuleEntrypointNodes(
+    candidates,
     graph,
     storage,
-    nodeScores,
     rootIds,
     query,
     16,
   );
-  const collaborators = includeDirectCallCollaborators(
+  const collaborators = collectDirectCallCollaborators(
+    candidates,
     subgraph.nodes,
     graph,
     storage,
@@ -199,15 +195,7 @@ export function exploreGraph(
     query,
     8,
   );
-  // Candidate producers contribute to one pool. Only the call-spine producer
-  // depends on counterpart discovery; unrelated producers do not inherit the
-  // ordering or budgets of earlier passes.
-  const nodes = mergeExploreNodeCandidates(
-    subgraph.nodes,
-    counterpartCallSpine,
-    moduleEntrypoints.nodes,
-    collaborators.nodes,
-  );
+  const nodes = candidates.nodes;
   const counterpartEdges =
     nodes.length === subgraph.nodes.length
       ? null
@@ -259,14 +247,18 @@ export function exploreGraph(
       ? Math.min(2, Math.max(0, maxFiles - 1))
       : Math.min(2, Math.max(1, maxFiles - 1)),
   );
-  const impactCounterparts = includeImpactSourceDeclarations(
+  const impactCandidates = new ExploreCandidatePool(
     impactAssembly.nodes,
+    nodeScores,
+  );
+  const impactCounterpartFileIds = collectImpactSourceDeclarations(
+    impactCandidates,
     nodes,
     storage,
     nodeScores,
     4,
   );
-  const contextNodes = impactCounterparts.nodes;
+  const contextNodes = impactCandidates.nodes;
   if (contextNodes.length !== nodes.length) {
     const impactEdges = graph.edges(
       contextNodes.map((node) => node.id),
@@ -307,19 +299,12 @@ export function exploreGraph(
       );
     fileScores.set(fileId, Math.max(0.02, score));
   }
-  boostImpactFiles(fileScores, impactAssembly.fileHits);
   const dynamicBoundaryFileIds = relevantDynamicBoundaryFileIds(
     dynamicBoundaries,
     nodes,
     nodeScores,
     edges,
     rootIds,
-  );
-  boostDynamicBoundaryFiles(
-    fileScores,
-    nodes,
-    dynamicBoundaries,
-    dynamicBoundaryFileIds,
   );
   const changeSurface = collectChangeSurface({
     graph,
@@ -361,7 +346,7 @@ export function exploreGraph(
     dynamicBoundaryFileIds,
     semanticCounterpartFileIds: new Set([
       ...counterpartExpansion.directCounterpartFileIds,
-      ...impactCounterparts.fileIds,
+      ...impactCounterpartFileIds,
       ...moduleEntrypoints.fileIds,
     ]),
     collaboratorFileIds: collaborators.fileIds,
@@ -416,17 +401,17 @@ export function exploreGraph(
  * stem/directory affinity remains mandatory, and only four files can be
  * reserved.
  */
-function includeImpactSourceDeclarations(
-  impactNodes: readonly ExploreNode[],
+function collectImpactSourceDeclarations(
+  pool: ExploreCandidatePool,
   originalNodes: readonly ExploreNode[],
   storage: GraphQueryStorage,
   nodeScores: Map<string, number>,
   limit: number,
-): { nodes: ExploreNode[]; fileIds: ReadonlySet<string> } {
-  if (limit <= 0) return { nodes: [...impactNodes], fileIds: new Set() };
+): ReadonlySet<string> {
+  if (limit <= 0) return new Set();
+  const impactNodes = pool.nodes;
+  const initialSize = pool.size;
   const originalIds = new Set(originalNodes.map((node) => node.id));
-  const existingIds = new Set(impactNodes.map((node) => node.id));
-  const additions: ExploreNode[] = [];
   const fileIds = new Set<string>();
   const candidatesByName = new Map<string, StoredEntity[]>();
 
@@ -450,7 +435,7 @@ function includeImpactSourceDeclarations(
     .slice(0, 24);
 
   for (const source of sources) {
-    if (additions.length >= limit) break;
+    if (pool.size - initialSize >= limit) break;
     const metadata = source.entity!.entity.metadata;
     if (metadata?.kind !== "code" || !metadata.symbolName) continue;
     const sourcePath = source.entity!.file.relativePath;
@@ -462,7 +447,7 @@ function includeImpactSourceDeclarations(
     for (const candidate of candidates) {
       const candidateMetadata = candidate.entity.metadata;
       if (
-        existingIds.has(candidate.entity.id) ||
+        pool.has(candidate.entity.id) ||
         !isHeaderPath(candidate.file.relativePath) ||
         !isCounterpartSourcePath(candidate.file.relativePath, sourcePath) ||
         candidateMetadata?.kind !== "code" ||
@@ -471,44 +456,15 @@ function includeImpactSourceDeclarations(
           !isTypeishKind(candidateMetadata.symbolType ?? ""))
       )
         continue;
-      existingIds.add(candidate.entity.id);
       fileIds.add(candidate.file.id);
-      additions.push({
-        id: candidate.entity.id,
-        kind: candidateMetadata.symbolType,
-        isRoot: false,
-        entity: candidate,
-      });
-      nodeScores.set(
-        candidate.entity.id,
+      pool.add(
+        candidate,
         Math.max(0.02, (nodeScores.get(source.id) ?? 0) * 0.45),
       );
       break;
     }
   }
-  return {
-    nodes:
-      additions.length > 0 ? [...impactNodes, ...additions] : [...impactNodes],
-    fileIds,
-  };
-}
-
-function mergeExploreNodeCandidates(
-  ...groups: readonly (readonly ExploreNode[])[]
-): ExploreNode[] {
-  const merged = new Map<string, ExploreNode>();
-  for (const group of groups) {
-    for (const node of group) {
-      const existing = merged.get(node.id);
-      if (!existing) {
-        merged.set(node.id, node);
-        continue;
-      }
-      if (node.isRoot && !existing.isRoot)
-        merged.set(node.id, { ...existing, isRoot: true });
-    }
-  }
-  return [...merged.values()];
+  return fileIds;
 }
 
 function rootSemanticCounterpartNodeIds(
@@ -549,17 +505,16 @@ function rootSemanticCounterpartNodeIds(
  * set of its top-level definitions as the public entrypoint counterpart.
  * IMPORTS is durable evidence; no filename or framework convention is used.
  */
-function includeModuleEntrypointNodes(
-  nodes: readonly ExploreNode[],
+function collectModuleEntrypointNodes(
+  pool: ExploreCandidatePool,
   graph: GraphReader,
   storage: GraphQueryStorage,
-  nodeScores: Map<string, number>,
   rootIds: readonly string[],
   query: string,
   limit: number,
-): { nodes: ExploreNode[]; fileIds: ReadonlySet<string> } {
+): { fileIds: ReadonlySet<string> } {
   if (!/(?:\.|::|->|#)/.test(query) || limit <= 0)
-    return { nodes: [...nodes], fileIds: new Set() };
+    return { fileIds: new Set() };
   const rootFiles = new Set(
     rootIds
       .map((id) => storage.getEntity(id)?.file.id)
@@ -569,8 +524,6 @@ function includeModuleEntrypointNodes(
     .expandFileNeighbors([...rootFiles], 16)
     .filter((neighbor) => neighbor.direction === "in")
     .map((neighbor) => neighbor.id);
-  const result = [...nodes];
-  const seen = new Set(nodes.map((node) => node.id));
   const fileIds = new Set<string>();
   let added = 0;
   for (const fileId of importerFiles) {
@@ -579,23 +532,16 @@ function includeModuleEntrypointNodes(
     for (const edge of graph.outgoingEdges([fileId], ["DEFINES"], 32)) {
       const entity = storage.getEntity(edge.dst);
       const metadata = entity?.entity.metadata;
-      if (!entity || metadata?.kind !== "code" || seen.has(edge.dst)) continue;
+      if (!entity || metadata?.kind !== "code" || pool.has(edge.dst)) continue;
       if (isLowValuePath(entity.file.relativePath)) continue;
-      seen.add(edge.dst);
-      result.push({
-        id: edge.dst,
-        kind: metadata.symbolType,
-        isRoot: false,
-        entity,
-      });
-      nodeScores.set(edge.dst, Math.max(nodeScores.get(edge.dst) ?? 0, 0.04));
+      pool.add(entity, 0.04);
       added += 1;
       fileAdded = true;
       if (added >= limit) break;
     }
     if (fileAdded) fileIds.add(fileId);
   }
-  return { nodes: result, fileIds };
+  return { fileIds };
 }
 
 /**
@@ -684,20 +630,20 @@ function primaryConceptualRootFileIds(
  * already retained in root files. The target must independently match a query
  * term, which keeps this narrower than generic import or dependency expansion.
  */
-function includeDirectCallCollaborators(
-  nodes: readonly ExploreNode[],
+function collectDirectCallCollaborators(
+  pool: ExploreCandidatePool,
+  sourceNodes: readonly ExploreNode[],
   graph: GraphReader,
   storage: GraphQueryStorage,
   nodeScores: Map<string, number>,
   rootIds: readonly string[],
   query: string,
   limit: number,
-): { nodes: ExploreNode[]; fileIds: Set<string> } {
+): { fileIds: Set<string> } {
   const terms = queryTerms(query);
-  if (limit <= 0 || terms.length === 0)
-    return { nodes: [...nodes], fileIds: new Set() };
-  const rootFileIds = fileIdsForRoots(nodes, rootIds);
-  const sources = nodes
+  if (limit <= 0 || terms.length === 0) return { fileIds: new Set() };
+  const rootFileIds = fileIdsForRoots(sourceNodes, rootIds);
+  const sources = sourceNodes
     .filter((node) => {
       const entity = node.entity;
       const metadata = entity?.entity.metadata;
@@ -721,9 +667,10 @@ function includeDirectCallCollaborators(
         left.id.localeCompare(right.id),
     )
     .slice(0, 32);
-  if (sources.length === 0) return { nodes: [...nodes], fileIds: new Set() };
+  if (sources.length === 0) return { fileIds: new Set() };
 
-  const existingIds = new Set(nodes.map((node) => node.id));
+  const existingIds = new Set(pool.nodes.map((node) => node.id));
+  const initialSize = pool.size;
   const candidates = graph
     .outgoingEdges(
       sources.map((source) => source.id),
@@ -759,27 +706,16 @@ function includeDirectCallCollaborators(
         left.edge.dst.localeCompare(right.edge.dst),
     );
 
-  const result = [...nodes];
   const fileIds = new Set<string>();
   for (const { edge, entity } of candidates) {
     if (!entity || existingIds.has(edge.dst)) continue;
     if (fileIds.size >= 2 && !fileIds.has(entity.file.id)) continue;
     existingIds.add(edge.dst);
     fileIds.add(entity.file.id);
-    const metadata = entity.entity.metadata;
-    result.push({
-      id: edge.dst,
-      kind: metadata?.kind === "code" ? metadata.symbolType : undefined,
-      isRoot: false,
-      entity,
-    });
-    nodeScores.set(
-      edge.dst,
-      Math.max(0.02, (nodeScores.get(edge.src) ?? 0) * 0.65),
-    );
-    if (result.length - nodes.length >= limit) break;
+    pool.add(entity, Math.max(0.02, (nodeScores.get(edge.src) ?? 0) * 0.65));
+    if (pool.size - initialSize >= limit) break;
   }
-  return { nodes: result, fileIds };
+  return { fileIds };
 }
 
 /**
@@ -789,22 +725,21 @@ function includeDirectCallCollaborators(
  * Search is bounded by high-ranked files and every result must pass an exact
  * stem plus directory-affinity check.
  */
-function includeCounterpartSourceNodes(
-  nodes: readonly ExploreNode[],
+function collectCounterpartSourceNodes(
+  pool: ExploreCandidatePool,
   graph: GraphReader,
   storage: GraphQueryStorage,
   nodeScores: Map<string, number>,
   rootIds: readonly string[],
   maxFiles: number,
 ): {
-  nodes: ExploreNode[];
   directCounterpartFileIds: ReadonlySet<string>;
   directCounterpartNodeIds: ReadonlySet<string>;
 } {
-  const existing = new Set(nodes.map((node) => node.id));
+  const nodes = pool.nodes;
   const paths = new Set<string>();
-  const additions: ExploreNode[] = [];
   const addedFiles = new Set<string>();
+  let added = 0;
   const maxAdditions = 64;
   const maxCounterpartFiles = Math.min(8, maxFiles);
   const directCounterpartFileIds = new Set<string>();
@@ -820,7 +755,7 @@ function includeCounterpartSourceNodes(
     return entities;
   };
   const hasCounterpartBudget = (): boolean =>
-    additions.length < maxAdditions && addedFiles.size < maxCounterpartFiles;
+    added < maxAdditions && addedFiles.size < maxCounterpartFiles;
   const stemCandidatesFor = (
     candidates: readonly ExploreNode[],
   ): ((node: ExploreNode) => readonly StoredEntity[]) => {
@@ -857,7 +792,7 @@ function includeCounterpartSourceNodes(
     )
       return;
     const reserve = options.direct && !isHeaderPath(entity.file.relativePath);
-    if (existing.has(entity.entity.id)) {
+    if (pool.has(entity.entity.id)) {
       if (reserve) {
         directCounterpartFileIds.add(entity.file.id);
         directCounterpartNodeIds.add(entity.entity.id);
@@ -869,17 +804,7 @@ function includeCounterpartSourceNodes(
       addedFiles.size >= maxCounterpartFiles
     )
       return;
-    existing.add(entity.entity.id);
     addedFiles.add(entity.file.id);
-    additions.push({
-      id: entity.entity.id,
-      kind:
-        entity.entity.metadata?.kind === "code"
-          ? entity.entity.metadata.symbolType
-          : undefined,
-      isRoot: false,
-      entity,
-    });
     if (reserve) {
       directCounterpartFileIds.add(entity.file.id);
       directCounterpartNodeIds.add(entity.entity.id);
@@ -888,10 +813,13 @@ function includeCounterpartSourceNodes(
       reserve && options.directLine !== undefined
         ? 0.08 / (1 + options.directLine / 50)
         : 0;
-    nodeScores.set(
-      entity.entity.id,
-      Math.max(0.025, score * options.scoreFactor + callSiteBoost),
-    );
+    if (
+      pool.add(
+        entity,
+        Math.max(0.025, score * options.scoreFactor + callSiteBoost),
+      )
+    )
+      added += 1;
   };
   const addCounterpart = (
     entity: StoredEntity,
@@ -994,7 +922,7 @@ function includeCounterpartSourceNodes(
           nodeScores.get(containerId) ?? 0,
           reserve(entity),
         );
-        if (additions.length >= maxAdditions) return;
+        if (added >= maxAdditions) return;
       }
     }
   };
@@ -1045,7 +973,7 @@ function includeCounterpartSourceNodes(
           reserve,
           directCallTargetLines.get(node.id),
         );
-        if (additions.length >= maxAdditions) break;
+        if (added >= maxAdditions) break;
       }
     if (directCallTargetLines.has(node.id)) {
       for (const entity of platformDeclarationCounterparts(
@@ -1058,7 +986,7 @@ function includeCounterpartSourceNodes(
           true,
           directCallTargetLines.get(node.id),
         );
-        if (additions.length >= maxAdditions) break;
+        if (added >= maxAdditions) break;
       }
     }
   }
@@ -1068,7 +996,7 @@ function includeCounterpartSourceNodes(
   // graph relationship. The path check still prevents same-named APIs in
   // unrelated modules from being merged.
   for (const rootId of rootIds) {
-    if (additions.length >= maxAdditions) break;
+    if (added >= maxAdditions) break;
     addContainerMemberCounterparts(rootId, () => true);
   }
 
@@ -1084,7 +1012,7 @@ function includeCounterpartSourceNodes(
     )
     .map((node) => node.id);
   for (const adjacentId of adjacentHeaderIds.slice(0, 8)) {
-    if (additions.length >= maxAdditions) break;
+    if (added >= maxAdditions) break;
     addContainerMemberCounterparts(
       adjacentId,
       () => directCounterpartFileIds.size < 2,
@@ -1094,7 +1022,6 @@ function includeCounterpartSourceNodes(
 
   if (!storage.findSymbolsByQuery)
     return {
-      nodes: additions.length > 0 ? [...nodes, ...additions] : [...nodes],
       directCounterpartFileIds,
       directCounterpartNodeIds,
     };
@@ -1130,7 +1057,7 @@ function includeCounterpartSourceNodes(
       const reserve =
         rootAdjacentIds.has(node.id) && directCounterpartFileIds.size < 2;
       addCounterpart(entity, path, nodeScores.get(node.id) ?? 0, reserve);
-      if (additions.length >= maxAdditions) break;
+      if (added >= maxAdditions) break;
     }
   }
 
@@ -1180,39 +1107,24 @@ function includeCounterpartSourceNodes(
   }
 
   return {
-    nodes: additions.length > 0 ? [...nodes, ...additions] : [...nodes],
     directCounterpartFileIds,
     directCounterpartNodeIds,
   };
 }
 
-function includeCounterpartCallSpine(
-  nodes: readonly ExploreNode[],
+function collectCounterpartCallSpine(
+  pool: ExploreCandidatePool,
   graph: GraphReader,
   storage: GraphQueryStorage,
-  nodeScores: Map<string, number>,
   counterpartNodeIds: ReadonlySet<string>,
   limit: number,
-): ExploreNode[] {
-  if (counterpartNodeIds.size === 0 || limit <= 0) return [...nodes];
-  const result = [...nodes];
-  const seen = new Set(nodes.map((node) => node.id));
+): void {
+  if (counterpartNodeIds.size === 0 || limit <= 0) return;
   const add = (id: string): boolean => {
-    if (seen.has(id)) return false;
+    if (pool.has(id)) return false;
     const entity = storage.getEntity(id);
     if (!entity) return false;
-    seen.add(id);
-    result.push({
-      id,
-      kind:
-        entity.entity.metadata?.kind === "code"
-          ? entity.entity.metadata.symbolType
-          : undefined,
-      isRoot: false,
-      entity,
-    });
-    nodeScores.set(id, Math.max(nodeScores.get(id) ?? 0, 0.02));
-    return true;
+    return pool.add(entity, 0.02);
   };
   let added = 0;
   for (const sourceId of counterpartNodeIds) {
@@ -1241,50 +1153,6 @@ function includeCounterpartCallSpine(
       if (add(edge.dst)) added += 1;
       if (added >= limit) break;
     }
-  }
-  return result;
-}
-
-function boostDynamicBoundaryFiles(
-  fileScores: Map<string, number>,
-  nodes: readonly ExploreNode[],
-  boundaries: readonly DynamicBoundary[],
-  eligibleFileIds: ReadonlySet<string>,
-): void {
-  const strongest = Math.max(...fileScores.values(), 0);
-  if (strongest <= 0) return;
-  const nodeFiles = new Map(
-    nodes.map((node) => [node.id, node.entity?.file.id] as const),
-  );
-  const counts = new Map<string, number>();
-  for (const boundary of boundaries) {
-    const fileId = nodeFiles.get(boundary.sourceId);
-    if (!fileId || !eligibleFileIds.has(fileId)) continue;
-    counts.set(
-      fileId,
-      (counts.get(fileId) ?? 0) + (boundary.occurrenceCount ?? 1),
-    );
-  }
-  for (const [fileId, count] of counts) {
-    const policy = SCORE_BOOSTS.dynamicBoundary;
-    const boost =
-      strongest *
-      Math.min(policy.maximum, policy.base + count * policy.perOccurrence);
-    fileScores.set(fileId, Math.max(fileScores.get(fileId) ?? 0, boost));
-  }
-}
-
-function boostImpactFiles(
-  fileScores: Map<string, number>,
-  fileHits: ReadonlyMap<string, number>,
-): void {
-  const strongest = Math.max(...fileScores.values(), 0);
-  if (strongest <= 0) return;
-  for (const [fileId, hits] of fileHits) {
-    const policy = SCORE_BOOSTS.impact;
-    const floor =
-      strongest * Math.min(policy.maximum, policy.base + hits * policy.perHit);
-    fileScores.set(fileId, Math.max(fileScores.get(fileId) ?? 0, floor));
   }
 }
 

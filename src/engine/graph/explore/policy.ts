@@ -55,10 +55,6 @@ export const EXPLORE_POLICY = {
   dynamicBoundaryBudget: { maximum: 16, fetchMaximum: 256, fetchRatio: 8 },
   componentImport: { protectedNodes: 8, rankingWeight: 0.25 },
   dynamicBoundaryFiles: { maximum: 2, relevanceFloor: 0.6 },
-  scoreBoosts: {
-    dynamicBoundary: { maximum: 0.14, base: 0.06, perOccurrence: 0.015 },
-    impact: { maximum: 0.22, base: 0.08, perHit: 0.04 },
-  },
   traverseEdgeKinds: [
     "CALLS",
     "REFS",
