@@ -16,6 +16,7 @@ import {
 } from "./policy.js";
 import { polymorphicSiblingSkeletonNodeIds } from "./adaptive-sizing.js";
 import { isCounterpartSourcePath } from "./counterpart-policy.js";
+import { selectExploreFiles } from "./file-selection.js";
 
 export function assembleExploreFiles(input: {
   query: string;
@@ -133,23 +134,23 @@ export function assembleExploreFiles(input: {
     input.rootFileIds,
     input.query,
   );
-  const rankedFileIds = selectFilesByMarginalValue(
-    orderedCandidates,
-    input.maxFiles,
-    input.rootFileIds,
-    input.changeSurfaceFileIds,
+  const rankedFileIds = selectExploreFiles({
+    ordered: orderedCandidates,
+    maxFiles: input.maxFiles,
+    rootFileIds: input.rootFileIds,
+    changeSurfaceFileIds: input.changeSurfaceFileIds,
     alignedChangeSurfaceFileIds,
     alignedFileIds,
-    input.structuralChangeSurfaceFileIds,
+    structuralChangeSurfaceFileIds: input.structuralChangeSurfaceFileIds,
     pathFileIds,
     integrationFileIds,
     hierarchyFileIds,
     counterpartFileIds,
     integrationFileWeights,
     alignedChangeSurfaceWeights,
-    integrationFiles.entrypointFileIds,
-    input.collaboratorFileIds,
-  );
+    entrypointFileIds: integrationFiles.entrypointFileIds,
+    collaboratorFileIds: input.collaboratorFileIds,
+  }).map((candidate) => candidate.fileId);
   const skeletonNodeIds = polymorphicSiblingSkeletonNodeIds(
     rankedFileIds,
     input.nodes,
@@ -305,139 +306,6 @@ function counterpartDefinitionFileIds(
       files.add(fileId);
   }
   return files;
-}
-
-function selectFilesByMarginalValue(
-  ordered: readonly [string, number][],
-  maxFiles: number,
-  rootFileIds: ReadonlySet<string>,
-  changeSurfaceFileIds: ReadonlySet<string>,
-  alignedChangeSurfaceFileIds: ReadonlySet<string>,
-  alignedFileIds: ReadonlySet<string>,
-  structuralChangeSurfaceFileIds: ReadonlySet<string>,
-  pathFileIds: ReadonlySet<string>,
-  integrationFileIds: ReadonlySet<string>,
-  hierarchyFileIds: ReadonlySet<string>,
-  counterpartFileIds: ReadonlySet<string>,
-  integrationFileWeights: ReadonlyMap<string, number>,
-  alignedChangeSurfaceWeights: ReadonlyMap<string, number>,
-  entrypointFileIds: ReadonlySet<string>,
-  collaboratorFileIds: ReadonlySet<string>,
-): string[] {
-  const strongest = Math.max(...ordered.map(([, score]) => score), 0);
-  const selected: string[] = [];
-  const selectedSet = new Set<string>();
-  const orderedPositions = new Map(
-    ordered.map(([fileId], index) => [fileId, index]),
-  );
-  const take = (ids: ReadonlySet<string>, cap = Number.MAX_SAFE_INTEGER) => {
-    let added = 0;
-    for (const [fileId] of ordered) {
-      if (selected.length >= maxFiles || added >= cap) break;
-      if (!ids.has(fileId) || selectedSet.has(fileId)) continue;
-      selected.push(fileId);
-      selectedSet.add(fileId);
-      added += 1;
-    }
-  };
-  const takeStable = (
-    ids: ReadonlySet<string>,
-    cap = Number.MAX_SAFE_INTEGER,
-  ) => {
-    let added = 0;
-    for (const fileId of ids) {
-      if (selected.length >= maxFiles || added >= cap) break;
-      if (selectedSet.has(fileId)) continue;
-      selected.push(fileId);
-      selectedSet.add(fileId);
-      added += 1;
-    }
-  };
-  const takeWeighted = (
-    ids: ReadonlySet<string>,
-    weights: ReadonlyMap<string, number>,
-    cap: number,
-  ) => {
-    let added = 0;
-    const ranked = ordered
-      .filter(([fileId]) => ids.has(fileId) && !selectedSet.has(fileId))
-      .sort(
-        (left, right) =>
-          (weights.get(right[0]) ?? 0) - (weights.get(left[0]) ?? 0) ||
-          (orderedPositions.get(left[0]) ?? 0) -
-            (orderedPositions.get(right[0]) ?? 0),
-      );
-    for (const [fileId] of ranked) {
-      if (selected.length >= maxFiles || added >= cap) break;
-      selected.push(fileId);
-      selectedSet.add(fileId);
-      added += 1;
-    }
-  };
-
-  // Reserve role budgets before the score-only fill. A low-scored source
-  // counterpart or signature type must not be discovered after maxFiles has
-  // already been consumed, while bounded caps prevent one role from taking the
-  // complete context pack.
-  take(rootFileIds);
-  // Preserve one query-aligned direct dependency before declaration/source
-  // pairing consumes the remaining slots. It already has an executable edge
-  // from a root-file callable and independent query-term evidence.
-  takeStable(collaboratorFileIds, 1);
-  take(counterpartFileIds, 3);
-  // A cross-file type reached from the selected roots and covering multiple
-  // query concepts is stronger evidence than an arbitrary member of a broad
-  // hierarchy. Reserve it before hierarchy/alignment sampling so concrete
-  // runtime collaborators are not displaced by generic lexical seeds.
-  takeWeighted(alignedChangeSurfaceFileIds, alignedChangeSurfaceWeights, 1);
-  // A language-level entrypoint calling a selected root is a strong integration
-  // spine even when it connects only one concept. Preserve one before broad
-  // hierarchy/alignment roles can exhaust the file budget.
-  take(entrypointFileIds, 1);
-  // Direct base/implementation families are stronger structural evidence
-  // than generic lexical alignment (for example many unrelated `Adapter`
-  // classes). Sample them before broad conceptual collaborators.
-  // Keep a small complete direct implementation family when the file budget
-  // permits it. Three was too small for common interface families with four
-  // production implementations: later dynamic-call candidates could then
-  // displace one direct INHERITS neighbor even though all four had already
-  // survived the node budget. This remains bounded and language-neutral.
-  takeStable(
-    hierarchyFileIds,
-    Math.min(4, Math.max(1, maxFiles - selected.length)),
-  );
-  // PPR can discover a low-centrality implementation/integration file whose
-  // symbols nevertheless cover several query concepts. Preserve a small,
-  // bounded number before generic graph roles; otherwise root declarations
-  // and signature surfaces can consume every file slot.
-  take(alignedFileIds, 2);
-  // Reserve one state-holder collaborator before broad integration files. Its
-  // score can be modest even though it defines the root's implementation
-  // shape (for example Router -> RouterInner -> PathRouter).
-  take(structuralChangeSurfaceFileIds, 1);
-  // For type roots, direct parameter/return/member types describe the public
-  // API more reliably than arbitrary callers. The change-surface collector is
-  // already bounded and semantically ranked, so preserve a small slice before
-  // generic integration sampling. Flow/function queries normally contribute
-  // no type-root surface and are unaffected.
-  takeStable(changeSurfaceFileIds, 3);
-  // A file connecting several independently selected concepts is stronger
-  // evidence than a file appearing on one arbitrary call path. This retains
-  // orchestration/integration code for broad queries without case-specific
-  // filename boosts.
-  takeWeighted(integrationFileIds, integrationFileWeights, 3);
-  take(pathFileIds);
-  take(hierarchyFileIds, 4);
-  for (const [fileId, score] of ordered) {
-    if (selected.length >= maxFiles) break;
-    if (selectedSet.has(fileId)) continue;
-    const relative = strongest > 0 ? score / strongest : 0;
-    if (selected.length === 0 || relative >= 0.05) {
-      selected.push(fileId);
-      selectedSet.add(fileId);
-    }
-  }
-  return selected;
 }
 
 function queryAlignedFileIds(

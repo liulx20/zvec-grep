@@ -182,7 +182,7 @@ export function exploreGraph(
     24,
   );
   const moduleEntrypoints = includeModuleEntrypointNodes(
-    counterpartCallSpine,
+    subgraph.nodes,
     graph,
     storage,
     nodeScores,
@@ -191,7 +191,7 @@ export function exploreGraph(
     16,
   );
   const collaborators = includeDirectCallCollaborators(
-    moduleEntrypoints.nodes,
+    subgraph.nodes,
     graph,
     storage,
     nodeScores,
@@ -199,7 +199,15 @@ export function exploreGraph(
     query,
     8,
   );
-  const nodes = collaborators.nodes;
+  // Candidate producers contribute to one pool. Only the call-spine producer
+  // depends on counterpart discovery; unrelated producers do not inherit the
+  // ordering or budgets of earlier passes.
+  const nodes = mergeExploreNodeCandidates(
+    subgraph.nodes,
+    counterpartCallSpine,
+    moduleEntrypoints.nodes,
+    collaborators.nodes,
+  );
   const counterpartEdges =
     nodes.length === subgraph.nodes.length
       ? null
@@ -483,6 +491,24 @@ function includeImpactSourceDeclarations(
       additions.length > 0 ? [...impactNodes, ...additions] : [...impactNodes],
     fileIds,
   };
+}
+
+function mergeExploreNodeCandidates(
+  ...groups: readonly (readonly ExploreNode[])[]
+): ExploreNode[] {
+  const merged = new Map<string, ExploreNode>();
+  for (const group of groups) {
+    for (const node of group) {
+      const existing = merged.get(node.id);
+      if (!existing) {
+        merged.set(node.id, node);
+        continue;
+      }
+      if (node.isRoot && !existing.isRoot)
+        merged.set(node.id, { ...existing, isRoot: true });
+    }
+  }
+  return [...merged.values()];
 }
 
 function rootSemanticCounterpartNodeIds(
@@ -893,12 +919,8 @@ function includeCounterpartSourceNodes(
   };
 
   // Resolve declaration/definition counterparts by semantic identity before
-  // falling back to filename conventions. Public C APIs and internal helpers
-  // are commonly declared in a shared header whose stem has no relationship
-  // to the implementation file (`uv-common.h` -> `timer.c`). The shared
-  // grouping policy already separates unrelated same-name definitions and
-  // intentionally joins platform implementation families, so reusing it here
-  // keeps Explore consistent with callers/callees seed resolution.
+  // falling back to filename conventions. The shared grouping policy keeps
+  // this consistent with callers/callees seed resolution.
   const directCallTargetLines = new Map<string, number>();
   for (const edge of graph.outgoingEdges(rootIds, ["CALLS"], 256))
     directCallTargetLines.set(

@@ -1,5 +1,4 @@
 import type { StoredEntity } from "../../storage/index.js";
-import { escapeRegExp } from "../../utils/regex.js";
 import type { GraphQueryStorage } from "../ports.js";
 import {
   isLowValuePath,
@@ -154,8 +153,6 @@ export function resolveExploreSeeds(
       .slice(0, limit)
       .map((entity) => entity.entity.id);
   }
-  const canonicalTypeFamily = resolveCanonicalTypeFamily(storage, query, limit);
-  if (canonicalTypeFamily.length > 0) return canonicalTypeFamily;
   if (candidates.size < limit && storage.findSymbolsByQuery) {
     for (const entity of storage.findSymbolsByQuery(query, limit * 4)) {
       pushEntity(entity, false, true);
@@ -173,23 +170,11 @@ export function resolveExploreSeeds(
       pushEntity(entity, symbolName(entity).toLowerCase() === term);
     }
     if (storage.findSymbolsByQuery && term.length >= 3) {
-      // Per-term retrieval must be broader than the final seed budget. Common
-      // concepts such as `repository`, `connection`, or `WAL` otherwise return
-      // only the globally strongest matches and never give co-named symbols
-      // (OwnerRepository, WalWriterSet) a chance to be scored for coherence.
+      // Per-term retrieval is broader than the final seed budget so related
+      // compound identifiers can compete in the shared scoring stage.
       const termLimit = limit * (explicitAcronym ? 32 : 8);
       for (const entity of storage.findSymbolsByQuery(rawTerm, termLimit)) {
         pushEntity(entity);
-      }
-      // Morphology fallback is only useful when direct retrieval has not
-      // already supplied enough identity-level evidence for this concept.
-      if (term.length >= 7 && !retrievalCandidatesCoverTerm(candidates, term)) {
-        for (const entity of storage.findSymbolsByQuery(
-          term.slice(0, 6),
-          termLimit,
-        )) {
-          pushEntity(entity);
-        }
       }
     }
   }
@@ -229,6 +214,11 @@ export function resolveExploreSeeds(
     const contentHay = content.toLowerCase();
     const identityHits = semanticTermCoverage(identityHay, terms);
     const contentHits = semanticTermCoverage(contentHay, terms);
+    const nameAffinity = terms.reduce(
+      (total, term) =>
+        total + identifierPrefixAffinity(symbolName(entity), term),
+      0,
+    );
     const lowValuePenalty =
       !asksForLowValue && isLowValuePath(entity.file.relativePath) ? 40 : 0;
     const preciseName = /[._$]|::|[a-z][A-Z]|^[A-Z]/.test(symbolName(entity));
@@ -236,6 +226,7 @@ export function resolveExploreSeeds(
       (exact ? (preciseName ? 100 : 30) : 0) +
       (fullQuery ? 16 : 0) +
       identityHits * 12 +
+      nameAffinity * 18 +
       (identityHits >= 2 ? 20 : 0) +
       contentHits * 3 +
       (contentHits >= 2 ? 4 : 0) +
@@ -245,6 +236,7 @@ export function resolveExploreSeeds(
       entity,
       id: entity.entity.id,
       score,
+      nameAffinity,
       coverage: semanticTermsCovered(`${identityHay} ${contentHay}`, terms)
         .size,
     };
@@ -263,7 +255,10 @@ export function resolveExploreSeeds(
   // collaborators; doubling this count made declarations, constructors and
   // overloads consume the complete file budget before traversal could rank
   // their neighbours.
-  const seedTarget = Math.min(limit, Math.max(2, nameTerms.length + 1));
+  const seedTarget = Math.min(
+    limit,
+    nameTerms.length <= 1 ? 1 : nameTerms.length + 1,
+  );
   const selectedNameCounts = new Map<string, number>();
   const explicitSymbolSequence = /(?:\.|::|->|#)/.test(query);
   const perFileSeedCap = explicitSymbolSequence ? 4 : 1;
@@ -278,10 +273,9 @@ export function resolveExploreSeeds(
   for (const rawTerm of orderedSeedTerms) {
     const normalizedTerm = rawTerm.toLowerCase();
     const explicitAcronym = /^[A-Z][A-Z0-9_]{1,}$/.test(rawTerm);
-    const matches = scored.filter(({ entity }) =>
-      semanticTermsCovered(symbolName(entity), [normalizedTerm]).has(
-        normalizedTerm,
-      ),
+    const matches = scored.filter(
+      ({ entity }) =>
+        identifierPrefixAffinity(symbolName(entity), normalizedTerm) > 0,
     );
     const rankedMatches = matches
       .map((candidate) => {
@@ -297,6 +291,10 @@ export function resolveExploreSeeds(
           strictType: strict && typeish,
           acronymType: explicitAcronym && typeish,
           topLevelApi: strict ? topLevelCallableScore(candidate.entity) : 0,
+          prefixAffinity: identifierPrefixAffinity(
+            symbolName(candidate.entity),
+            normalizedTerm,
+          ),
           coherence,
           // Sharing only a language or a top-level `src` directory is weak
           // evidence in a monorepo. Require package-level proximity before a
@@ -315,6 +313,7 @@ export function resolveExploreSeeds(
           Number(right.strictType) - Number(left.strictType) ||
           Number(right.anchored) - Number(left.anchored) ||
           Number(right.strict) - Number(left.strict) ||
+          right.prefixAffinity - left.prefixAffinity ||
           right.topLevelApi - left.topLevelApi ||
           right.coherence - left.coherence ||
           right.score - left.score ||
@@ -392,32 +391,6 @@ export function resolveExploreSeeds(
     : diversifyConceptualSeedFiles(selected, scored, seedTarget);
 }
 
-/**
- * The original term lookup remains mandatory for recall. The full-query and
- * term windows can, however, already contain enough direct evidence to avoid
- * an additional broad morphology-prefix scan.
- */
-function retrievalCandidatesCoverTerm(
-  candidates: ReadonlyMap<string, { entity: StoredEntity }>,
-  term: string,
-): boolean {
-  let hits = 0;
-  for (const { entity } of candidates.values()) {
-    const metadata = entity.entity.metadata;
-    const identity = [
-      metadata?.kind === "code" ? metadata.symbolName : "",
-      metadata?.kind === "code" ? metadata.scope : "",
-      entity.file.relativePath,
-    ]
-      .join(" ")
-      .toLowerCase();
-    if (!identity.includes(term)) continue;
-    hits += 1;
-    if (hits >= 2) return true;
-  }
-  return false;
-}
-
 function diversifyConceptualSeedFiles(
   selected: readonly string[],
   scored: readonly {
@@ -478,56 +451,24 @@ function diversifyConceptualSeedFiles(
 }
 
 /**
- * A short PascalCase query often names a type family rather than the literal
- * declaration (`Expr` -> `ExprBase`, `Syntax` -> `SyntaxNode`). Prefer the
- * shortest production type whose name starts with that family token. This is
- * deliberately limited to identifier-like PascalCase queries so lowercase
- * module/path searches keep their broad multi-seed behavior.
+ * Generic identifier-prefix evidence used only for candidate ranking. It
+ * operates on language-neutral identifier components and does not assume
+ * suffixes such as Base, Interface, or Trait.
  */
-function resolveCanonicalTypeFamily(
-  storage: GraphQueryStorage,
-  query: string,
-  limit: number,
-): string[] {
-  const token = query.trim();
-  if (!/^[A-Z][A-Za-z0-9_]{2,}$/.test(token) || !storage.findSymbolsByQuery)
-    return [];
-  const normalized = token.toLowerCase();
-  const candidates = storage
-    .findSymbolsByQuery(token, Math.max(2_048, limit * 32))
-    .filter((entity) => {
-      const metadata = entity.entity.metadata;
-      return (
-        metadata?.kind === "code" &&
-        TYPEISH_KINDS.has(metadata.symbolType ?? "") &&
-        symbolName(entity).toLowerCase().startsWith(normalized) &&
-        !isLowValuePath(entity.file.relativePath)
-      );
-    })
-    .sort((left, right) => {
-      const leftName = symbolName(left);
-      const rightName = symbolName(right);
-      const conventional = (name: string): number =>
-        new RegExp(
-          `^${escapeRegExp(token)}(?:Base|Interface|Trait)$`,
-          "i",
-        ).test(name)
-          ? 0
-          : 1;
-      return (
-        conventional(leftName) - conventional(rightName) ||
-        leftName.length - rightName.length ||
-        leftName.localeCompare(rightName) ||
-        left.entity.id.localeCompare(right.entity.id)
-      );
-    });
-  const canonicalName = candidates[0]
-    ? symbolName(candidates[0]).toLowerCase()
-    : undefined;
-  return candidates
-    .filter((entity) => symbolName(entity).toLowerCase() === canonicalName)
-    .slice(0, limit)
-    .map((entity) => entity.entity.id);
+function identifierPrefixAffinity(name: string, rawTerm: string): number {
+  const term = rawTerm.trim().toLowerCase();
+  if (term.length < 2) return 0;
+  const components = name
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .split(/[^A-Za-z0-9]+/)
+    .map((part) => part.toLowerCase())
+    .filter(Boolean);
+  let best = 0;
+  for (const component of components) {
+    if (!component.startsWith(term)) continue;
+    best = Math.max(best, term.length / component.length);
+  }
+  return best;
 }
 
 export type ExploreSeedGroup = {
