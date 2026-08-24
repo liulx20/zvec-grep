@@ -57,7 +57,7 @@ Result controls:
 | `--limit <n>` | Maximum returned items per group |
 | `--human` | Terminal-oriented output with full previews by default |
 | `--preview none\|short\|full` | Indexed source preview size |
-| `--refresh background\|check\|wait\|off` | Index refresh policy; `check` reports stale state without updating, while `off` skips the freshness scan |
+| `--refresh background\|wait\|off` | Index refresh policy |
 | `--mode direct\|server\|auto` | Execution transport |
 | `--debug` | Print diagnostics to stderr |
 | `--trace` | Add per-hit indexed search trace |

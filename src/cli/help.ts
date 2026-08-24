@@ -133,10 +133,7 @@ Result options:
   --preview <none|short|full>       Indexed preview size (default: none; --human: full)
   --debug                           Print diagnostics to stderr
   --trace                           Include per-hit indexed search trace
-  --refresh <background|check|wait|off>
-                                    Refresh policy (defaults: server=background, direct=check)
-                                    off reads the current snapshot without a freshness scan
-                                    In direct mode, background warns and falls back to check
+  --refresh <background|wait|off>   Refresh policy (defaults: server=background, direct=off)
   --mode <direct|server|auto>       Select indexed query transport (default: auto)
 
 Indexed results are shown by query group, preserving each group's own rank.

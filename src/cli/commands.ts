@@ -49,10 +49,6 @@ import {
   planRemoteIndexAuthorization,
   planRemoteSearchAuthorization,
 } from "../authorization/index.js";
-import {
-  indexCompletionFromStatus,
-  indexStatusNeedsRefresh,
-} from "../engine/index-status.js";
 import type { NormalizedSearchInput } from "../mcp/input-normalization.js";
 import { indexProgressFromMessage } from "../index-progress.js";
 import { normalizeManagedRgInput } from "./managed-rg.js";
@@ -704,7 +700,7 @@ async function runDirectQuery(
 ): Promise<void> {
   if (commandOptions.refresh === "background") {
     console.error(
-      "warning: --refresh background requires Server mode; Direct mode uses --refresh check",
+      "warning: --refresh background requires Server mode; Direct mode uses --refresh off",
     );
   }
   const serviceOptions = createServiceOptions(commandOptions, undefined);
@@ -721,18 +717,6 @@ async function runDirectQuery(
       },
     );
     const info = await directQueryInfo(zvecGrep, false);
-    const searchPolicy = resolveDirectSearchPolicy(commandOptions);
-    // A freshness scan walks the whole workspace. It is independent from the
-    // read-only search, so overlap it with model acquisition and retrieval
-    // instead of adding both costs serially. `refresh=wait` already performs
-    // the authoritative scan/update inside context().
-    const statusPromise =
-      searchPolicy.autoUpdate === true || commandOptions.refresh === "off"
-        ? undefined
-        : directQueryInfo(zvecGrep, true).then(
-            (current) => ({ status: current.status }),
-            (error: unknown) => ({ error }),
-          );
     const schema = info.workspaceIndex?.embedding;
     const workspaceRuntime = workspaceRuntimeFromInfo(info);
     const modelInfo =
@@ -766,23 +750,11 @@ async function runDirectQuery(
       authorizationResolution.authorization,
       () => zvecGrep.context(effectiveContextRequest),
     );
-    const statusResult = await statusPromise;
-    if (statusResult && "error" in statusResult) throw statusResult.error;
     progress.finish();
     printCliContextResult(result, commandOptions);
     for (const line of contextWarningLines(result)) {
       console.error(line);
     }
-    if (
-      effectiveContextRequest.autoUpdate !== true &&
-      indexStatusNeedsRefresh(statusResult?.status ?? null)
-    ) {
-      printStaleIndexStatus(
-        "idle",
-        indexCompletionFromStatus(statusResult?.status ?? null),
-      );
-    }
-
     if (commandOptions.debug) {
       printDebug(result, {
         trace: commandOptions.trace === true,

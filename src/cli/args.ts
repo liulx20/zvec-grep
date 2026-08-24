@@ -1044,15 +1044,10 @@ function parseClientMode(value: string): "direct" | "server" | "auto" {
 }
 
 function parseQueryRefreshMode(value: string): QueryRefreshMode {
-  if (
-    value === "background" ||
-    value === "check" ||
-    value === "wait" ||
-    value === "off"
-  ) {
+  if (value === "background" || value === "wait" || value === "off") {
     return value;
   }
-  throw new Error("--refresh must be background, check, wait, or off");
+  throw new Error("--refresh must be background, wait, or off");
 }
 
 function allowRemoteValueError(): Error {

@@ -6,7 +6,7 @@ export type ColorMode = "auto" | "always" | "never";
 
 export type PreviewMode = "none" | "short" | "full";
 
-export type QueryRefreshMode = "background" | "check" | "wait" | "off";
+export type QueryRefreshMode = "background" | "wait" | "off";
 
 export type McpInstallTransport = "stdio" | "http";
 

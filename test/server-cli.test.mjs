@@ -131,10 +131,6 @@ test("server queries map refresh modes to search policy", () => {
     freshness: "eventual",
     autoUpdate: false,
   });
-  assert.deepEqual(resolveServerSearchPolicy({ refresh: "check" }), {
-    freshness: "eventual",
-    autoUpdate: false,
-  });
   assert.equal(
     parseArgs(["query", "--refresh", "background", "query"]).options.refresh,
     "background",
@@ -143,13 +139,9 @@ test("server queries map refresh modes to search policy", () => {
     parseArgs(["query", "--refresh=wait", "query"]).options.refresh,
     "wait",
   );
-  assert.equal(
-    parseArgs(["query", "--refresh=check", "query"]).options.refresh,
-    "check",
-  );
   assert.throws(
     () => parseArgs(["query", "--refresh", "invalid", "query"]),
-    /background, check, wait, or off/i,
+    /background, wait, or off/i,
   );
   assert.throws(
     () => parseArgs(["query", "--fresh", "query"]),

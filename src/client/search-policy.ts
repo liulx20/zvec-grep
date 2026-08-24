@@ -16,7 +16,7 @@ export function resolveServerSearchPolicy(
   const refresh = options.refresh ?? "background";
   return {
     freshness: refresh === "wait" ? "wait_for_fresh" : "eventual",
-    autoUpdate: refresh !== "off" && refresh !== "check",
+    autoUpdate: refresh !== "off",
   };
 }
 
