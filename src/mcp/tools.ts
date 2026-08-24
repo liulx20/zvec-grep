@@ -21,7 +21,7 @@ import type {
   ZvecGrepGraphNeighborhoodOptions,
   ZvecGrepGraphNeighborhoodResult,
 } from "../engine/service/types.js";
-import { formatAgentContextResult } from "../cli/format/context.js";
+import { formatAgentContextResult } from "../presentation/context.js";
 import {
   formatExploreResult,
   formatNeighborhoodResult,
