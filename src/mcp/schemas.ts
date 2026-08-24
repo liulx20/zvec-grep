@@ -671,7 +671,7 @@ export const zvecGrepGraphNeighborhoodInputSchema = {
     .max(256)
     .optional()
     .describe("Disambiguate when multiple symbols match the query."),
-  file: z
+  definitionFile: z
     .string()
     .min(1)
     .max(1024)

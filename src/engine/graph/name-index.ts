@@ -1,4 +1,5 @@
 import { bareName } from "./builtins.js";
+import { isHeaderPath } from "./path-policy.js";
 import type { ResolutionEvidence } from "./types.js";
 
 export type NameEntry = {
@@ -314,10 +315,6 @@ function crossFileDeclarationDefinitionGroup(
     candidates.every((candidate) => candidate.signature === first.signature)
     ? definitions[0]
     : undefined;
-}
-
-function isHeaderPath(path: string | undefined): boolean {
-  return Boolean(path && /\.(?:h|hh|hpp|hxx)$/i.test(path));
 }
 
 function equivalentDeclarationGroup(

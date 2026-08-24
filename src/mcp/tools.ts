@@ -581,7 +581,7 @@ export function registerZvecGrepTools(
           direction,
           query: input.query,
           seedId: input.seedId,
-          file: input.file,
+          definitionFile: input.definitionFile,
           depth: input.depth,
           limit: input.limit,
           root: input.root,

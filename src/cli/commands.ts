@@ -630,7 +630,7 @@ async function runGraphNeighborhood(parsed: ParsedArgs): Promise<void> {
     depth: parsed.options.depth,
     limit: parsed.options.limit,
     seedId: parsed.options.seedId,
-    file: parsed.options.definitionFile,
+    definitionFile: parsed.options.definitionFile,
   };
   await routeByMode({
     mode: resolveClientMode(parsed.options.mode),

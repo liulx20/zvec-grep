@@ -1,4 +1,5 @@
 import type { StoredEntity } from "../storage/index.js";
+import { platformPathSegment } from "./path-policy.js";
 import { TYPE_SYMBOL_KIND_SET } from "./symbol-kinds.js";
 
 export function symbolLookupLeaf(query: string): string {
@@ -210,10 +211,8 @@ function isPlatformImplementationFamily(
       .filter((arity): arity is number => typeof arity === "number"),
   );
   if (arities.size > 1) return false;
-  const platformSegment =
-    /(^|\/)(?:aix|android|bsd|darwin|freebsd|haiku|hurd|ibmi|linux|netbsd|openbsd|os390|posix|qnx|solaris|sunos|unix|win|windows)(\/|$)/i;
   return definitions.every((entity) =>
-    platformSegment.test(entity.file.relativePath.replaceAll("\\", "/")),
+    Boolean(platformPathSegment(entity.file.relativePath)),
   );
 }
 

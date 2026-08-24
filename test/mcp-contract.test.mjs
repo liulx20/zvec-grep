@@ -245,11 +245,11 @@ test("graph neighborhood tools pass the definition file filter", async (t) => {
     arguments: {
       root,
       query: "Service",
-      file: "apps/api/service.ts",
+      definitionFile: "apps/api/service.ts",
     },
   });
   assert.equal(result.isError, undefined);
-  assert.equal(received.file, "apps/api/service.ts");
+  assert.equal(received.definitionFile, "apps/api/service.ts");
 });
 
 async function connect(backend = createBackend(), options = {}) {

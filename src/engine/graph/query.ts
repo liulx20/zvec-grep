@@ -61,7 +61,7 @@ export type GraphNeighborhoodOptions = {
   /** When multiple name matches, pick this entity id. */
   seedId?: string;
   /** Narrow same-named definitions to this relative or absolute source path. */
-  file?: string;
+  definitionFile?: string;
 };
 
 const DEFAULT_DEPTH = 1;
@@ -102,7 +102,7 @@ export function queryGraphNeighborhood(
     storage,
     query,
     options.seedId,
-    options.file,
+    options.definitionFile,
   );
   const seeds = resolvedSeeds.seeds;
   if (seeds.length === 0) {

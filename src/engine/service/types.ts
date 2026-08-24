@@ -129,7 +129,7 @@ export type ZvecGrepGraphNeighborhoodOptions = {
   query: string;
   seedId?: string;
   /** Narrow same-named definitions to this relative or absolute source path. */
-  file?: string;
+  definitionFile?: string;
   depth?: number;
   limit?: number;
 };
