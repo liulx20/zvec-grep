@@ -18,7 +18,6 @@ See benchmark-specific README for setup and execution instructions.
 | --- | --- | --- | --- |
 | [BrowseComp-Plus](browse-comp-plus/README.md) | Evaluates multi-document evidence retrieval and answer accuracy over a large, fixed corpus | Codex | 80 cases |
 | [SWE-QA-Bench](swe-qa-bench/README.md) | Evaluates repository-level, cross-file, and multi-hop software-engineering question answering | OpenCode | 20 tasks |
-| [Explore Quality](explore-quality/README.md) | Deterministic cross-language regression for Explore roots, paths, files, and source coverage | Offline | 6 languages |
 
 ## Evaluation protocol
 
