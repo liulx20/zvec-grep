@@ -136,11 +136,21 @@ export function extractCallTarget(node: TSNode): ReferenceTarget | undefined {
       const raw = normalizeCallName(
         receiver ? `${receiver.text}.${name.text}` : name.text,
       );
-      return raw
-        ? receiver
-          ? memberReferenceTarget(raw, receiver.text, name.text)
-          : referenceTargetFromSyntax(raw)
-        : undefined;
+      if (!raw) return undefined;
+      if (!receiver) return referenceTargetFromSyntax(raw);
+      const target = memberReferenceTarget(raw, receiver.text, name.text);
+      const constructedType = constructedReceiverType(receiver);
+      return constructedType
+        ? {
+            ...target,
+            hints: {
+              receiverType: constructedType,
+              receiverTypeEvidence: { source: "ast_type", confidence: 1 },
+              candidateTypes: [constructedType],
+              dispatch: "virtual",
+            },
+          }
+        : target;
     }
   }
   const target =
@@ -157,6 +167,24 @@ export function extractCallTarget(node: TSNode): ReferenceTarget | undefined {
   const raw = normalizeCallName(callableTargetText(target));
   if (!raw) return undefined;
   return dynamicCallTarget(target, raw) ?? referenceTargetFromSyntax(raw);
+}
+
+function constructedReceiverType(node: TSNode): string | undefined {
+  if (
+    node.type !== "object_creation_expression" &&
+    node.type !== "new_expression"
+  )
+    return undefined;
+  const type =
+    node.childForFieldName("type") ??
+    node.childForFieldName("constructor") ??
+    node.namedChildren.find((child) =>
+      /(?:type|identifier|name)$/.test(child.type),
+    );
+  const value = type ? callableTargetText(type).trim() : "";
+  return /^[A-Za-z_$][\w$]*(?:(?:::|\.)[A-Za-z_$][\w$]*)*$/.test(value)
+    ? value.replace(/::/g, ".")
+    : undefined;
 }
 
 function callableTargetText(node: TSNode): string {

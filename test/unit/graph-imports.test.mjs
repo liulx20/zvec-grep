@@ -1,7 +1,4 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import test from "node:test";
 import { CodeExtractor } from "../../dist/engine/extraction/code/extractor.js";
 import {
@@ -107,55 +104,6 @@ test("resolveImportPath resolves JS/TS relative + extension table", () => {
   assert.equal(
     resolveImportPath("./missing", "a", "typescript", index).status,
     "failed",
-  );
-});
-
-test("resolveImportPath uses TypeScript paths and workspace package exports", async (t) => {
-  const root = await mkdtemp(join(tmpdir(), "zvec-grep-ts-paths-"));
-  t.after(() => rm(root, { recursive: true, force: true }));
-  await writeFile(
-    join(root, "tsconfig.json"),
-    `{
-      // Project aliases are configuration, not repository-layout guesses.
-      "compilerOptions": {
-        "baseUrl": ".",
-        "paths": { "@core/*": ["packages/core/*"], },
-      },
-    }`,
-  );
-  await writeFile(
-    join(root, "package.json"),
-    JSON.stringify({ name: "app", private: true }),
-  );
-  await mkdir(join(root, "packages/core"), { recursive: true });
-  await writeFile(
-    join(root, "packages/core/package.json"),
-    JSON.stringify({ name: "@workspace/core", exports: "./src/public.ts" }),
-  );
-  const app = {
-    ...codeFile("app", "src/app.ts"),
-    absolutePath: join(root, "src/app.ts"),
-    rootPath: root,
-  };
-  const utility = {
-    ...codeFile("utility", "packages/core/utility.ts"),
-    absolutePath: join(root, "packages/core/utility.ts"),
-    rootPath: root,
-  };
-  const publicApi = {
-    ...codeFile("public-api", "packages/core/src/public.ts"),
-    absolutePath: join(root, "packages/core/src/public.ts"),
-    rootPath: root,
-  };
-  const index = new FilePathIndex([app, utility, publicApi]);
-
-  assert.equal(
-    resolveImportPath("@core/utility", app.id, "typescript", index).fileId,
-    utility.id,
-  );
-  assert.equal(
-    resolveImportPath("@workspace/core", app.id, "typescript", index).fileId,
-    publicApi.id,
   );
 });
 

@@ -41,6 +41,7 @@ export function enrichTargetWithResolutionFact(
     fact.receiverCandidateTypes.get(receiverTail);
   const factoryReceiverType = inferFactoryReceiverType(target, fact);
   const receiverType =
+    target.hints?.receiverType ??
     dynamicTypes?.[0] ??
     annotatedTypes?.[0] ??
     (isOwnerFieldReceiver(receiver)
@@ -62,7 +63,8 @@ export function enrichTargetWithResolutionFact(
     hints: {
       ...target.hints,
       receiverType,
-      ...(factoryReceiverType === receiverType
+      ...(factoryReceiverType === receiverType &&
+      !target.hints?.receiverTypeEvidence
         ? {
             receiverTypeEvidence: {
               source: "text_fallback" as const,
