@@ -30,7 +30,8 @@ export class SqliteGraphDatabase {
   private closed = false;
   private resolvedProjections: boolean;
   private bulkLoad = false;
-  private readonly counterpartDirtyFiles = new Set<string>();
+  /** null means a prior process left an unknown set of files dirty. */
+  private counterpartDirtyFiles: Set<string> | null;
   private readonly statements = new Map<
     string,
     ReturnType<NodeDatabaseSync["prepare"]>
@@ -44,6 +45,14 @@ export class SqliteGraphDatabase {
     this.db = opened.db;
     this.readOnly = opened.readOnly;
     this.resolvedProjections = this.detectResolvedProjections();
+    this.counterpartDirtyFiles = this.db
+      .prepare(
+        `SELECT 1 FROM graph_meta
+         WHERE key='counterpart_projection_dirty' AND value='1'`,
+      )
+      .get()
+      ? null
+      : new Set();
     if (!this.readOnly && this.isEmpty()) this.beginBulkLoad();
   }
 
@@ -71,15 +80,26 @@ export class SqliteGraphDatabase {
   }
 
   markCounterpartDirty(fileId: string): void {
-    this.counterpartDirtyFiles.add(fileId);
+    this.counterpartDirtyFiles?.add(fileId);
+    this.prepare(
+      `INSERT INTO graph_meta(key,value) VALUES('counterpart_projection_dirty','1')
+       ON CONFLICT(key) DO UPDATE SET value='1'`,
+    ).run();
   }
 
-  counterpartDirtyFileSnapshot(): string[] {
-    return [...this.counterpartDirtyFiles];
+  counterpartDirtyFileSnapshot(): string[] | null {
+    return this.counterpartDirtyFiles ? [...this.counterpartDirtyFiles] : null;
   }
 
-  acknowledgeCounterpartDirtyFiles(files: readonly string[]): void {
-    for (const file of files) this.counterpartDirtyFiles.delete(file);
+  clearCounterpartProjectionDirty(): void {
+    this.prepare(
+      "DELETE FROM graph_meta WHERE key='counterpart_projection_dirty'",
+    ).run();
+  }
+
+  acknowledgeCounterpartProjection(files: readonly string[] | null): void {
+    if (files === null) this.counterpartDirtyFiles = new Set();
+    else for (const file of files) this.counterpartDirtyFiles?.delete(file);
   }
 
   endBulkLoad(): void {

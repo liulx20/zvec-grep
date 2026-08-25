@@ -72,8 +72,13 @@ test("read-only graph open does not create a missing directory", async (t) => {
   await assert.rejects(access(dir));
 });
 
-test("counterpart edges are projected and invalidated at index time", async () => {
-  const graph = new SqliteGraphStorage("", { inMemory: true });
+test("counterpart projection recovers after restart and stays incremental", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "zvec-grep-counterpart-"));
+  let graph = new SqliteGraphStorage(dir);
+  t.after(async () => {
+    graph.close();
+    await rm(dir, { recursive: true, force: true });
+  });
   const file = (id, relativePath) => ({
     id,
     collectionId: "collection",
@@ -93,9 +98,17 @@ test("counterpart edges are projected and invalidated at index time", async () =
     qualifiedName: "Widget::open",
     arity: 0,
   });
+  const counterpartTargets = () =>
+    new Set(
+      graph
+        .outgoingEdges(["decl"], ["COUNTERPART"], 10)
+        .map((edge) => edge.dst),
+    );
   const header = file("header", "include/project/api/public.h");
   const source = file("source", "src/impl/service.cc");
   const vendored = file("vendored", "vendor/impl/service.cpp");
+  const sameStem = file("same-stem", "include/project/api/public.cpp");
+  const unrelated = file("unrelated", "include/project/api/unrelated.cpp");
   graph.upsertFileGraph(header.id, [symbol("decl")], [], [], header);
   graph.upsertFileGraph(
     source.id,
@@ -119,19 +132,21 @@ test("counterpart edges are projected and invalidated at index time", async () =
     [],
     vendored,
   );
-  await graph.resolvePending({ files: [header, source, vendored] });
-  assert.equal(
-    graph
-      .outgoingEdges(["decl"], ["COUNTERPART"], 10)
-      .some((edge) => edge.dst === "def" && edge.rel === "counterpart"),
-    true,
-  );
-  assert.equal(
-    graph
-      .outgoingEdges(["decl"], ["COUNTERPART"], 10)
-      .some((edge) => edge.dst === "vendored-def"),
-    false,
-  );
+  for (const [candidate, id] of [
+    [sameStem, "same-stem-def"],
+    [unrelated, "unrelated-def"],
+  ])
+    graph.upsertFileGraph(candidate.id, [symbol(id)], [], [], candidate);
+  graph.close();
+  graph = new SqliteGraphStorage(dir);
+  await graph.resolvePending({
+    files: [header, source, vendored, sameStem, unrelated],
+  });
+  const projected = counterpartTargets();
+  assert.equal(projected.has("def"), true);
+  assert.equal(projected.has("vendored-def"), false);
+  assert.equal(projected.has("same-stem-def"), true);
+  assert.equal(projected.has("unrelated-def"), false);
 
   graph.upsertFileGraph(
     source.id,
@@ -150,13 +165,7 @@ test("counterpart edges are projected and invalidated at index time", async () =
     source,
   );
   await graph.resolvePending();
-  assert.equal(
-    graph
-      .outgoingEdges(["decl"], ["COUNTERPART"], 10)
-      .some((edge) => edge.rel === "counterpart"),
-    false,
-  );
-  graph.close();
+  assert.equal(counterpartTargets().has("def"), false);
 });
 
 test("counterpart dirty files survive a failed projection", (t) => {

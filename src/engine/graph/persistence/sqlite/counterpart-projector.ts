@@ -2,7 +2,7 @@ import {
   counterpartPathDomainsCompatible,
   counterpartPathsRelated,
 } from "../../counterpart-policy.js";
-import { isHeaderPath, isSourcePath } from "../../path-policy.js";
+import { fileStem, isHeaderPath, isSourcePath } from "../../path-policy.js";
 import type { SqliteGraphDatabase } from "./database.js";
 
 type CounterpartCandidate = {
@@ -28,10 +28,11 @@ export class SqliteCounterpartProjector {
 
   refresh(rebuild: boolean): void {
     const dirtyFiles = this.database.counterpartDirtyFileSnapshot();
-    if (!rebuild && dirtyFiles.length === 0) return;
-    const dirtyJson = JSON.stringify(dirtyFiles);
+    const rebuildAll = rebuild || dirtyFiles === null;
+    if (!rebuildAll && dirtyFiles?.length === 0) return;
+    const dirtyJson = JSON.stringify(dirtyFiles ?? []);
     this.database.transaction(() => {
-      if (rebuild) {
+      if (rebuildAll) {
         this.database
           .prepare("DELETE FROM edges WHERE kind='COUNTERPART'")
           .run();
@@ -84,7 +85,7 @@ export class SqliteCounterpartProjector {
             AND right_file.format IN ('c','cpp')
             AND (?=1 OR left_symbol.file_id IN (SELECT value FROM json_each(?))
                      OR right_symbol.file_id IN (SELECT value FROM json_each(?)))`,
-        rebuild ? 1 : 0,
+        rebuildAll ? 1 : 0,
         dirtyJson,
         dirtyJson,
       );
@@ -106,8 +107,9 @@ export class SqliteCounterpartProjector {
           match.evidence,
         );
       }
+      this.database.clearCounterpartProjectionDirty();
     });
-    this.database.acknowledgeCounterpartDirtyFiles(dirtyFiles);
+    this.database.acknowledgeCounterpartProjection(dirtyFiles);
   }
 }
 
@@ -126,6 +128,7 @@ function counterpartMatch(
     return undefined;
   if (sameIdentity && candidate.directly_imported === 1)
     return { confidence: 0.98, evidence: "direct_import" };
+  if (fileStem(headerPath) !== fileStem(sourcePath)) return undefined;
   const pathRelated = counterpartPathsRelated(headerPath, sourcePath);
   if (!pathRelated) return undefined;
   return {

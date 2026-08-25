@@ -198,7 +198,7 @@ erDiagram
 
 | 表 | 主键 | 作用 |
 | --- | --- | --- |
-| `graph_meta` | `key` | 保存 `schema_version` |
+| `graph_meta` | `key` | 保存 `schema_version`、解析游标和 counterpart crash-recovery flag |
 | `files` | `id` | 图中存在的文件及 graph-only 展示所需的路径、格式和基础属性 |
 | `symbols` | `id` | 符号及其所属文件、名称、限定名称、种类、导出状态和源码 range |
 | `contains` | `(parent_id, child_id)` | 容器与成员关系 |

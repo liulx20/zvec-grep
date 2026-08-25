@@ -1,3 +1,5 @@
+import { basename, extname } from "node:path";
+
 /** Shared path-value policy for graph retrieval and presentation. */
 export function isTestPath(path: string): boolean {
   const normalized = path.replaceAll("\\", "/");
@@ -37,6 +39,11 @@ export function isHeaderPath(path: string | undefined): boolean {
 
 export function isSourcePath(path: string): boolean {
   return /\.(?:c|cc|cpp|cxx|m|mm)$/i.test(path);
+}
+
+export function fileStem(path: string): string {
+  const normalized = path.replaceAll("\\", "/");
+  return basename(normalized, extname(normalized)).toLowerCase();
 }
 
 export function platformPathSegment(path: string): string | undefined {

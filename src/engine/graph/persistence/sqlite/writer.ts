@@ -62,7 +62,6 @@ export class SqliteGraphWriter {
     file?: FileInfo,
   ): void {
     this.database.assertWritable();
-    this.database.markCounterpartDirty(fileId);
     const oldIds = this.database.isBulkLoad()
       ? []
       : this.symbolIdsForFile(fileId);
@@ -74,6 +73,7 @@ export class SqliteGraphWriter {
         ? this.affectedProjectionIds(fileId, oldNames, nodes, edges, refs)
         : [];
     this.database.transaction(() => {
+      this.database.markCounterpartDirty(fileId);
       if (!this.database.isBulkLoad()) {
         this.restoreEdgesToUnresolved(affected);
         this.deleteOwnedFacts(fileId, oldIds);
@@ -173,7 +173,6 @@ export class SqliteGraphWriter {
 
   deleteFileGraph(fileId: string): void {
     this.database.assertWritable();
-    this.database.markCounterpartDirty(fileId);
     const oldIds = this.symbolIdsForFile(fileId);
     const changedInstantiationTypes = this.changedInstantiationTypes(
       fileId,
@@ -198,6 +197,7 @@ export class SqliteGraphWriter {
       ...this.affectedInstantiationProjectionIds(affectedDispatchTypes),
     );
     this.database.transaction(() => {
+      this.database.markCounterpartDirty(fileId);
       this.restoreEdgesToUnresolved(affected);
       this.deleteOwnedFacts(fileId, oldIds);
       this.database.prepare("DELETE FROM files WHERE id=?").run(fileId);
