@@ -5,44 +5,10 @@ import {
   queryGraphNeighborhood,
 } from "../../dist/engine/graph/index.js";
 import { searchWorkspaceIndex } from "../../dist/engine/pipeline/search/index.js";
+import { codeFile, graphEntity } from "../helpers/graph.mjs";
 
-function entity(id, name, path = "a.ts") {
-  return {
-    file: {
-      id: `file-${path}`,
-      collectionId: "c",
-      absolutePath: `/repo/${path}`,
-      relativePath: path,
-      rootPath: "/repo",
-      sizeBytes: 1,
-      lastModifiedTime: 1,
-      kind: "code",
-      format: "typescript",
-    },
-    entity: {
-      id,
-      fileId: `file-${path}`,
-      range: {
-        kind: "text",
-        startLine: 1,
-        endLine: 3,
-        startOffset: 0,
-        endOffset: 10,
-      },
-      content: { kind: "text", text: `function ${name}() {\n  return 1;\n}` },
-      metadata: {
-        kind: "code",
-        symbolType: "function",
-        symbolName: name,
-        scope: null,
-        nodeType: "function_declaration",
-        signature: `function ${name}()`,
-        doc: null,
-        modifiers: ["exported"],
-      },
-    },
-  };
-}
+const entity = (id, name, path = "a.ts") =>
+  graphEntity(id, name, path, { symbolType: "function" });
 
 test("queryGraphNeighborhood enriches callers from storage", () => {
   const graph = new SqliteGraphStorage("", { inMemory: true });
@@ -105,19 +71,8 @@ test("queryGraphNeighborhood enriches callers from storage", () => {
   graph.close();
 });
 
-function indexedFile(id, relativePath) {
-  return {
-    id,
-    collectionId: "c",
-    absolutePath: `/repo/${relativePath}`,
-    relativePath,
-    rootPath: "/repo",
-    sizeBytes: 1,
-    lastModifiedTime: 1,
-    kind: "code",
-    format: "typescript",
-  };
-}
+const indexedFile = (id, relativePath) =>
+  codeFile(relativePath, { id, collectionId: "c" });
 
 test("searchWorkspaceIndex does not graph-boost an isolated seed", async () => {
   const graph = new SqliteGraphStorage("", { inMemory: true });

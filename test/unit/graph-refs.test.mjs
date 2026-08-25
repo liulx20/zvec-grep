@@ -131,14 +131,8 @@ class Override {
 
 test("extractFileGraph resolves cross-file type REFS", async () => {
   const graph = new SqliteGraphStorage("", { inMemory: true });
-  const a = {
-    ...codeFile("a.ts"),
-    id: "file-a",
-  };
-  const b = {
-    ...codeFile("b.ts"),
-    id: "file-b",
-  };
+  const a = codeFile("a.ts", { id: "file-a" });
+  const b = codeFile("b.ts", { id: "file-b" });
   const textA = `export function run(x: Helper) { return x; }`;
   const textB = `export class Helper {}`;
 

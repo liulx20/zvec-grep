@@ -6,6 +6,7 @@ import {
   exploreSubgraph,
   queryGraphNeighborhood,
 } from "../../dist/engine/graph/index.js";
+import { entityStorage, graphEntity as entity } from "../helpers/graph.mjs";
 
 test("exploreSubgraph expands and RWR-scores multiple seeds without context assembly", () => {
   const graph = new SqliteGraphStorage("", { inMemory: true });
@@ -38,7 +39,7 @@ test("exploreSubgraph expands and RWR-scores multiple seeds without context asse
     ],
     [],
   );
-  const storage = storageFrom([
+  const storage = entityStorage([
     entity("left", "left", "flow.ts"),
     entity("bridge", "bridge", "flow.ts"),
     entity("right", "right", "flow.ts"),
@@ -79,7 +80,9 @@ test("exploreSubgraph bounds failed call-path attempts and edge reads", () => {
   }
   const graph = new TrackingGraph("", { inMemory: true });
   const rootIds = Array.from({ length: 32 }, (_, index) => `isolated-${index}`);
-  const storage = storageFrom(rootIds.map((id) => entity(id, id, `${id}.ts`)));
+  const storage = entityStorage(
+    rootIds.map((id) => entity(id, id, `${id}.ts`)),
+  );
 
   Object.assign(graph, storage);
   const result = exploreSubgraph(graph, {
@@ -124,7 +127,7 @@ test("explore reports truncated dynamic boundary output", () => {
     [],
     [],
   );
-  const storage = storageFrom([entity("root", "root", "root.ts")]);
+  const storage = entityStorage([entity("root", "root", "root.ts")]);
 
   Object.assign(graph, storage);
   const result = exploreGraph(graph, {
@@ -173,7 +176,7 @@ test("exploreSubgraph drops call paths that exceed the retained node budget", ()
     ],
     [],
   );
-  const storage = storageFrom([
+  const storage = entityStorage([
     ...rootIds.map((id) => entity(id, id, "paths.ts")),
     entity("bridge", "bridge", "paths.ts"),
   ]);
@@ -210,7 +213,7 @@ test("explore maxChars is a hard source-text budget", () => {
     [],
     [],
   );
-  const storage = storageFrom([
+  const storage = entityStorage([
     entity("large-symbol", "large", "large.ts", {
       symbolType: "function",
       text: `export function large() {\n${"x".repeat(8_000)}\n}`,
@@ -267,7 +270,7 @@ test("exploreSubgraph gives CALLS more RWR weight than REFS", () => {
     ],
     [],
   );
-  const storage = storageFrom([
+  const storage = entityStorage([
     entity("root", "root", "weighted.ts"),
     entity("called", "called", "weighted.ts"),
     entity("referenced", "referenced", "weighted.ts", {
@@ -317,7 +320,7 @@ test("exploreSubgraph preserves parallel edge kinds between the same nodes", () 
     ],
     [],
   );
-  const storage = storageFrom([
+  const storage = entityStorage([
     entity("root", "root", "parallel.ts"),
     entity("target", "target", "parallel.ts"),
   ]);
@@ -338,71 +341,6 @@ test("exploreSubgraph preserves parallel edge kinds between the same nodes", () 
   ]);
   graph.close();
 });
-
-function entity(id, name, path, opts = {}) {
-  const startLine = opts.startLine ?? 1;
-  const endLine = opts.endLine ?? 3;
-  return {
-    file: {
-      id: `file-${path}`,
-      collectionId: "c",
-      absolutePath: `/repo/${path}`,
-      relativePath: path,
-      rootPath: "/repo",
-      sizeBytes: 1,
-      lastModifiedTime: 1,
-      kind: "code",
-      format: "typescript",
-    },
-    entity: {
-      id,
-      fileId: `file-${path}`,
-      range: {
-        kind: "text",
-        startLine,
-        endLine,
-        startOffset: 0,
-        endOffset: 10,
-      },
-      content: {
-        kind: "text",
-        text: opts.text ?? `export class ${name} {\n  run() {}\n}`,
-      },
-      metadata: {
-        kind: "code",
-        symbolType: opts.symbolType ?? "class",
-        symbolName: name,
-        scope: null,
-        nodeType: "class_declaration",
-        signature: `class ${name}`,
-        doc: null,
-        modifiers: ["exported"],
-      },
-    },
-  };
-}
-
-function storageFrom(entities) {
-  const map = new Map(entities.map((item) => [item.entity.id, item]));
-  return {
-    findSymbolsByName(name) {
-      return [...map.values()].filter(
-        (item) => item.entity.metadata.symbolName === name,
-      );
-    },
-    findSymbolsByQuery(query) {
-      const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
-      return [...map.values()].filter((item) => {
-        const hay =
-          `${item.entity.metadata.symbolName} ${item.file.relativePath} ${item.entity.content.text}`.toLowerCase();
-        return terms.some((term) => hay.includes(term));
-      });
-    },
-    getEntity(id) {
-      return map.get(id) ?? null;
-    },
-  };
-}
 
 test("exploreGraph expands hierarchy, ranks files, assembles zvec content", () => {
   const graph = new SqliteGraphStorage("", { inMemory: true });
@@ -457,7 +395,7 @@ test("exploreGraph expands hierarchy, ranks files, assembles zvec content", () =
     [],
   );
 
-  const storage = storageFrom([
+  const storage = entityStorage([
     entity("Base", "Base", "base.ts"),
     entity("Child", "Child", "child.ts"),
     entity("helper", "helper", "child.ts", {
@@ -558,7 +496,7 @@ test("exploreGraph rescues a buried callable signature type as change surface", 
     ],
     [],
   );
-  const storage = storageFrom([
+  const storage = entityStorage([
     entity("create", "create", "service.ts", { symbolType: "function" }),
     entity("request", "CreateRequest", "model/request.ts", {
       symbolType: "class",
@@ -613,7 +551,7 @@ test("queryGraphNeighborhood supports impact direction", () => {
     ],
     [],
   );
-  const storage = storageFrom([
+  const storage = entityStorage([
     entity("user", "user", "a.ts", { symbolType: "function" }),
     entity("target", "target", "a.ts", { symbolType: "function" }),
   ]);
@@ -696,7 +634,7 @@ test("exploreGraph reports graph_unavailable", () => {
       };
     },
   };
-  Object.assign(graph, storageFrom([]));
+  Object.assign(graph, entityStorage([]));
   const result = exploreGraph(graph, { query: "X" });
   assert.equal(result.available, false);
   assert.equal(result.emptyReason, "graph_unavailable");
@@ -777,7 +715,7 @@ test("exploreGraph recalls natural-language seeds, preserves call paths, and rep
     [],
   );
 
-  const storage = storageFrom([
+  const storage = entityStorage([
     entity("login", "login", "src/auth.ts", {
       symbolType: "function",
       text: "export function login() {}",

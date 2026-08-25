@@ -11,6 +11,7 @@ import {
   extractGraph,
   extractSourceGraph,
   resolveGraph,
+  upsertGraph,
 } from "../helpers/graph.mjs";
 
 function containerName(input, memberId) {
@@ -28,6 +29,24 @@ function memberIn(input, container, name) {
 
 function candidateContainers(input, boundary) {
   return boundary.candidates.map((id) => containerName(input, id));
+}
+
+async function javaRtaTypes(path, id) {
+  const file = codeFile(path, { id, format: "java" });
+  const input = await extractGraph(
+    file,
+    `interface Runner { void run(); }
+class Alpha implements Runner { public void run() {} }
+class Beta implements Runner { public void run() {} }
+class Use { void invoke(Runner value) { value.run(); } }`,
+  );
+  return {
+    file,
+    input,
+    invoke: input.nodes.find((node) => node.name === "invoke"),
+    alphaRun: memberIn(input, "Alpha", "run"),
+    betaRun: memberIn(input, "Beta", "run"),
+  };
 }
 
 test("equivalent declarations resolve independently of load order", () => {
@@ -197,7 +216,7 @@ for (const fixture of [
   },
 ]) {
   test(`${fixture.name} resolves to the local method`, async () => {
-    const file = { ...codeFile(fixture.path), format: fixture.format };
+    const file = codeFile(fixture.path, { format: fixture.format });
     const source = { kind: "text", file, text: fixture.text };
     const fragments = await new CodeExtractor().extract(source);
     const graphInput = await extractFileGraph(source, fragments);
@@ -217,8 +236,8 @@ for (const fixture of [
 
 test("language-aware pending refs resolve cross-file builtin names", async () => {
   const graph = new SqliteGraphStorage("", { inMemory: true });
-  const callerFile = { ...codeFile("caller.ts"), id: "caller-file" };
-  const targetFile = { ...codeFile("target.ts"), id: "target-file" };
+  const callerFile = codeFile("caller.ts", { id: "caller-file" });
+  const targetFile = codeFile("target.ts", { id: "target-file" });
   const callerSource = {
     kind: "text",
     file: callerFile,
@@ -295,8 +314,8 @@ test("extractFileGraph resolves cross-file calls after second file indexed", asy
 
   assert.equal(aGraph.refs.filter((r) => r.ref_name === "target").length, 2);
 
-  graph.upsertFileGraph(aFile.id, aGraph.nodes, aGraph.edges, aGraph.refs);
-  graph.upsertFileGraph(bFile.id, bGraph.nodes, bGraph.edges, bGraph.refs);
+  upsertGraph(graph, aFile, aGraph);
+  upsertGraph(graph, bFile, bGraph);
   await graph.resolvePending();
 
   const caller = aGraph.nodes.find((n) => n.name === "caller");
@@ -414,14 +433,8 @@ for (const fixture of [
 }
 
 test("named import receiver calls resolve to the imported member", async () => {
-  const callerFile = {
-    ...codeFile("caller.ts"),
-    id: "named-import-caller",
-  };
-  const targetFile = {
-    ...codeFile("codec.ts"),
-    id: "named-import-target",
-  };
+  const callerFile = codeFile("caller.ts", { id: "named-import-caller" });
+  const targetFile = codeFile("codec.ts", { id: "named-import-target" });
   const callerSource = {
     kind: "text",
     file: callerFile,
@@ -627,10 +640,7 @@ class Child : public Base {
   },
 ]) {
   test(`${fixture.name} preserves receiver and resolves inherited method`, async () => {
-    const file = {
-      ...codeFile(fixture.path),
-      format: fixture.format,
-    };
+    const file = codeFile(fixture.path, { format: fixture.format });
     const input = await extractGraph(file, fixture.text);
     const contains = input.edges.filter((edge) => edge.kind === "CONTAINS");
     const containerFor = (id) =>
@@ -1108,25 +1118,17 @@ class Use {
 });
 
 test("changing the only maker from Alpha to Beta reprojects virtual dispatch", async () => {
-  const typesFile = {
-    ...codeFile("IncrementalTypes.java"),
-    id: "types",
-    format: "java",
-  };
-  const makerFile = { ...codeFile("Maker.java"), id: "maker", format: "java" };
-  const types = await extractGraph(
-    typesFile,
-    `interface Runner { void run(); }
-class Alpha implements Runner { public void run() {} }
-class Beta implements Runner { public void run() {} }
-class Use { void invoke(Runner value) { value.run(); } }`,
-  );
-  const invoke = types.nodes.find((node) => node.name === "invoke");
-  const alphaRun = memberIn(types, "Alpha", "run");
-  const betaRun = memberIn(types, "Beta", "run");
+  const {
+    file: typesFile,
+    input: types,
+    invoke,
+    alphaRun,
+    betaRun,
+  } = await javaRtaTypes("IncrementalTypes.java", "types");
+  const makerFile = codeFile("Maker.java", { id: "maker", format: "java" });
   assert.ok(invoke && alphaRun && betaRun);
   const graph = new SqliteGraphStorage("", { inMemory: true });
-  graph.upsertFileGraph(typesFile.id, types.nodes, types.edges, types.refs);
+  upsertGraph(graph, typesFile, types);
   await graph.resolvePending();
   assert.ok(graph.dynamicBoundaries([invoke.id], 10)[0]);
 
@@ -1134,7 +1136,7 @@ class Use { void invoke(Runner value) { value.run(); } }`,
     makerFile,
     "class Maker { void make() { new Alpha(); } }",
   );
-  graph.upsertFileGraph(makerFile.id, maker.nodes, maker.edges, maker.refs);
+  upsertGraph(graph, makerFile, maker);
   await graph.resolvePending();
 
   assert.equal(graph.dynamicBoundaries([invoke.id], 10).length, 0);
@@ -1163,32 +1165,23 @@ class Use { void invoke(Runner value) { value.run(); } }`,
 });
 
 test("deleting the only maker removes the stale RTA projection", async () => {
-  const typesFile = {
-    ...codeFile("DeleteMakerTypes.java"),
-    id: "delete-types",
-    format: "java",
-  };
-  const makerFile = {
-    ...codeFile("DeleteMaker.java"),
+  const {
+    file: typesFile,
+    input: types,
+    invoke,
+  } = await javaRtaTypes("DeleteMakerTypes.java", "delete-types");
+  const makerFile = codeFile("DeleteMaker.java", {
     id: "delete-maker",
     format: "java",
-  };
-  const types = await extractGraph(
-    typesFile,
-    `interface Runner { void run(); }
-class Alpha implements Runner { public void run() {} }
-class Beta implements Runner { public void run() {} }
-class Use { void invoke(Runner value) { value.run(); } }`,
-  );
-  const invoke = types.nodes.find((node) => node.name === "invoke");
+  });
   assert.ok(invoke);
   const maker = await extractGraph(
     makerFile,
     "class Maker { void make() { new Alpha(); } }",
   );
   const graph = new SqliteGraphStorage("", { inMemory: true });
-  graph.upsertFileGraph(typesFile.id, types.nodes, types.edges, types.refs);
-  graph.upsertFileGraph(makerFile.id, maker.nodes, maker.edges, maker.refs);
+  upsertGraph(graph, typesFile, types);
+  upsertGraph(graph, makerFile, maker);
   await graph.resolvePending();
   assert.equal(graph.dynamicBoundaries([invoke.id], 10).length, 0);
 
@@ -1204,30 +1197,14 @@ class Use { void invoke(Runner value) { value.run(); } }`,
 });
 
 test("removing one of multiple Alpha makers keeps the stable RTA projection", async () => {
-  const typesFile = {
-    ...codeFile("MultiMakerTypes.java"),
-    id: "multi-types",
-    format: "java",
-  };
-  const makerAFile = {
-    ...codeFile("MakerA.java"),
-    id: "maker-a",
-    format: "java",
-  };
-  const makerBFile = {
-    ...codeFile("MakerB.java"),
-    id: "maker-b",
-    format: "java",
-  };
-  const types = await extractGraph(
-    typesFile,
-    `interface Runner { void run(); }
-class Alpha implements Runner { public void run() {} }
-class Beta implements Runner { public void run() {} }
-class Use { void invoke(Runner value) { value.run(); } }`,
-  );
-  const invoke = types.nodes.find((node) => node.name === "invoke");
-  const alphaRun = memberIn(types, "Alpha", "run");
+  const {
+    file: typesFile,
+    input: types,
+    invoke,
+    alphaRun,
+  } = await javaRtaTypes("MultiMakerTypes.java", "multi-types");
+  const makerAFile = codeFile("MakerA.java", { id: "maker-a", format: "java" });
+  const makerBFile = codeFile("MakerB.java", { id: "maker-b", format: "java" });
   assert.ok(invoke && alphaRun);
   const makerA = await extractGraph(
     makerAFile,
@@ -1238,9 +1215,9 @@ class Use { void invoke(Runner value) { value.run(); } }`,
     "class MakerB { void make() { new Alpha(); } }",
   );
   const graph = new SqliteGraphStorage("", { inMemory: true });
-  graph.upsertFileGraph(typesFile.id, types.nodes, types.edges, types.refs);
-  graph.upsertFileGraph(makerAFile.id, makerA.nodes, makerA.edges, makerA.refs);
-  graph.upsertFileGraph(makerBFile.id, makerB.nodes, makerB.edges, makerB.refs);
+  upsertGraph(graph, typesFile, types);
+  upsertGraph(graph, makerAFile, makerA);
+  upsertGraph(graph, makerBFile, makerB);
   await graph.resolvePending();
 
   graph.deleteFileGraph(makerAFile.id);
@@ -1323,9 +1300,9 @@ class Use { void invoke(Target value) { value.run(1); } }
 });
 
 test("resolved dispatch facts are recomputed when a later override is indexed", async () => {
-  const workerFile = { ...codeFile("worker.ts"), id: "worker-file" };
-  const callerFile = { ...codeFile("caller.ts"), id: "caller-file" };
-  const specialFile = { ...codeFile("special.ts"), id: "special-file" };
+  const workerFile = codeFile("worker.ts", { id: "worker-file" });
+  const callerFile = codeFile("caller.ts", { id: "caller-file" });
+  const specialFile = codeFile("special.ts", { id: "special-file" });
   const worker = await extractGraph(
     workerFile,
     "export class Worker { help() {} }",
@@ -1339,8 +1316,8 @@ test("resolved dispatch facts are recomputed when a later override is indexed", 
   assert.ok(invoke && workerHelp);
 
   const graph = new SqliteGraphStorage("", { inMemory: true });
-  graph.upsertFileGraph(workerFile.id, worker.nodes, worker.edges, worker.refs);
-  graph.upsertFileGraph(callerFile.id, caller.nodes, caller.edges, caller.refs);
+  upsertGraph(graph, workerFile, worker);
+  upsertGraph(graph, callerFile, caller);
   await graph.resolvePending({ files: [workerFile, callerFile] });
   assert.deepEqual(
     graph.callees(invoke.id, 1, 10).map((candidate) => candidate.id),
@@ -1368,9 +1345,9 @@ test("resolved dispatch facts are recomputed when a later override is indexed", 
 });
 
 test("target file rebuild preserves structured dispatch facts", async () => {
-  const workerFile = { ...codeFile("worker.ts"), id: "worker-file" };
-  const otherFile = { ...codeFile("other.ts"), id: "other-file" };
-  const callerFile = { ...codeFile("caller.ts"), id: "caller-file" };
+  const workerFile = codeFile("worker.ts", { id: "worker-file" });
+  const otherFile = codeFile("other.ts", { id: "other-file" });
+  const callerFile = codeFile("caller.ts", { id: "caller-file" });
   const worker = await extractGraph(
     workerFile,
     "export class Worker { help() {} }",
@@ -1388,12 +1365,12 @@ test("target file rebuild preserves structured dispatch facts", async () => {
   assert.ok(invoke && workerHelp);
 
   const graph = new SqliteGraphStorage("", { inMemory: true });
-  graph.upsertFileGraph(workerFile.id, worker.nodes, worker.edges, worker.refs);
-  graph.upsertFileGraph(otherFile.id, other.nodes, other.edges, other.refs);
-  graph.upsertFileGraph(callerFile.id, caller.nodes, caller.edges, caller.refs);
+  upsertGraph(graph, workerFile, worker);
+  upsertGraph(graph, otherFile, other);
+  upsertGraph(graph, callerFile, caller);
   await graph.resolvePending({ files: [workerFile, otherFile, callerFile] });
 
-  graph.upsertFileGraph(workerFile.id, worker.nodes, worker.edges, worker.refs);
+  upsertGraph(graph, workerFile, worker);
   await graph.resolvePending({ files: [workerFile, otherFile, callerFile] });
 
   assert.deepEqual(
