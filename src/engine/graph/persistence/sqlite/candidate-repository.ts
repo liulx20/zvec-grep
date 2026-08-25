@@ -68,13 +68,13 @@ export class SemanticCandidateRepository {
       return_type: string;
       container_name: string | null;
     }>(
-      `SELECT s.name,s.id,s.file_id,s.return_type,p.name AS container_name
-       FROM symbols s
-       LEFT JOIN contains c ON c.child_id=s.id
-       LEFT JOIN symbols p ON p.id=c.parent_id
-       WHERE s.name IS NOT NULL AND s.return_type IS NOT NULL
-         AND s.kind IN (${CALLABLE_SYMBOL_KINDS_SQL})
-       ORDER BY s.name,s.file_id,s.id`,
+      `SELECT n.name,n.id,n.file_path AS file_id,n.return_type,p.name AS container_name
+       FROM nodes n
+       LEFT JOIN edges c ON c.target=n.id AND c.kind='contains'
+       LEFT JOIN nodes p ON p.id=c.source
+       WHERE n.name IS NOT NULL AND n.return_type IS NOT NULL
+         AND n.kind IN (${CALLABLE_SYMBOL_KINDS_SQL})
+       ORDER BY n.name,n.file_path,n.id`,
     )) {
       const candidates = result.get(row.name) ?? [];
       if (candidates.length < 100)
@@ -96,29 +96,31 @@ export class SemanticCandidateRepository {
     return this.database
       .all<{ id: string }>(
         `WITH RECURSIVE visible(file_id) AS (
-           SELECT file_id FROM symbols WHERE id=?
+           SELECT file_path AS file_id FROM nodes WHERE id=?
            UNION SELECT value FROM json_each(?)
-           UNION SELECT file_id FROM symbols WHERE ?=1
-           UNION SELECT imports.dst_id FROM edges imports
-           JOIN visible source_file ON source_file.file_id=imports.src_id
-           WHERE imports.kind='IMPORTS'
-             AND imports.src_is_file=1 AND imports.dst_is_file=1
-             AND ?=1
+           UNION SELECT file_path AS file_id FROM nodes WHERE ?=1
+           UNION SELECT target.file_path AS file_id
+           FROM edges imports
+           JOIN nodes source_node ON source_node.id=imports.source
+           JOIN visible source_file ON source_file.file_id=source_node.file_path
+           JOIN nodes target ON target.id=imports.target
+           WHERE imports.kind='imports' AND ?=1
          )
-         SELECT DISTINCT registration.dst_id AS id
+         SELECT DISTINCT registration.target AS id
          FROM edges registration
-         JOIN symbols owner ON owner.id=registration.src_id
-         JOIN symbols target ON target.id=registration.dst_id
-         WHERE registration.kind='REFS' AND registration.rel='function'
-           AND registration.source_language IN ('c','cpp')
-           AND owner.file_id IN (SELECT file_id FROM visible)
+         JOIN nodes owner ON owner.id=registration.source
+         JOIN nodes target ON target.id=registration.target
+         WHERE registration.kind='references'
+           AND json_extract(registration.metadata,'$.rel')='function'
+           AND json_extract(registration.metadata,'$.sourceLanguage') IN ('c','cpp')
+           AND owner.file_path IN (SELECT file_id FROM visible)
            AND target.kind IN (${CALLABLE_SYMBOL_KINDS_SQL})
-           AND json_extract(registration.resolution_hints,
-                            '$.functionPointerRegistration.field')=?
-           AND json_extract(registration.resolution_hints,
-                            '$.functionPointerRegistration.containerType')
+           AND json_extract(registration.metadata,
+                            '$.resolutionHints.functionPointerRegistration.field')=?
+           AND json_extract(registration.metadata,
+                            '$.resolutionHints.functionPointerRegistration.containerType')
                IN (SELECT value FROM json_each(?))
-         ORDER BY target.qualified_name,target.name,target.file_id,target.id
+         ORDER BY target.qualified_name,target.name,target.file_path,target.id
          LIMIT ?`,
         query.sourceId,
         JSON.stringify(query.visibleFileIds ?? []),
@@ -159,19 +161,20 @@ export class SemanticCandidateRepository {
     return (
       this.database.one<{ present: number }>(
         `WITH RECURSIVE visible(file_id) AS (
-           SELECT file_id FROM symbols WHERE id=?
+           SELECT file_path AS file_id FROM nodes WHERE id=?
            UNION SELECT value FROM json_each(?)
-           UNION SELECT file_id FROM symbols WHERE ?=1
-           UNION SELECT imports.dst_id FROM edges imports
-           JOIN visible source_file ON source_file.file_id=imports.src_id
-           WHERE imports.kind='IMPORTS'
-             AND imports.src_is_file=1 AND imports.dst_is_file=1
-             AND ?=1
+           UNION SELECT file_path AS file_id FROM nodes WHERE ?=1
+           UNION SELECT target.file_path AS file_id
+           FROM edges imports
+           JOIN nodes source_node ON source_node.id=imports.source
+           JOIN visible source_file ON source_file.file_id=source_node.file_path
+           JOIN nodes target ON target.id=imports.target
+           WHERE imports.kind='imports' AND ?=1
          )
-         SELECT 1 AS present FROM symbols
+         SELECT 1 AS present FROM nodes
          WHERE name IN (SELECT value FROM json_each(?))
            AND kind IN ('interface','trait','abstract_class')
-           AND file_id IN (SELECT file_id FROM visible)
+           AND file_path IN (SELECT file_id FROM visible)
          LIMIT 1`,
         query.sourceId,
         JSON.stringify(query.visibleFileIds ?? []),
@@ -193,38 +196,39 @@ export class SemanticCandidateRepository {
         rta_active: number;
       }>(
         `WITH RECURSIVE visible(file_id) AS (
-         SELECT file_id FROM symbols WHERE id=?
+         SELECT file_path AS file_id FROM nodes WHERE id=?
          UNION SELECT value FROM json_each(?)
-         UNION SELECT file_id FROM symbols WHERE ?=1
-         UNION SELECT imports.dst_id FROM edges imports
-         JOIN visible source_file ON source_file.file_id=imports.src_id
-         WHERE imports.kind='IMPORTS'
-           AND imports.src_is_file=1 AND imports.dst_is_file=1
-           AND ?=1
+         UNION SELECT file_path AS file_id FROM nodes WHERE ?=1
+         UNION SELECT target.file_path AS file_id
+         FROM edges imports
+         JOIN nodes source_node ON source_node.id=imports.source
+         JOIN visible source_file ON source_file.file_id=source_node.file_path
+         JOIN nodes target ON target.id=imports.target
+         WHERE imports.kind='imports' AND ?=1
        ), roots(id,kind) AS (
-         SELECT id,kind FROM symbols
+         SELECT id,kind FROM nodes
          WHERE name IN (SELECT value FROM json_each(?))
-           AND file_id IN (SELECT file_id FROM visible)
+           AND file_path IN (SELECT file_id FROM visible)
        ), required_interfaces(id) AS (
          SELECT id FROM roots WHERE kind IN (SELECT value FROM json_each(?))
          UNION
-         SELECT inheritance.dst_id FROM edges inheritance
-         JOIN required_interfaces required ON required.id=inheritance.src_id
-         JOIN symbols inherited ON inherited.id=inheritance.dst_id
-         WHERE inheritance.kind='INHERITS'
-           AND inheritance.rel IN (SELECT value FROM json_each(?))
+         SELECT inheritance.target AS id FROM edges inheritance
+         JOIN required_interfaces required ON required.id=inheritance.source
+         JOIN nodes inherited ON inherited.id=inheritance.target
+         WHERE inheritance.kind='extends'
+           AND json_extract(inheritance.metadata,'$.rel') IN (SELECT value FROM json_each(?))
            AND inherited.kind IN (SELECT value FROM json_each(?))
        ), containers(id) AS (
          SELECT id FROM roots
          UNION
-         SELECT e.src_id FROM edges e JOIN containers c ON c.id=e.dst_id
-         WHERE e.kind='INHERITS'
-           AND e.rel IN (SELECT value FROM json_each(?))
+         SELECT e.source AS id FROM edges e JOIN containers c ON c.id=e.target
+         WHERE e.kind='extends'
+           AND json_extract(e.metadata,'$.rel') IN (SELECT value FROM json_each(?))
        ), provider_roots(id) AS (
          SELECT id FROM containers
          UNION
-         SELECT id FROM symbols
-         WHERE file_id IN (SELECT file_id FROM visible)
+         SELECT id FROM nodes
+         WHERE file_path IN (SELECT file_id FROM visible)
            AND kind IN ('class','interface','trait','abstract_class')
            AND ?=0
            AND EXISTS(
@@ -234,20 +238,20 @@ export class SemanticCandidateRepository {
        ), provider_closure(container_id,provider_id,depth,path) AS (
          SELECT id,id,0,',' || id || ',' FROM provider_roots
          UNION ALL
-         SELECT provider.container_id,inheritance.dst_id,provider.depth+1,
-                provider.path || inheritance.dst_id || ','
+         SELECT provider.container_id,inheritance.target AS provider_id,provider.depth+1,
+                provider.path || inheritance.target || ','
          FROM provider_closure provider
-         JOIN edges inheritance ON inheritance.src_id=provider.provider_id
-         WHERE inheritance.kind='INHERITS'
-           AND inheritance.rel IN (SELECT value FROM json_each(?))
+         JOIN edges inheritance ON inheritance.source=provider.provider_id
+         WHERE inheritance.kind='extends'
+           AND json_extract(inheritance.metadata,'$.rel') IN (SELECT value FROM json_each(?))
            AND provider.depth<32
-           AND instr(provider.path,',' || inheritance.dst_id || ',')=0
+           AND instr(provider.path,',' || inheritance.target || ',')=0
        ), candidate_containers(id) AS (
          SELECT id FROM containers
          UNION
          SELECT DISTINCT candidate.id
-         FROM symbols candidate
-         WHERE candidate.file_id IN (SELECT file_id FROM visible)
+         FROM nodes candidate
+         WHERE candidate.file_path IN (SELECT file_id FROM visible)
            AND candidate.kind NOT IN ('interface','trait')
            AND EXISTS(
              SELECT 1 FROM roots
@@ -255,37 +259,35 @@ export class SemanticCandidateRepository {
            )
            AND NOT EXISTS(
              SELECT 1 FROM required_interfaces required_interface
-             JOIN contains required_owned
-               ON required_owned.parent_id=required_interface.id
-             JOIN symbols required ON required.id=required_owned.child_id
+             JOIN edges required_owned
+               ON required_owned.source=required_interface.id AND required_owned.kind='contains'
+             JOIN nodes required ON required.id=required_owned.target
              WHERE NOT EXISTS(
                  SELECT 1 FROM provider_closure provider
-                 JOIN contains provided_owned
-                   ON provided_owned.parent_id=provider.provider_id
-                 JOIN symbols provided ON provided.id=provided_owned.child_id
+                 JOIN edges provided_owned
+                   ON provided_owned.source=provider.provider_id AND provided_owned.kind='contains'
+                 JOIN nodes provided ON provided.id=provided_owned.target
                  WHERE provider.container_id=candidate.id
                    AND provided.name=required.name
-                   AND (required.arity IS NULL OR provided.arity IS NULL
-                        OR provided.arity=required.arity)
                )
            )
        ), provider_members(id,container_id,container_kind,depth,member_kind) AS (
          SELECT DISTINCT member.id,scope.id,scope_symbol.kind,provider.depth,member.kind
          FROM candidate_containers scope
-         JOIN symbols scope_symbol ON scope_symbol.id=scope.id
+         JOIN nodes scope_symbol ON scope_symbol.id=scope.id
          JOIN provider_closure provider ON provider.container_id=scope.id
-         JOIN contains owned ON owned.parent_id=provider.provider_id
-         JOIN symbols member ON member.id=owned.child_id
+         JOIN edges owned ON owned.source=provider.provider_id AND owned.kind='contains'
+         JOIN nodes member ON member.id=owned.target
          WHERE member.name=?
            AND member.kind IN (${CALLABLE_SYMBOL_KINDS_SQL})
            AND (?<0 OR member.arity IS NULL OR member.arity=?)
          UNION
          SELECT DISTINCT member.id,scope.id,scope_symbol.kind,provider.depth,member.kind
          FROM candidate_containers scope
-         JOIN symbols scope_symbol ON scope_symbol.id=scope.id
+         JOIN nodes scope_symbol ON scope_symbol.id=scope.id
          JOIN provider_closure provider ON provider.container_id=scope.id
-         JOIN symbols provider_symbol ON provider_symbol.id=provider.provider_id
-         JOIN symbols member
+         JOIN nodes provider_symbol ON provider_symbol.id=provider.provider_id
+         JOIN nodes member
            ON member.qualified_name=provider_symbol.qualified_name || '::' || ?
           AND member.kind IN (${CALLABLE_SYMBOL_KINDS_SQL})
          WHERE (?<0 OR member.arity IS NULL OR member.arity=?)
@@ -301,10 +303,10 @@ export class SemanticCandidateRepository {
           AND nearest.depth=member.depth
          WHERE member.member_kind<>'abstract_method'
        ), instantiated_containers(id) AS (
-         SELECT DISTINCT made.dst_id
+         SELECT DISTINCT made.target AS id
          FROM edges made
-         JOIN candidate_members candidate ON candidate.container_id=made.dst_id
-         WHERE made.kind='INSTANTIATES' AND made.dst_is_file=0
+         JOIN candidate_members candidate ON candidate.container_id=made.target
+         WHERE made.kind='instantiates'
        ), rta_state(active) AS (
          SELECT EXISTS(SELECT 1 FROM instantiated_containers)
        ), resolved_candidates AS (
@@ -320,9 +322,9 @@ export class SemanticCandidateRepository {
          rta.active AS rta_active
        FROM candidate_members candidate
        CROSS JOIN rta_state rta
-       JOIN symbols member ON member.id=candidate.id
-       LEFT JOIN contains ownership ON ownership.child_id=member.id
-       LEFT JOIN symbols owner ON owner.id=ownership.parent_id
+       JOIN nodes member ON member.id=candidate.id
+       LEFT JOIN edges ownership ON ownership.target=member.id AND ownership.kind='contains'
+       LEFT JOIN nodes owner ON owner.id=ownership.source
        WHERE rta.active=0 OR candidate.container_id IN (
          SELECT id FROM instantiated_containers
        )

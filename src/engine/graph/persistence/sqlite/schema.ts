@@ -1,69 +1,110 @@
-export const SQLITE_GRAPH_SCHEMA_VERSION = 4;
+export const SQLITE_GRAPH_SCHEMA_VERSION = 1;
 
 export const SQLITE_GRAPH_INDEXES = `
-CREATE INDEX IF NOT EXISTS symbols_file_id_idx ON symbols(file_id);
-CREATE INDEX IF NOT EXISTS symbols_name_idx ON symbols(name) WHERE name IS NOT NULL;
-CREATE INDEX IF NOT EXISTS symbols_qualified_name_idx ON symbols(qualified_name) WHERE qualified_name IS NOT NULL;
-CREATE INDEX IF NOT EXISTS edges_src_kind_idx ON edges(src_id,src_is_file,kind,dst_id);
-CREATE INDEX IF NOT EXISTS edges_dst_kind_idx ON edges(dst_id,dst_is_file,kind,src_id);
-CREATE INDEX IF NOT EXISTS edges_member_idx ON edges(member_name,kind);
-CREATE INDEX IF NOT EXISTS contains_child_idx ON contains(child_id);
-CREATE INDEX IF NOT EXISTS unresolved_refs_name_idx ON unresolved_refs(ref_name,status);
-CREATE INDEX IF NOT EXISTS unresolved_refs_owner_idx ON unresolved_refs(owner_id,owner_is_file);
-CREATE INDEX IF NOT EXISTS unresolved_refs_retry_idx ON unresolved_refs(ref_name,status,last_attempt,id);
-CREATE INDEX IF NOT EXISTS unresolved_refs_member_idx ON unresolved_refs(member_name,status);
-CREATE INDEX IF NOT EXISTS edge_candidates_target_idx ON edge_candidates(target_id);
+CREATE INDEX IF NOT EXISTS idx_nodes_kind ON nodes(kind);
+CREATE INDEX IF NOT EXISTS idx_nodes_name ON nodes(name);
+CREATE INDEX IF NOT EXISTS idx_nodes_qualified_name ON nodes(qualified_name);
+CREATE INDEX IF NOT EXISTS idx_nodes_file_path ON nodes(file_path);
+CREATE INDEX IF NOT EXISTS idx_nodes_language ON nodes(language);
+CREATE INDEX IF NOT EXISTS idx_nodes_file_line ON nodes(file_path, start_line);
+CREATE INDEX IF NOT EXISTS idx_nodes_lower_name ON nodes(lower(name));
+CREATE INDEX IF NOT EXISTS idx_edges_kind ON edges(kind);
+CREATE INDEX IF NOT EXISTS idx_edges_source_kind ON edges(source, kind);
+CREATE INDEX IF NOT EXISTS idx_edges_target_kind ON edges(target, kind);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_edges_identity
+  ON edges(source, target, kind, IFNULL(line, -1), IFNULL(col, -1));
+CREATE INDEX IF NOT EXISTS idx_files_language ON files(language);
+CREATE INDEX IF NOT EXISTS idx_files_modified_at ON files(modified_at);
+CREATE INDEX IF NOT EXISTS idx_files_generated ON files(path) WHERE generated = 1;
+CREATE INDEX IF NOT EXISTS idx_unresolved_from_node ON unresolved_refs(from_node_id);
+CREATE INDEX IF NOT EXISTS idx_unresolved_name ON unresolved_refs(reference_name);
+CREATE INDEX IF NOT EXISTS idx_unresolved_file_path ON unresolved_refs(file_path);
+CREATE INDEX IF NOT EXISTS idx_unresolved_from_name ON unresolved_refs(from_node_id, reference_name);
+CREATE INDEX IF NOT EXISTS idx_unresolved_status ON unresolved_refs(status);
+CREATE INDEX IF NOT EXISTS idx_unresolved_failed_tail ON unresolved_refs(name_tail) WHERE status = 'failed';
+
+CREATE TRIGGER IF NOT EXISTS restore_resolved_ref_on_edge_delete
+AFTER DELETE ON edges
+BEGIN
+  UPDATE unresolved_refs SET status='pending'
+  WHERE status='resolved'
+    AND from_node_id=OLD.source
+    AND reference_name=COALESCE(json_extract(OLD.metadata,'$.refName'),'');
+END;
+
 `;
 
 export const SQLITE_GRAPH_SCHEMA = `
 PRAGMA foreign_keys = ON;
-CREATE TABLE IF NOT EXISTS graph_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;
-CREATE TABLE IF NOT EXISTS files (
- id TEXT PRIMARY KEY,
- absolute_path TEXT, relative_path TEXT, root_path TEXT,
- size_bytes INTEGER, last_modified_time INTEGER, kind TEXT, format TEXT
-) STRICT;
-CREATE TABLE IF NOT EXISTS symbols (
- id TEXT PRIMARY KEY, file_id TEXT NOT NULL REFERENCES files(id) ON DELETE CASCADE,
- name TEXT, qualified_name TEXT, kind TEXT NOT NULL, is_exported INTEGER NOT NULL CHECK (is_exported IN (0,1)),
- signature TEXT, arity INTEGER, return_type TEXT, range_json TEXT,
- scope TEXT, node_type TEXT, modifiers_json TEXT
-) STRICT;
-CREATE TABLE IF NOT EXISTS unresolved_refs (
- id TEXT PRIMARY KEY, owner_id TEXT NOT NULL,
- owner_is_file INTEGER NOT NULL CHECK (owner_is_file IN (0,1)),
- ref_name TEXT NOT NULL, ref_kind TEXT NOT NULL, line INTEGER NOT NULL,
- imported_name TEXT, local_name TEXT,
- source_language TEXT,
- receiver_kind TEXT, receiver_name TEXT, member_name TEXT, resolution_hints TEXT,
- status TEXT NOT NULL CHECK (status IN ('pending','failed','external','dynamic')),
- last_attempt INTEGER NOT NULL DEFAULT 0,
- dynamic_reason TEXT
-) STRICT;
-CREATE TABLE IF NOT EXISTS contains (
- parent_id TEXT NOT NULL REFERENCES symbols(id) ON DELETE CASCADE,
- child_id TEXT NOT NULL REFERENCES symbols(id) ON DELETE CASCADE,
- PRIMARY KEY(parent_id,child_id)
-) STRICT, WITHOUT ROWID;
+
+CREATE TABLE IF NOT EXISTS schema_versions (
+    version INTEGER PRIMARY KEY,
+    applied_at INTEGER NOT NULL,
+    description TEXT
+);
+
+CREATE TABLE IF NOT EXISTS nodes (
+    id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    name TEXT NOT NULL,
+    qualified_name TEXT NOT NULL,
+    file_path TEXT NOT NULL,
+    language TEXT NOT NULL,
+    start_line INTEGER NOT NULL,
+    end_line INTEGER NOT NULL,
+    start_column INTEGER NOT NULL,
+    end_column INTEGER NOT NULL,
+    docstring TEXT,
+    signature TEXT,
+    arity INTEGER,
+    visibility TEXT,
+    is_exported INTEGER DEFAULT 0,
+    is_async INTEGER DEFAULT 0,
+    is_static INTEGER DEFAULT 0,
+    is_abstract INTEGER DEFAULT 0,
+    decorators TEXT,
+    type_parameters TEXT,
+    return_type TEXT,
+    updated_at INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS edges (
- id TEXT PRIMARY KEY,
- src_id TEXT NOT NULL, dst_id TEXT NOT NULL,
- src_is_file INTEGER NOT NULL CHECK(src_is_file IN (0,1)),
- dst_is_file INTEGER NOT NULL CHECK(dst_is_file IN (0,1)),
- kind TEXT NOT NULL CHECK (kind IN ('CALLS','REFS','INHERITS','IMPORTS','INSTANTIATES')),
- rel TEXT NOT NULL, count INTEGER NOT NULL DEFAULT 1,
- first_line INTEGER NOT NULL DEFAULT 0, ref_name TEXT NOT NULL DEFAULT '',
- source_language TEXT, imported_name TEXT, local_name TEXT,
- receiver_kind TEXT, receiver_name TEXT, member_name TEXT, resolution_hints TEXT,
- provenance TEXT NOT NULL DEFAULT 'static' CHECK (provenance IN ('static','heuristic')),
- confidence REAL NOT NULL DEFAULT 1.0,
- evidence TEXT
-) STRICT;
-CREATE TABLE IF NOT EXISTS edge_candidates (
- edge_id TEXT NOT NULL REFERENCES unresolved_refs(id) ON DELETE CASCADE,
- target_id TEXT NOT NULL REFERENCES symbols(id) ON DELETE CASCADE,
- reason TEXT NOT NULL, confidence REAL NOT NULL,
- PRIMARY KEY(edge_id,target_id)
-) STRICT, WITHOUT ROWID;
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source TEXT NOT NULL,
+    target TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    metadata TEXT,
+    line INTEGER,
+    col INTEGER,
+    provenance TEXT DEFAULT NULL
+);
+
+CREATE TABLE IF NOT EXISTS files (
+    path TEXT PRIMARY KEY,
+    content_hash TEXT NOT NULL,
+    language TEXT NOT NULL,
+    size INTEGER NOT NULL,
+    modified_at INTEGER NOT NULL,
+    indexed_at INTEGER NOT NULL,
+    node_count INTEGER DEFAULT 0,
+    errors TEXT,
+    generated INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS unresolved_refs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    from_node_id TEXT NOT NULL,
+    reference_name TEXT NOT NULL,
+    reference_kind TEXT NOT NULL,
+    line INTEGER NOT NULL,
+    col INTEGER NOT NULL,
+    candidates TEXT,
+    file_path TEXT NOT NULL DEFAULT '',
+    language TEXT NOT NULL DEFAULT 'unknown',
+    status TEXT NOT NULL DEFAULT 'pending',
+    name_tail TEXT NOT NULL DEFAULT '',
+    metadata TEXT
+);
+
 ${SQLITE_GRAPH_INDEXES}
 `;

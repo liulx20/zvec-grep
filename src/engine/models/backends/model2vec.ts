@@ -300,7 +300,7 @@ export class Model2VecEmbeddingModel extends BaseEmbeddingModel {
 
     await mkdir(dirname(localPath), { recursive: true });
     const partialPath = `${localPath}.part-${process.pid}-${Date.now()}`;
-    const url = `https://huggingface.co/${this.entry.repo}/resolve/${this.entry.revision}/${remoteFile}`;
+    const url = `https://hf-mirror.com/${this.entry.repo}/resolve/${this.entry.revision}/${remoteFile}`;
     try {
       await this.dependencies.download(url, partialPath, (progress) => {
         downloadProgress.report({

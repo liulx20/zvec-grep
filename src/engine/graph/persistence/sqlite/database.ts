@@ -47,13 +47,13 @@ export class SqliteGraphDatabase {
   }
 
   hasResolvedProjections(): boolean {
-    // Resolver marks this eagerly. The indexed fallback also covers tools and
-    // tests that insert a dynamic projection directly on the same connection.
+    // Legacy resolver marks this eagerly by inserting heuristic edges. The
+    // kernel schema does not use a separate 'dynamic' status.
     if (!this.resolvedProjections) {
       this.resolvedProjections = Boolean(
         this.db
           .prepare(
-            "SELECT 1 FROM unresolved_refs WHERE status='dynamic' LIMIT 1",
+            "SELECT 1 FROM edges WHERE provenance = 'heuristic' LIMIT 1",
           )
           .get(),
       );
@@ -135,13 +135,13 @@ export class SqliteGraphDatabase {
   }
 
   private detectResolvedProjections(): boolean {
+    // Kernel-generated edges may carry a 'heuristic' provenance; resolved
+    // projections are only relevant when the legacy resolver has run.
     return Boolean(
       this.db
         .prepare(
           `SELECT 1 AS present FROM edges
-           WHERE provenance='heuristic' OR evidence IS NOT NULL
-           UNION ALL
-           SELECT 1 AS present FROM unresolved_refs WHERE status='dynamic'
+           WHERE provenance = 'heuristic'
            LIMIT 1`,
         )
         .get(),
@@ -149,7 +149,7 @@ export class SqliteGraphDatabase {
   }
 
   private isEmpty(): boolean {
-    return !this.db.prepare("SELECT 1 FROM symbols LIMIT 1").get();
+    return !this.db.prepare("SELECT 1 FROM nodes LIMIT 1").get();
   }
 
   private beginBulkLoad(): void {
@@ -187,7 +187,14 @@ function openDatabase(
       db.exec("PRAGMA journal_mode=WAL");
       db.exec("PRAGMA synchronous=NORMAL");
       const existingSchema = hasSchema(db);
-      if (existingSchema) ensureVersion(db, false);
+      if (existingSchema) {
+        ensureVersion(db, false);
+      } else {
+        // A stale database (pre-migration schema with src_id/dst_id columns
+        // or legacy symbols/contains tables) was detected. Drop everything
+        // so CREATE TABLE IF NOT EXISTS creates the new schema cleanly.
+        dropAllTables(db);
+      }
       db.exec(SQLITE_GRAPH_SCHEMA);
       if (!existingSchema) ensureVersion(db, false);
     }
@@ -202,28 +209,62 @@ function openDatabase(
   }
 }
 
+/**
+ * Drop every user table so the schema can be recreated from scratch.
+ * Used when a stale pre-migration database is detected.
+ */
+function dropAllTables(db: NodeDatabaseSync): void {
+  const tables = db
+    .prepare(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
+    )
+    .all() as { name: string }[];
+  db.exec("PRAGMA foreign_keys=OFF");
+  for (const { name } of tables) {
+    // name is a validated table name from sqlite_master; safe to interpolate.
+    db.exec(`DROP TABLE IF EXISTS "${name}"`);
+  }
+  db.exec("PRAGMA foreign_keys=ON");
+}
+
+/**
+ * A stale database that predates the migration (symbols / contains /
+ * edge_candidates tables, or an edges table with src_id instead of
+ * source) is detected and rejected so the caller can recreate it.
+ */
 function hasSchema(db: NodeDatabaseSync): boolean {
-  return (
+  const hasVersionTable =
     db
       .prepare(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='graph_meta'",
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_versions'",
       )
-      .get() !== undefined
-  );
+      .get() !== undefined;
+  if (!hasVersionTable) return false;
+  // Reject legacy schemas that have the version table but still use the
+  // old column names (src_id / dst_id instead of source / target).
+  const edgeColumns = db.prepare("PRAGMA table_info(edges)").all() as {
+    name: string;
+  }[];
+  if (edgeColumns.length === 0) return false;
+  return edgeColumns.some((col) => col.name === "source");
 }
 
 function ensureVersion(db: NodeDatabaseSync, readOnly: boolean): void {
   const row = db
-    .prepare("SELECT value FROM graph_meta WHERE key='schema_version'")
-    .get() as { value: string } | undefined;
+    .prepare("SELECT version FROM schema_versions ORDER BY version DESC LIMIT 1")
+    .get() as { version: number } | undefined;
   if (!row) {
     if (readOnly) throw new Error("SQLite graph schema version is missing");
     db.prepare(
-      "INSERT INTO graph_meta(key,value) VALUES('schema_version',?)",
-    ).run(String(SQLITE_GRAPH_SCHEMA_VERSION));
-  } else if (Number(row.value) !== SQLITE_GRAPH_SCHEMA_VERSION) {
+      "INSERT INTO schema_versions(version, applied_at, description) VALUES(?, ?, ?)",
+    ).run(
+      SQLITE_GRAPH_SCHEMA_VERSION,
+      Date.now(),
+      "Initial schema",
+    );
+  } else if (row.version !== SQLITE_GRAPH_SCHEMA_VERSION) {
     throw new Error(
-      `Unsupported SQLite graph schema version: ${row.value}; expected ${SQLITE_GRAPH_SCHEMA_VERSION}`,
+      `Unsupported SQLite graph schema version: ${row.version}; expected ${SQLITE_GRAPH_SCHEMA_VERSION}`,
     );
   }
 }

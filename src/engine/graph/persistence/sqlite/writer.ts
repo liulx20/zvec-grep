@@ -1,41 +1,48 @@
-import { makeRefId } from "../../ref-id.js";
 import type { LocalEdge, RawRef, SymNode } from "../../types.js";
 import type { SqliteGraphDatabase } from "./database.js";
-import { FUNCTION_POINTER_ARRAY_CONTAINER } from "../../../reference-target.js";
 import type { FileInfo } from "../../../types.js";
 
-type StoredEdgeFact = {
-  id: string;
-  src_id: string;
-  kind: string;
-  rel: string;
-  first_line: number;
-  ref_name: string;
-  source_language: string | null;
-  imported_name: string | null;
-  local_name: string | null;
-  receiver_kind: string | null;
-  receiver_name: string | null;
-  member_name: string | null;
-  resolution_hints: string | null;
+/** Graph edge kind mapping from the legacy upper-case enum to CodeGraph kinds. */
+const EDGE_KIND_MAP: Record<string, string> = {
+  CALLS: "calls",
+  REFS: "references",
+  INHERITS: "extends",
+  CONTAINS: "contains",
+  DEFINES: "defines",
+  IMPORTS: "imports",
+  INSTANTIATES: "instantiates",
 };
 
-type InstantiationChanges = {
-  symbolIds: string[];
-  unresolvedNames: string[];
-};
+function edgeKindToDb(kind: string): string {
+  return EDGE_KIND_MAP[kind] ?? kind.toLowerCase();
+}
 
-type DispatchDependencyTypes = {
-  symbolIds: string[];
-  names: string[];
-};
+function refKindToDb(refKind: string): string {
+  switch (refKind) {
+    case "call":
+      return "calls";
+    case "ref":
+      return "references";
+    case "inherit":
+      return "extends";
+    case "import":
+      return "imports";
+    case "instantiate":
+      return "instantiates";
+    default:
+      return refKind;
+  }
+}
 
-type FunctionPointerRegistrationKey = {
-  containerType: string;
-  field: string;
-};
+function filePathFor(fileId: string, file?: FileInfo): string {
+  return file?.absolutePath ?? fileId;
+}
 
-/** File-scoped graph mutations and resolved-edge invalidation. */
+function languageFor(file?: FileInfo): string {
+  return file?.format ?? "unknown";
+}
+
+/** File-scoped graph mutations for the CodeGraph SQLite schema. */
 export class SqliteGraphWriter {
   constructor(private readonly database: SqliteGraphDatabase) {}
 
@@ -44,9 +51,6 @@ export class SqliteGraphWriter {
   }
   private get readOnly(): boolean {
     return this.database.readOnly;
-  }
-  private all<T>(sql: string, ...params: Array<string | number>): T[] {
-    return this.database.all<T>(sql, ...params);
   }
 
   async checkpoint(): Promise<void> {
@@ -62,668 +66,281 @@ export class SqliteGraphWriter {
     file?: FileInfo,
   ): void {
     this.database.assertWritable();
-    const oldIds = this.database.isBulkLoad()
+    const filePath = filePathFor(fileId, file);
+    const language = languageFor(file);
+    const now = Date.now();
+
+    // Collect names that may invalidate existing resolved projections.
+    // When a file is re-indexed with new same-name symbols, previously
+    // workspace_unique / preferred_file edges must be invalidated so the
+    // resolver can re-evaluate against the updated symbol set.
+    const skipInvalidation =
+      this.database.isBulkLoad() ||
+      !this.database.hasResolvedProjections();
+    const newNames = nodes.flatMap((n) => (n.name ? [n.name] : []));
+    const oldNames = skipInvalidation ? [] : this.symbolNamesForFile(filePath);
+    const changedNames = [...new Set([...oldNames, ...newNames])];
+    const affected = skipInvalidation
       ? []
-      : this.symbolIdsForFile(fileId);
-    const oldNames = this.database.isBulkLoad()
-      ? []
-      : this.symbolNamesForFile(fileId);
-    const affected =
-      !this.database.isBulkLoad() && this.database.hasResolvedProjections()
-        ? this.affectedProjectionIds(fileId, oldNames, nodes, edges, refs)
-        : [];
+      : this.affectedResolvedEdgeIds(filePath, changedNames);
+
     this.database.transaction(() => {
-      if (!this.database.isBulkLoad()) {
-        this.restoreEdgesToUnresolved(affected);
-        this.deleteOwnedFacts(fileId, oldIds);
+      // Delete affected resolved edges so the trigger restores their source
+      // refs to pending for re-resolution.
+      if (affected.length > 0) {
+        const ids = JSON.stringify([...new Set(affected)]);
+        this.database
+          .prepare(
+            "DELETE FROM edges WHERE id IN (SELECT value FROM json_each(?))",
+          )
+          .run(ids);
       }
+      this.deleteOwnedFacts(filePath);
+
       this.database
         .prepare(
           `INSERT INTO files(
-             id,absolute_path,relative_path,root_path,size_bytes,
-             last_modified_time,kind,format
-           ) VALUES(?,?,?,?,?,?,?,?)
-           ON CONFLICT(id) DO UPDATE SET
-             absolute_path=excluded.absolute_path,
-             relative_path=excluded.relative_path,
-             root_path=excluded.root_path,
-             size_bytes=excluded.size_bytes,
-             last_modified_time=excluded.last_modified_time,
-             kind=excluded.kind,
-             format=excluded.format`,
+             path, content_hash, language, size, modified_at, indexed_at,
+             node_count, errors, generated
+           ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(path) DO UPDATE SET
+             content_hash=excluded.content_hash,
+             language=excluded.language,
+             size=excluded.size,
+             modified_at=excluded.modified_at,
+             indexed_at=excluded.indexed_at,
+             node_count=excluded.node_count,
+             errors=excluded.errors,
+             generated=excluded.generated`,
         )
         .run(
-          fileId,
-          file?.absolutePath ?? null,
-          file?.relativePath ?? null,
-          file?.rootPath ?? null,
-          file?.sizeBytes ?? null,
-          file?.lastModifiedTime ?? null,
-          file?.kind ?? null,
-          file?.format ?? null,
+          filePath,
+          "",
+          language,
+          file?.sizeBytes ?? 0,
+          file?.lastModifiedTime ?? now,
+          now,
+          nodes.length,
+          null,
+          0,
         );
-      if (!this.database.isBulkLoad()) {
-        this.database
-          .prepare("DELETE FROM symbols WHERE file_id=?")
-          .run(fileId);
-      }
-      const insert = this.database.prepare(
-        `INSERT INTO symbols(
-           id,file_id,name,qualified_name,kind,is_exported,signature,arity,
-           return_type,range_json,scope,node_type,modifiers_json
-         ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+
+      const insertNode = this.database.prepare(
+        `INSERT INTO nodes(
+           id, kind, name, qualified_name, file_path, language,
+           start_line, end_line, start_column, end_column,
+           docstring, signature, arity, visibility,
+           is_exported, is_async, is_static, is_abstract,
+           decorators, type_parameters, return_type, updated_at
+         ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       );
       for (const node of nodes) {
-        insert.run(
+        const range =
+          node.range?.kind === "text" ? node.range : undefined;
+        insertNode.run(
           node.id,
-          fileId,
-          node.name ?? null,
-          node.qualifiedName ?? node.name ?? null,
           node.kind,
-          node.is_exported ? 1 : 0,
+          node.name ?? "",
+          node.qualifiedName ?? node.name ?? "",
+          filePath,
+          language,
+          range?.startLine ?? 0,
+          range?.endLine ?? (range?.startLine ?? 0),
+          0,
+          0,
+          null,
           node.signature ?? null,
           node.arity ?? null,
-          node.returnType ?? null,
-          node.range ? JSON.stringify(node.range) : null,
-          node.scope ?? null,
-          node.nodeType ?? null,
+          null,
+          node.is_exported ? 1 : 0,
+          0,
+          0,
+          0,
           node.modifiers ? JSON.stringify(node.modifiers) : null,
+          null,
+          node.returnType ?? null,
+          now,
         );
       }
-      for (const edge of edges) this.insertLocalEdge(edge);
-      for (const ref of refs) this.insertRef(ref, fileId);
-    });
-  }
 
-  private affectedProjectionIds(
-    fileId: string,
-    oldNames: readonly string[],
-    nodes: readonly SymNode[],
-    edges: readonly LocalEdge[],
-    refs: readonly RawRef[],
-  ): string[] {
-    const changedInstantiationTypes = this.changedInstantiationTypes(
-      fileId,
-      nodes,
-      edges,
-      refs,
-    );
-    const affectedDispatchTypes = this.inheritanceDependencyTypes(
-      changedInstantiationTypes,
-    );
-    const affected = this.affectedResolvedEdgeIds(fileId, [
-      ...oldNames,
-      ...this.changedSemanticNames(nodes, edges, refs),
-    ]);
-    affected.push(
-      ...this.affectedFunctionPointerProjectionIds(
-        [
-          ...this.functionPointerRegistrationKeysForFile(fileId),
-          ...this.functionPointerRegistrationKeysForRefs(refs),
-        ],
-        fileId,
-      ),
-    );
-    affected.push(
-      ...this.affectedInstantiationProjectionIds(affectedDispatchTypes),
-    );
-    return affected;
+      const insertEdge = this.database.prepare(
+        `INSERT OR IGNORE INTO edges(source, target, kind, metadata, line, col, provenance)
+         VALUES(?, ?, ?, ?, ?, ?, ?)`,
+      );
+      for (const edge of edges) {
+        const metadata: Record<string, unknown> = {};
+        if (edge.rel && edge.rel !== edgeKindToDb(edge.kind)) {
+          metadata.rel = edge.rel;
+        }
+        if (edge.count && edge.count !== 1) metadata.count = edge.count;
+        if (edge.ref_name) metadata.refName = edge.ref_name;
+        if (edge.source_language) metadata.sourceLanguage = edge.source_language;
+        if (edge.target?.receiver) metadata.receiver = edge.target.receiver;
+        if (edge.target?.member) metadata.member = edge.target.member;
+        if (edge.target?.hints) metadata.hints = edge.target.hints;
+        insertEdge.run(
+          edge.src,
+          edge.dst,
+          edgeKindToDb(edge.kind),
+          Object.keys(metadata).length > 0 ? JSON.stringify(metadata) : null,
+          edge.first_line ?? null,
+          null,
+          "static",
+        );
+      }
+
+      const insertRef = this.database.prepare(
+        `INSERT INTO unresolved_refs(
+           from_node_id, reference_name, reference_kind,
+           line, col, candidates, file_path, language, status, name_tail, metadata
+         ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      );
+      for (const ref of refs) {
+        const metadata: Record<string, unknown> = {};
+        if (ref.type === "import_binding") {
+          metadata.importedName = ref.imported_name;
+          metadata.localName = ref.local_name;
+        }
+        if ("rust_inline_module_depth" in ref && ref.rust_inline_module_depth !== undefined) {
+          metadata.rustInlineModuleDepth = ref.rust_inline_module_depth;
+        }
+        if (ref.type === "symbol" && ref.target) {
+          if (ref.target.receiver) {
+            metadata.receiverKind = ref.target.receiver.kind;
+            metadata.receiverName = ref.target.receiver.name;
+          }
+          if (ref.target.member) metadata.member = ref.target.member;
+          if (ref.target.hints) metadata.resolutionHints = ref.target.hints;
+        }
+        const referenceKind =
+          ref.ref_kind === "call"
+            ? "calls"
+            : ref.ref_kind === "ref"
+              ? "references"
+              : refKindToDb(ref.ref_kind);
+        insertRef.run(
+          ref.owner || fileId,
+          ref.ref_name,
+          referenceKind,
+          ref.line,
+          0,
+          null,
+          filePath,
+          ref.source_language ?? language,
+          "pending",
+          "",
+          Object.keys(metadata).length > 0 ? JSON.stringify(metadata) : null,
+        );
+      }
+    });
   }
 
   deleteFileGraph(fileId: string): void {
     this.database.assertWritable();
-    const oldIds = this.symbolIdsForFile(fileId);
-    const changedInstantiationTypes = this.changedInstantiationTypes(
-      fileId,
-      [],
-      [],
-      [],
-    );
-    const affectedDispatchTypes = this.inheritanceDependencyTypes(
-      changedInstantiationTypes,
-    );
-    const affected = this.affectedResolvedEdgeIds(
-      fileId,
-      this.symbolNamesForFile(fileId),
-    );
-    affected.push(
-      ...this.affectedFunctionPointerProjectionIds(
-        this.functionPointerRegistrationKeysForFile(fileId),
-        fileId,
-      ),
-    );
-    affected.push(
-      ...this.affectedInstantiationProjectionIds(affectedDispatchTypes),
-    );
-    this.database.transaction(() => {
-      this.restoreEdgesToUnresolved(affected);
-      this.deleteOwnedFacts(fileId, oldIds);
-      this.database.prepare("DELETE FROM files WHERE id=?").run(fileId);
-    });
+    this.deleteOwnedFacts(fileId);
+    this.database.prepare("DELETE FROM files WHERE path = ?").run(fileId);
   }
 
-  protected insertRef(ref: RawRef, fallbackOwner: string): void {
-    this.database
-      .prepare(
-        `INSERT OR REPLACE INTO unresolved_refs(
-         id,owner_id,owner_is_file,ref_name,ref_kind,member_name,line,
-         source_language,imported_name,local_name,receiver_kind,receiver_name,
-         resolution_hints,status,last_attempt,dynamic_reason
-       ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',0,NULL)`,
-      )
-      .run(
-        ref.id,
-        ref.owner || fallbackOwner,
-        ref.type === "symbol" ? 0 : 1,
-        ref.ref_name,
-        ref.ref_kind,
-        ref.type === "symbol" ? ref.target.member : null,
-        ref.line,
-        ref.source_language ?? null,
-        ref.type === "import_binding" ? ref.imported_name : null,
-        ref.type === "import_binding" ? ref.local_name : null,
-        ref.type === "symbol" ? (ref.target.receiver?.kind ?? null) : null,
-        ref.type === "symbol" ? (ref.target.receiver?.name ?? null) : null,
-        ref.type === "symbol" && ref.target.hints
-          ? JSON.stringify(ref.target.hints)
-          : ref.type !== "symbol" && ref.rust_inline_module_depth
-            ? JSON.stringify({
-                rustInlineModuleDepth: ref.rust_inline_module_depth,
-              })
-            : null,
-      );
-  }
-
-  private insertLocalEdge(edge: LocalEdge): void {
-    if (edge.kind === "CONTAINS") {
-      this.database
-        .prepare(
-          "INSERT OR REPLACE INTO contains(parent_id,child_id) VALUES(?,?)",
-        )
-        .run(edge.src, edge.dst);
-      return;
-    }
-    const sourceEdgeId =
-      edge.id ??
-      `local:${makeRefId(
-        edge.src,
-        edge.ref_name,
-        edge.kind === "INSTANTIATES" ? "new" : edge.rel,
-        edge.first_line,
-      )}`;
-    this.database
-      .prepare(
-        `INSERT OR REPLACE INTO edges(
-         id,src_id,dst_id,src_is_file,dst_is_file,kind,rel,count,first_line,
-         ref_name,source_language,receiver_kind,receiver_name,member_name,
-         resolution_hints,provenance,confidence,evidence
-       ) VALUES(?,?,?,0,0,?,?,?,?,?,?,?,?,?,?,'static',1,NULL)`,
-      )
-      .run(
-        edge.id ??
-          (edge.kind === "INSTANTIATES"
-            ? `${sourceEdgeId}:instantiates`
-            : sourceEdgeId),
-        edge.src,
-        edge.dst,
-        edge.kind,
-        edge.rel,
-        edge.count,
-        edge.first_line,
-        edge.ref_name,
-        edge.source_language ?? null,
-        edge.target?.receiver?.kind ?? null,
-        edge.target?.receiver?.name ?? null,
-        edge.target?.member ?? null,
-        edge.target?.hints ? JSON.stringify(edge.target.hints) : null,
-      );
-  }
-
-  private affectedResolvedEdgeIds(
-    fileId: string,
-    changedNames: readonly string[],
-  ): string[] {
-    const names = JSON.stringify([...new Set(changedNames)]);
-    return this.all<{ id: string }>(
-      `WITH RECURSIVE affected_importers(file_id) AS (
-         SELECT ?
-         UNION
-         SELECT imported_file.src_id FROM edges imported_file
-         JOIN affected_importers imported
-           ON imported.file_id=imported_file.dst_id
-         WHERE imported_file.kind='IMPORTS'
-           AND imported_file.src_is_file=1
-           AND imported_file.dst_is_file=1
-       )
-       SELECT DISTINCT edge.id FROM edges edge
-       LEFT JOIN symbols source ON source.id=edge.src_id AND edge.src_is_file=0
-       LEFT JOIN symbols target ON target.id=edge.dst_id AND edge.dst_is_file=0
-       WHERE edge.kind<>'INSTANTIATES' AND (
-         (target.file_id=? AND (source.file_id IS NULL OR source.file_id<>?))
-         OR (edge.dst_is_file=1 AND edge.dst_id=? AND edge.src_id<>?)
-         OR ((source.file_id IS NULL OR source.file_id<>?)
-           AND ?<>'[]' AND (
-           (edge.evidence='workspace_unique' AND (
-             edge.member_name IN (SELECT value FROM json_each(?))
-             OR edge.ref_name IN (SELECT value FROM json_each(?))
-           ))
-           OR (edge.evidence='preferred_file' AND (
-             edge.member_name IN (SELECT value FROM json_each(?))
-             OR edge.ref_name IN (SELECT value FROM json_each(?))
-           ) AND source.file_id IN (SELECT file_id FROM affected_importers))
-           OR json_extract(edge.resolution_hints,'$.receiverType')
-                IN (SELECT value FROM json_each(?))
-           OR EXISTS(
-             SELECT 1 FROM json_each(COALESCE(
-               json_extract(edge.resolution_hints,'$.candidateTypes'),'[]'
-             )) candidate_type
-             WHERE candidate_type.value IN (SELECT value FROM json_each(?))
-           )
-           )
+  /**
+   * Returns resolved call-edge ids that should be invalidated when a file is
+   * (re-)indexed with *fileId*.  Three categories are covered:
+   *
+   * 1. Edges whose target node lives in *fileId* — the target may be gone or
+   *    changed.
+   * 2. Edges resolved as `workspace_unique` whose refName / member matches one
+   *    of *changedNames* — the name is no longer globally unique.
+   * 3. Edges resolved as `preferred_file` whose refName / member matches one of
+   *    *changedNames* **and** whose source file transitively imports *fileId*
+   *    — the import chain may now surface a different symbol.
+   */
+  affectedResolvedEdgeIds(fileId: string, names?: string[]): string[] {
+    const changedNames = JSON.stringify([...new Set(names ?? [])]);
+    return this.database
+      .all<{ id: number }>(
+        `WITH RECURSIVE affected_importers(file_id) AS (
+           SELECT ? AS file_id
+           UNION
+           SELECT e.source AS file_id FROM edges e
+           JOIN affected_importers ai ON e.target = ai.file_id
+           WHERE e.kind='imports'
          )
-       )
-       UNION
-       SELECT DISTINCT unresolved.id FROM unresolved_refs unresolved
-       LEFT JOIN edge_candidates candidate ON candidate.edge_id=unresolved.id
-       LEFT JOIN symbols target ON target.id=candidate.target_id
-       LEFT JOIN symbols unresolved_source
-         ON unresolved_source.id=unresolved.owner_id AND unresolved.owner_is_file=0
-       LEFT JOIN contains ownership ON ownership.child_id=candidate.target_id
-       LEFT JOIN symbols container ON container.id=ownership.parent_id
-       WHERE target.file_id=? OR (?<>'[]' AND (
-         container.name IN (SELECT value FROM json_each(?))
-         OR ((unresolved.member_name IN (SELECT value FROM json_each(?))
-              OR unresolved.ref_name IN (SELECT value FROM json_each(?)))
-             AND unresolved_source.file_id IN (
-               SELECT file_id FROM affected_importers
+         SELECT DISTINCT e.id FROM edges e
+         JOIN nodes target ON target.id = e.target
+         LEFT JOIN nodes source ON source.id = e.source
+         WHERE e.kind = 'calls'
+           AND json_extract(e.metadata, '$.evidence') IS NOT NULL
+           AND (
+             target.file_path = ?
+             OR (? <> '[]' AND (
+               (json_extract(e.metadata, '$.evidence') = 'workspace_unique' AND (
+                 COALESCE(json_extract(e.metadata, '$.refName'), '')
+                   IN (SELECT value FROM json_each(?))
+                 OR COALESCE(json_extract(e.metadata, '$.member'), '')
+                   IN (SELECT value FROM json_each(?))
+               ))
+               OR (json_extract(e.metadata, '$.evidence') = 'preferred_file' AND (
+                 COALESCE(json_extract(e.metadata, '$.refName'), '')
+                   IN (SELECT value FROM json_each(?))
+                 OR COALESCE(json_extract(e.metadata, '$.member'), '')
+                   IN (SELECT value FROM json_each(?))
+               ) AND source.file_path
+                   IN (SELECT file_id FROM affected_importers))
              ))
-         OR json_extract(unresolved.resolution_hints,'$.receiverType')
-              IN (SELECT value FROM json_each(?))
-         OR EXISTS(
-           SELECT 1 FROM json_each(COALESCE(
-             json_extract(unresolved.resolution_hints,'$.candidateTypes'),'[]'
-           )) candidate_type
-           WHERE candidate_type.value IN (SELECT value FROM json_each(?))
-         )
-       ))`,
-      fileId,
-      fileId,
-      fileId,
-      fileId,
-      fileId,
-      fileId,
-      names,
-      names,
-      names,
-      names,
-      names,
-      names,
-      names,
-      fileId,
-      names,
-      names,
-      names,
-      names,
-      names,
-      names,
-    ).map((row) => row.id);
-  }
-
-  /**
-   * Return dispatch projections whose result depends on whether one of the
-   * supplied concrete types is instantiated anywhere in the workspace.
-   */
-  private affectedInstantiationProjectionIds(
-    types: DispatchDependencyTypes,
-  ): string[] {
-    if (types.symbolIds.length === 0 && types.names.length === 0) return [];
-    const ids = JSON.stringify([...new Set(types.symbolIds)]);
-    const names = JSON.stringify([...new Set(types.names)]);
-    return this.all<{ id: string }>(
-      `SELECT DISTINCT edge.id FROM edges edge
-       LEFT JOIN contains ownership ON ownership.child_id=edge.dst_id
-       LEFT JOIN symbols container ON container.id=ownership.parent_id
-       WHERE edge.kind='CALLS' AND edge.provenance='heuristic' AND (
-         container.id IN (SELECT value FROM json_each(?))
-         OR container.name IN (SELECT value FROM json_each(?))
-         OR json_extract(edge.resolution_hints,'$.receiverType')
-              IN (SELECT value FROM json_each(?))
-         OR EXISTS(
-           SELECT 1 FROM json_each(COALESCE(
-             json_extract(edge.resolution_hints,'$.candidateTypes'),'[]'
-           )) candidate_type
-           WHERE candidate_type.value IN (SELECT value FROM json_each(?))
-         )
-       )
-       UNION
-       SELECT DISTINCT unresolved.id FROM unresolved_refs unresolved
-       LEFT JOIN edge_candidates candidate ON candidate.edge_id=unresolved.id
-       LEFT JOIN contains ownership ON ownership.child_id=candidate.target_id
-       LEFT JOIN symbols container ON container.id=ownership.parent_id
-       WHERE unresolved.status='dynamic' AND (
-         container.id IN (SELECT value FROM json_each(?))
-         OR container.name IN (SELECT value FROM json_each(?))
-         OR json_extract(unresolved.resolution_hints,'$.receiverType')
-              IN (SELECT value FROM json_each(?))
-         OR EXISTS(
-           SELECT 1 FROM json_each(COALESCE(
-             json_extract(unresolved.resolution_hints,'$.candidateTypes'),'[]'
-           )) candidate_type
-           WHERE candidate_type.value IN (SELECT value FROM json_each(?))
-         )
-       )`,
-      ids,
-      names,
-      names,
-      names,
-      ids,
-      names,
-      names,
-      names,
-    ).map((row) => row.id);
-  }
-
-  /**
-   * Function-pointer dispatch depends on an exact `(container type, field)`
-   * registration slot. Requeue only projections for slots whose registration
-   * facts were replaced; changing an unrelated handler or field must not fan
-   * out to every indirect call in the workspace.
-   */
-  private affectedFunctionPointerProjectionIds(
-    keys: readonly FunctionPointerRegistrationKey[],
-    changedFileId: string,
-  ): string[] {
-    const unique = [
-      ...new Map(
-        keys.map((key) => [`${key.containerType}\0${key.field}`, key]),
-      ).values(),
-    ];
-    if (unique.length === 0) return [];
-    const encoded = JSON.stringify(unique);
-    return this.all<{ id: string }>(
-      `WITH changed AS (
-         SELECT json_extract(value,'$.containerType') AS container_type,
-                json_extract(value,'$.field') AS field
-         FROM json_each(?)
-       ), projections AS (
-         SELECT id,owner_id,member_name,receiver_name,resolution_hints
-         FROM unresolved_refs
-         WHERE status='dynamic'
-         UNION ALL
-         SELECT id,src_id,member_name,receiver_name,resolution_hints FROM edges
-         WHERE kind='CALLS' AND provenance='heuristic'
-       )
-       SELECT DISTINCT projection.id
-       FROM projections projection
-       JOIN symbols owner ON owner.id=projection.owner_id
-       JOIN changed slot ON (
-         (slot.container_type='${FUNCTION_POINTER_ARRAY_CONTAINER}'
-          AND projection.receiver_name=slot.field
-          AND owner.file_id=?)
-         OR slot.field=projection.member_name
-       )
-       WHERE (slot.container_type='${FUNCTION_POINTER_ARRAY_CONTAINER}'
-              AND projection.receiver_name=slot.field)
-          OR json_extract(projection.resolution_hints,'$.receiverType')
-               =slot.container_type
-          OR EXISTS(
-            SELECT 1 FROM json_each(COALESCE(
-              json_extract(projection.resolution_hints,'$.candidateTypes'),'[]'
-            )) candidate_type
-            WHERE candidate_type.value=slot.container_type
-          )`,
-      encoded,
-      changedFileId,
-    ).map((row) => row.id);
-  }
-
-  private functionPointerRegistrationKeysForFile(
-    fileId: string,
-  ): FunctionPointerRegistrationKey[] {
-    return this.all<FunctionPointerRegistrationKey>(
-      `SELECT DISTINCT
-         json_extract(edge.resolution_hints,
-                      '$.functionPointerRegistration.containerType')
-           AS containerType,
-         json_extract(edge.resolution_hints,
-                      '$.functionPointerRegistration.field') AS field
-       FROM edges edge
-       JOIN symbols source ON source.id=edge.src_id AND edge.src_is_file=0
-       WHERE source.file_id=?
-         AND json_type(edge.resolution_hints,
-                       '$.functionPointerRegistration')='object'`,
-      fileId,
-    );
-  }
-
-  private functionPointerRegistrationKeysForRefs(
-    refs: readonly RawRef[],
-  ): FunctionPointerRegistrationKey[] {
-    return refs.flatMap((ref) => {
-      if (ref.type !== "symbol") return [];
-      const registration = ref.target.hints?.functionPointerRegistration;
-      return registration ? [registration] : [];
-    });
-  }
-
-  /** Include every nominal base/interface whose dispatch can depend on RTA. */
-  private inheritanceDependencyTypes(
-    changes: InstantiationChanges,
-  ): DispatchDependencyTypes {
-    if (changes.symbolIds.length === 0 && changes.unresolvedNames.length === 0)
-      return { symbolIds: [], names: [] };
-    const rows = this.all<{ id: string; name: string }>(
-      `WITH RECURSIVE hierarchy(id,name) AS (
-         SELECT id,name FROM symbols
-         WHERE id IN (SELECT value FROM json_each(?))
-            OR name IN (SELECT value FROM json_each(?))
-         UNION
-         SELECT parent.id,parent.name
-         FROM hierarchy child
-         JOIN edges relation ON relation.src_id=child.id
-           AND relation.src_is_file=0 AND relation.dst_is_file=0
-           AND relation.kind='INHERITS'
-         JOIN symbols parent ON parent.id=relation.dst_id
-       )
-       SELECT DISTINCT id,name FROM hierarchy WHERE name IS NOT NULL`,
-      JSON.stringify([...new Set(changes.symbolIds)]),
-      JSON.stringify([...new Set(changes.unresolvedNames)]),
-    );
-    return {
-      symbolIds: rows.map((row) => row.id),
-      names: [
-        ...new Set([
-          ...rows.map((row) => row.name),
-          ...changes.unresolvedNames,
-        ]),
-      ],
-    };
-  }
-
-  /**
-   * Compare the global boolean presence of instantiated types before and
-   * after replacing one file. Multiple makers of the same type collapse to
-   * one fact, so removing one maker does not invalidate stable projections.
-   */
-  private changedInstantiationTypes(
-    fileId: string,
-    nodes: readonly SymNode[],
-    edges: readonly LocalEdge[],
-    refs: readonly RawRef[],
-  ): InstantiationChanges {
-    const oldTypeIds = new Set(this.instantiationTypeIdsForFile(fileId));
-    const nodeNames = new Map(nodes.map((node) => [node.id, node.name]));
-    const newTypeIds = new Set<string>();
-    const newTypeNames = new Set<string>();
-    for (const edge of edges) {
-      if (edge.kind !== "INSTANTIATES") continue;
-      newTypeIds.add(edge.dst);
-      const name = nodeNames.get(edge.dst);
-      if (name) newTypeNames.add(name);
-    }
-    for (const ref of refs) {
-      if (ref.type !== "symbol" || ref.ref_kind !== "new") continue;
-      if (ref.target.member) newTypeNames.add(ref.target.member);
-      if (ref.ref_name) newTypeNames.add(ref.ref_name);
-    }
-    const namedCandidates =
-      newTypeNames.size === 0
-        ? []
-        : this.all<{ id: string }>(
-            `SELECT id FROM symbols
-       WHERE name IN (SELECT value FROM json_each(?))`,
-            JSON.stringify([...newTypeNames]),
-          ).map((row) => row.id);
-    for (const id of namedCandidates) newTypeIds.add(id);
-    const relevantIds = [...new Set([...oldTypeIds, ...newTypeIds])];
-    if (relevantIds.length === 0)
-      return { symbolIds: [], unresolvedNames: [...newTypeNames] };
-    const otherTypeIds = new Set(
-      this.all<{ id: string }>(
-        `SELECT DISTINCT target.id FROM edges edge
-       JOIN symbols source ON source.id=edge.src_id AND edge.src_is_file=0
-       JOIN symbols target ON target.id=edge.dst_id AND edge.dst_is_file=0
-       WHERE edge.kind='INSTANTIATES' AND source.file_id<>?
-         AND target.id IN (SELECT value FROM json_each(?))`,
+           )`,
         fileId,
-        JSON.stringify(relevantIds),
-      ).map((row) => row.id),
-    );
-    const changedIds = relevantIds.filter(
-      (id) =>
-        (otherTypeIds.has(id) || oldTypeIds.has(id)) !==
-        (otherTypeIds.has(id) || newTypeIds.has(id)),
-    );
-    const resolvedNames = new Set(
-      this.all<{ name: string }>(
-        `SELECT DISTINCT name FROM symbols
-       WHERE id IN (SELECT value FROM json_each(?)) AND name IS NOT NULL`,
-        JSON.stringify([...newTypeIds]),
-      ).map((row) => row.name),
-    );
-    return {
-      symbolIds: changedIds,
-      unresolvedNames: [...newTypeNames].filter(
-        (name) => !resolvedNames.has(name),
-      ),
-    };
+        fileId,
+        changedNames,
+        changedNames,
+        changedNames,
+        changedNames,
+      )
+      .map((row) => String(row.id));
   }
 
-  private instantiationTypeIdsForFile(fileId: string): string[] {
-    return this.all<{ id: string }>(
-      `SELECT DISTINCT target.id FROM edges edge
-       JOIN symbols source ON source.id=edge.src_id AND edge.src_is_file=0
-       JOIN symbols target ON target.id=edge.dst_id AND edge.dst_is_file=0
-       WHERE edge.kind='INSTANTIATES' AND source.file_id=?`,
-      fileId,
-    ).map((row) => row.id);
+  private symbolNamesForFile(filePath: string): string[] {
+    return this.database
+      .all<{ name: string }>(
+        "SELECT DISTINCT name FROM nodes WHERE file_path=? AND name IS NOT NULL AND name<>''",
+        filePath,
+      )
+      .map((row) => row.name);
   }
 
-  private restoreEdgesToUnresolved(edgeIds: readonly string[]): void {
-    if (edgeIds.length === 0) return;
-    const ids = JSON.stringify([...new Set(edgeIds)]);
-    const facts = this.all<StoredEdgeFact>(
-      `SELECT id,src_id,kind,rel,first_line,ref_name,source_language,
-              imported_name,local_name,receiver_kind,receiver_name,member_name,
-              resolution_hints
-       FROM edges WHERE id IN(SELECT value FROM json_each(?))`,
-      ids,
-    );
-    const insert = this.database.prepare(
-      `INSERT OR REPLACE INTO unresolved_refs(
-         id,owner_id,owner_is_file,ref_name,ref_kind,member_name,line,
-         source_language,imported_name,local_name,receiver_kind,receiver_name,
-         resolution_hints,status,last_attempt,dynamic_reason
-       ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',0,NULL)`,
-    );
-    for (const fact of facts) {
-      insert.run(
-        fact.id,
-        fact.src_id,
-        fact.kind === "IMPORTS" ? 1 : 0,
-        fact.ref_name,
-        fact.rel,
-        fact.member_name,
-        fact.first_line,
-        fact.source_language,
-        fact.imported_name,
-        fact.local_name,
-        fact.receiver_kind,
-        fact.receiver_name,
-        fact.resolution_hints,
-      );
-      this.database
-        .prepare("DELETE FROM edges WHERE id IN (?,?)")
-        .run(fact.id, `${fact.id}:instantiates`);
-    }
+  private deleteOwnedFacts(filePath: string): void {
+    // When deleting edges, the trigger restore_resolved_ref_on_edge_delete
+    // will automatically restore status='resolved' refs to pending.
+    this.database
+      .prepare("DELETE FROM unresolved_refs WHERE file_path = ?")
+      .run(filePath);
+    // Symbol-level edges: source or target is a node whose file_path matches.
     this.database
       .prepare(
-        `UPDATE unresolved_refs SET status='pending',last_attempt=0,dynamic_reason=NULL
-       WHERE id IN(SELECT value FROM json_each(?))`,
+        "DELETE FROM edges WHERE source IN (SELECT id FROM nodes WHERE file_path = ?)",
       )
-      .run(ids);
+      .run(filePath);
     this.database
       .prepare(
-        "DELETE FROM edge_candidates WHERE edge_id IN(SELECT value FROM json_each(?))",
+        "DELETE FROM edges WHERE target IN (SELECT id FROM nodes WHERE file_path = ?)",
       )
-      .run(ids);
-  }
-
-  private deleteOwnedFacts(fileId: string, symbolIds: readonly string[]): void {
+      .run(filePath);
+    // File-level edges (e.g. IMPORTS): source or target is the file path
+    // itself, which is not present as a node id when the file is empty.
+    this.database.prepare("DELETE FROM edges WHERE source = ?").run(filePath);
+    this.database.prepare("DELETE FROM edges WHERE target = ?").run(filePath);
+    // Heuristic projections may depend on symbols in the re-indexed file.
+    // The trigger restores their source refs to pending for re-resolution.
+    this.database
+      .prepare("DELETE FROM edges WHERE provenance='heuristic'")
+      .run();
+    // Dynamic boundaries also depend on RTA state that may change when
+    // a file is re-indexed (e.g., new/removed instantiations). Restore
+    // them to pending so the resolver can re-evaluate dispatch.
     this.database
       .prepare(
-        "DELETE FROM unresolved_refs WHERE owner_is_file=1 AND owner_id=?",
+        "UPDATE unresolved_refs SET status='pending' WHERE status='dynamic'",
       )
-      .run(fileId);
-    this.database
-      .prepare("DELETE FROM edges WHERE src_is_file=1 AND src_id=?")
-      .run(fileId);
-    if (symbolIds.length === 0) return;
-    const ids = JSON.stringify(symbolIds);
-    this.database
-      .prepare(
-        "DELETE FROM unresolved_refs WHERE owner_is_file=0 AND owner_id IN(SELECT value FROM json_each(?))",
-      )
-      .run(ids);
-    this.database
-      .prepare(
-        "DELETE FROM edges WHERE src_is_file=0 AND src_id IN(SELECT value FROM json_each(?))",
-      )
-      .run(ids);
-  }
-
-  private changedSemanticNames(
-    nodes: readonly SymNode[],
-    edges: readonly LocalEdge[],
-    refs: readonly RawRef[],
-  ): string[] {
-    return [
-      ...new Set([
-        ...nodes.flatMap((node) => (node.name ? [node.name] : [])),
-        ...edges.flatMap((edge) =>
-          edge.kind === "INHERITS" ? [edge.ref_name] : [],
-        ),
-        ...refs.flatMap((ref) =>
-          ref.type === "symbol" &&
-          ["extends", "implements", "overrides", "type"].includes(ref.ref_kind)
-            ? [ref.ref_name, ref.target.member]
-            : [],
-        ),
-      ]),
-    ];
-  }
-
-  private symbolIdsForFile(fileId: string): string[] {
-    return this.all<{ id: string }>(
-      "SELECT id FROM symbols WHERE file_id=?",
-      fileId,
-    ).map((row) => row.id);
-  }
-
-  private symbolNamesForFile(fileId: string): string[] {
-    return this.all<{ name: string }>(
-      "SELECT DISTINCT name FROM symbols WHERE file_id=? AND name IS NOT NULL",
-      fileId,
-    ).map((row) => row.name);
+      .run();
+    this.database.prepare("DELETE FROM nodes WHERE file_path = ?").run(filePath);
+    this.database.prepare("DELETE FROM files WHERE path = ?").run(filePath);
   }
 }

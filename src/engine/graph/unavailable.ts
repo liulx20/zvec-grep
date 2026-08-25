@@ -42,6 +42,7 @@ export class UnavailableGraphStorage implements GraphStorage {
 
   deleteFileGraph(_fileId: string): void {}
   async resolvePending(_options?: ResolvePendingOptions): Promise<void> {}
+  writeKernelResult(): void {}
 
   findSymbolIdsByName(): string[] {
     return [];

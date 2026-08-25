@@ -59,35 +59,19 @@ type ImportBinding = {
 };
 
 type BufferedEdge = {
-  id: string;
-  src_id: string;
-  dst_id: string;
-  src_is_file: number;
-  dst_is_file: number;
+  source: string;
+  target: string;
   kind: string;
-  rel: string;
-  count: number;
-  first_line: number;
-  ref_name: string;
-  source_language: string | null;
-  imported_name: string | null;
-  local_name: string | null;
-  receiver_kind: string | null;
-  receiver_name: string | null;
-  member_name: string | null;
-  resolution_hints: string | null;
+  metadata: string;
+  line: number | null;
+  col: number | null;
   provenance: string;
-  confidence: number;
-  evidence: string | null;
 };
 
 type BufferedDynamicRef = {
   id: string;
-  reason: string;
-  member_name: string;
-  receiver_kind: string | null;
-  receiver_name: string | null;
-  resolution_hints: string | null;
+  metadata: string;
+  candidates: string;
 };
 
 type BufferedCandidate = {
@@ -139,6 +123,7 @@ export class SqlitePendingRefResolver {
     { count: number; durationMs: number }
   >();
   private directCandidateHits = 0;
+  private attemptCounter = 0;
 
   constructor(private readonly database: SqliteGraphDatabase) {
     this.candidates = new SemanticCandidateRepository(database);
@@ -200,11 +185,11 @@ export class SqlitePendingRefResolver {
           container_name: string | null;
         }
       >(
-        `SELECT s.id,s.file_id,s.name,s.qualified_name,s.kind,s.is_exported,s.signature,
+        `SELECT s.id,s.file_path AS file_id,s.name,s.qualified_name,s.kind,s.is_exported,s.signature,
                 p.id AS container_id,p.name AS container_name
-         FROM symbols s
-         LEFT JOIN contains c ON c.child_id=s.id
-         LEFT JOIN symbols p ON p.id=c.parent_id
+         FROM nodes s
+         LEFT JOIN edges c ON c.target=s.id AND c.kind='contains'
+         LEFT JOIN nodes p ON p.id=c.source
          WHERE s.name IN (SELECT value FROM json_each(?))
             OR s.qualified_name IN (SELECT value FROM json_each(?))`,
         JSON.stringify(lookupNames),
@@ -363,14 +348,14 @@ export class SqlitePendingRefResolver {
           container_name: null;
         }
       >(
-        `SELECT symbol.id,symbol.file_id,symbol.name,symbol.qualified_name,
+        `SELECT symbol.id,symbol.file_path AS file_id,symbol.name,symbol.qualified_name,
                 symbol.kind,symbol.is_exported,symbol.signature,
                 NULL AS container_id,NULL AS container_name
-           FROM symbols symbol
-           LEFT JOIN contains ownership ON ownership.child_id=symbol.id
-          WHERE symbol.file_id IN (SELECT value FROM json_each(?))
+           FROM nodes symbol
+           LEFT JOIN edges ownership ON ownership.target=symbol.id AND ownership.kind='contains'
+          WHERE symbol.file_path IN (SELECT value FROM json_each(?))
             AND symbol.is_exported=1
-            AND ownership.child_id IS NULL`,
+            AND ownership.target IS NULL`,
         JSON.stringify(fileIds),
       ).map((row) => ({
         id: row.id,
@@ -391,7 +376,10 @@ export class SqlitePendingRefResolver {
       member_name: string | null;
       imported_name: string | null;
     }>(
-      `SELECT ref_name,member_name,imported_name FROM unresolved_refs
+      `SELECT reference_name AS ref_name,
+              json_extract(metadata,'$.member') AS member_name,
+              json_extract(metadata,'$.importedName') AS imported_name
+       FROM unresolved_refs
        WHERE status IN ('pending','failed')`,
     );
     const names = new Set<string>();
@@ -404,13 +392,13 @@ export class SqlitePendingRefResolver {
       }
     }
     for (const row of this.all<{ imported_name: string }>(
-      `SELECT DISTINCT imports.imported_name FROM unresolved_refs unresolved
-       JOIN symbols owner ON owner.id=unresolved.owner_id
-       JOIN edges imports ON imports.src_id=owner.file_id
-         AND imports.src_is_file=1 AND imports.kind='IMPORTS'
-       WHERE unresolved.owner_is_file=0
+      `SELECT DISTINCT json_extract(imports.metadata,'$.importedName') AS imported_name
+       FROM unresolved_refs unresolved
+       LEFT JOIN nodes owner ON owner.id=unresolved.from_node_id
+       JOIN edges imports ON imports.source=COALESCE(owner.file_path,unresolved.from_node_id) AND imports.kind='imports'
+       WHERE unresolved.from_node_id IS NOT NULL
          AND unresolved.status IN ('pending','failed')
-         AND imports.imported_name IS NOT NULL`,
+         AND json_extract(imports.metadata,'$.importedName') IS NOT NULL`,
     )) {
       if (row.imported_name !== "*") names.add(row.imported_name);
     }
@@ -454,19 +442,19 @@ export class SqlitePendingRefResolver {
            CASE WHEN s.qualified_name LIKE '%::' || s.name
              THEN substr(s.qualified_name,1,length(s.qualified_name)-length(s.name)-2)
            END AS qualified_container_name
-         FROM symbols s
+         FROM nodes s
        )
-       SELECT s.id,s.file_id,
+       SELECT s.id,s.file_path AS file_id,
          COALESCE(p.id,(
            SELECT CASE WHEN COUNT(*)=1 THEN MIN(candidate.id) END
-           FROM symbols candidate
+           FROM nodes candidate
            WHERE candidate.name=s.qualified_container_name
              AND candidate.kind IN ('class','interface','trait','abstract_class')
          )) AS container_id,
          COALESCE(p.name,s.qualified_container_name) AS container_name
        FROM owner_symbols s
-       LEFT JOIN contains c ON c.child_id=s.id
-       LEFT JOIN symbols p ON p.id=c.parent_id`,
+       LEFT JOIN edges c ON c.target=s.id AND c.kind='contains'
+       LEFT JOIN nodes p ON p.id=c.source`,
     ))
       this.owners.set(row.id, row);
     for (const row of this.all<{
@@ -475,8 +463,12 @@ export class SqlitePendingRefResolver {
       imported_name: string | null;
       local_name: string | null;
     }>(
-      `SELECT src_id,dst_id,imported_name,local_name FROM edges
-       WHERE src_is_file=1 AND dst_is_file=1 AND kind='IMPORTS'
+      `SELECT COALESCE(src.file_path,e.source) AS src_id,e.target AS dst_id,
+              json_extract(e.metadata,'$.importedName') AS imported_name,
+              json_extract(e.metadata,'$.localName') AS local_name
+       FROM edges e
+       LEFT JOIN nodes src ON src.id=e.source
+       WHERE e.kind='imports'
        ORDER BY src_id,dst_id`,
     )) {
       const preferred = this.preferredFiles.get(row.src_id) ?? [];
@@ -495,7 +487,7 @@ export class SqlitePendingRefResolver {
       this.importBindings.set(row.src_id, bindings);
     }
     for (const row of this.all<{ name: string; file_id: string }>(
-      `SELECT name,file_id FROM symbols
+      `SELECT name,file_path AS file_id FROM nodes
        WHERE name IS NOT NULL
          AND kind IN ('interface','trait','abstract_class')`,
     )) {
@@ -504,7 +496,7 @@ export class SqlitePendingRefResolver {
       this.abstractTypeFiles.set(row.name, files);
     }
     for (const row of this.all<{ name: string; file_id: string }>(
-      `SELECT name,file_id FROM symbols
+      `SELECT name,file_path AS file_id FROM nodes
        WHERE name IS NOT NULL
          AND kind IN ('class','interface','trait','abstract_class')`,
     )) {
@@ -517,7 +509,7 @@ export class SqlitePendingRefResolver {
       signature: string;
       file_id: string;
     }>(
-      `SELECT name,signature,file_id FROM symbols
+      `SELECT name,signature,file_path AS file_id FROM nodes
        WHERE kind='alias' AND name IS NOT NULL AND signature IS NOT NULL`,
     )) {
       const target = aliasTargetType(row.name, row.signature);
@@ -640,7 +632,7 @@ export class SqlitePendingRefResolver {
       );
       return;
     }
-    if (ref.ref_kind === "call" && pending.target?.hints?.lexicallyBound) {
+    if (ref.ref_kind === "calls" && pending.target?.hints?.lexicallyBound) {
       this.persistDynamicCall(ref, pending.target, [], "lexical_dispatch");
       return;
     }
@@ -715,7 +707,7 @@ export class SqlitePendingRefResolver {
     // through to the global same-member heuristic. The missing type is useful
     // uncertainty, not evidence that an unrelated class is the target.
     if (
-      ref.ref_kind === "call" &&
+      ref.ref_kind === "calls" &&
       semanticCandidates.length === 0 &&
       !semanticResolution.abstractDispatch &&
       target.hints?.receiverType
@@ -740,7 +732,7 @@ export class SqlitePendingRefResolver {
       return;
     }
     if (
-      ref.ref_kind === "call" &&
+      ref.ref_kind === "calls" &&
       ((semanticResolution.abstractDispatch && !semanticResolution.rtaActive) ||
         semanticCandidates.length > 1)
     ) {
@@ -803,7 +795,7 @@ export class SqlitePendingRefResolver {
         // method, and a stable boundary must not be retried on every unrelated
         // resolve invocation.
         if (
-          ref.ref_kind === "call" &&
+          ref.ref_kind === "calls" &&
           reference.receiver.kind === "qualified" &&
           ref.member_name
         ) {
@@ -1139,24 +1131,19 @@ export class SqlitePendingRefResolver {
       "hierarchy" | "generic_bound" | "method_set" | "function_pointer",
     candidateConfidence = 0.65,
   ): void {
+    const dynamicMetadata: Record<string, unknown> = {};
+    if (reason) dynamicMetadata.dynamicReason = reason;
+    if (target.member) dynamicMetadata.member = target.member;
+    if (target.receiver?.kind)
+      dynamicMetadata.receiverKind = target.receiver.kind;
+    if (target.receiver?.name)
+      dynamicMetadata.receiverName = target.receiver.name;
+    if (target.hints) dynamicMetadata.resolutionHints = target.hints;
     this.bufferedDynamicRefs.push({
       id: ref.id,
-      reason,
-      member_name: target.member,
-      receiver_kind: target.receiver?.kind ?? null,
-      receiver_name: target.receiver?.name ?? null,
-      resolution_hints: target.hints ? JSON.stringify(target.hints) : null,
+      metadata: JSON.stringify(dynamicMetadata),
+      candidates: JSON.stringify(candidates),
     });
-    const candidateReason =
-      explicitCandidateReason ??
-      (target.hints?.genericBounds?.length ? "generic_bound" : "hierarchy");
-    for (const candidate of candidates)
-      this.bufferedCandidates.push({
-        edge_id: ref.id,
-        target_id: candidate,
-        reason: candidateReason,
-        confidence: candidateConfidence,
-      });
   }
 
   private insertSymbolEdge(
@@ -1171,49 +1158,26 @@ export class SqlitePendingRefResolver {
   ): void {
     if (ref.ref_kind === "new") {
       this.bufferedEdges.push({
-        id: `${ref.id}:instantiates`,
-        src_id: ref.owner_id,
-        dst_id: dst,
-        src_is_file: 0,
-        dst_is_file: 0,
-        kind: "INSTANTIATES",
-        rel: "new",
-        count: 1,
-        first_line: ref.line,
-        ref_name: ref.ref_name,
-        source_language: ref.source_language,
-        imported_name: null,
-        local_name: null,
-        receiver_kind: null,
-        receiver_name: null,
-        member_name: null,
-        resolution_hints: null,
+        source: ref.owner_id,
+        target: dst,
+        kind: "instantiates",
+        metadata: buildEdgeMetadata(ref, "new", {
+          provenance: "static",
+          confidence: 1,
+        }),
+        line: ref.line,
+        col: null,
         provenance: "static",
-        confidence: 1,
-        evidence: null,
       });
     }
     this.bufferedEdges.push({
-      id: ref.id,
-      src_id: ref.owner_id,
-      dst_id: dst,
-      src_is_file: 0,
-      dst_is_file: 0,
-      kind: edgeKind,
-      rel: ref.ref_kind,
-      count: 1,
-      first_line: ref.line,
-      ref_name: ref.ref_name,
-      source_language: ref.source_language,
-      imported_name: ref.imported_name,
-      local_name: ref.local_name,
-      receiver_kind: ref.receiver_kind,
-      receiver_name: ref.receiver_name,
-      member_name: ref.member_name,
-      resolution_hints: ref.resolution_hints,
+      source: ref.owner_id,
+      target: dst,
+      kind: edgeKindToDb(edgeKind),
+      metadata: buildEdgeMetadata(ref, ref.ref_kind, metadata),
+      line: ref.line,
+      col: null,
       provenance: metadata.provenance,
-      confidence: metadata.confidence,
-      evidence: metadata.evidence ?? null,
     });
     this.bufferedResolvedRefIds.add(ref.id);
   }
@@ -1263,26 +1227,17 @@ export class SqlitePendingRefResolver {
     }
     if (result.status !== "resolved") return this.failRef(ref.id, attempt);
     this.bufferedEdges.push({
-      id: ref.id,
-      src_id: ref.owner_id,
-      dst_id: result.fileId,
-      src_is_file: 1,
-      dst_is_file: 1,
-      kind: "IMPORTS",
-      rel: "import",
-      count: 1,
-      first_line: ref.line,
-      ref_name: ref.ref_name,
-      source_language: ref.source_language,
-      imported_name: importedName,
-      local_name: ref.local_name,
-      receiver_kind: ref.receiver_kind,
-      receiver_name: ref.receiver_name,
-      member_name: ref.member_name,
-      resolution_hints: ref.resolution_hints,
+      source: ref.owner_id,
+      target: result.fileId,
+      kind: "imports",
+      metadata: buildEdgeMetadata(
+        { ...ref, imported_name: importedName },
+        "import",
+        { provenance: "static", confidence: 1 },
+      ),
+      line: ref.line,
+      col: null,
       provenance: "static",
-      confidence: 1,
-      evidence: null,
     });
     this.bufferedResolvedRefIds.add(ref.id);
   }
@@ -1298,19 +1253,20 @@ export class SqlitePendingRefResolver {
     this.database
       .prepare(
         `UPDATE unresolved_refs AS unresolved
-       SET status='external',last_attempt=?
+       SET status='external',
+           metadata=json_set(COALESCE(metadata,'{}'),'$.lastAttempt',?)
        WHERE unresolved.status='failed'
-         AND unresolved.ref_kind='import'
-         AND unresolved.source_language='rust'
+         AND unresolved.reference_kind='imports'
+         AND unresolved.language='rust'
          AND EXISTS (
            SELECT 1 FROM edges resolved
-           WHERE resolved.kind='IMPORTS'
-             AND resolved.src_is_file=1
-             AND resolved.src_id=unresolved.owner_id
-             AND resolved.first_line=unresolved.line
+           WHERE resolved.kind='imports'
+             AND resolved.source=unresolved.from_node_id
+             AND resolved.line=unresolved.line
              AND (
-               unresolved.local_name IS NULL
-               OR resolved.local_name=unresolved.local_name
+               json_extract(unresolved.metadata,'$.localName') IS NULL
+               OR json_extract(resolved.metadata,'$.localName')=
+                  json_extract(unresolved.metadata,'$.localName')
              )
          )`,
       )
@@ -1323,18 +1279,35 @@ export class SqlitePendingRefResolver {
     retryFailed: boolean,
   ): RefRow[] {
     const phaseCondition = resolvePhaseCondition(phase);
+    const projection = `SELECT id,
+           from_node_id AS owner_id,
+           CASE WHEN files.path IS NOT NULL THEN 1 ELSE 0 END AS owner_is_file,
+           reference_name AS ref_name,
+           reference_kind AS ref_kind,
+           line,
+           status,
+           json_extract(metadata,'$.importedName') AS imported_name,
+           json_extract(metadata,'$.localName') AS local_name,
+           unresolved_refs.language AS source_language,
+           json_extract(metadata,'$.receiverKind') AS receiver_kind,
+           json_extract(metadata,'$.receiverName') AS receiver_name,
+           json_extract(metadata,'$.member') AS member_name,
+           json_extract(metadata,'$.resolutionHints') AS resolution_hints,
+           COALESCE(json_extract(metadata,'$.lastAttempt'),0) AS last_attempt
+    FROM unresolved_refs
+    LEFT JOIN files ON files.path=from_node_id`;
     return this.all<RefRow>(
       `SELECT id,owner_id,owner_is_file,ref_name,ref_kind,line,status,imported_name,local_name,source_language,receiver_kind,receiver_name,member_name,resolution_hints,last_attempt
        FROM (
          SELECT unresolved_refs.*,
                 row_number() OVER (PARTITION BY ref_name ORDER BY last_attempt,id) AS retry_rank
-         FROM unresolved_refs
+         FROM (${projection}) unresolved_refs
          WHERE status='failed' AND ?=1 AND last_attempt<? AND ${phaseCondition}
        )
        WHERE retry_rank<=?
        UNION ALL
        SELECT id,owner_id,owner_is_file,ref_name,ref_kind,line,status,imported_name,local_name,source_language,receiver_kind,receiver_name,member_name,resolution_hints,last_attempt
-       FROM unresolved_refs
+       FROM (${projection}) unresolved_refs
        WHERE status='pending' AND last_attempt<? AND ${phaseCondition}
        ORDER BY ref_name,id LIMIT ?`,
       retryFailed ? 1 : 0,
@@ -1353,10 +1326,10 @@ export class SqlitePendingRefResolver {
       `WITH RECURSIVE hierarchy(id,depth) AS (
          SELECT ?,0
          UNION
-         SELECT e.dst_id,h.depth+1
-         FROM edges e JOIN hierarchy h ON e.src_id=h.id
-         WHERE e.kind='INHERITS'
-           AND e.rel IN ('extends','implements')
+         SELECT e.target,h.depth+1
+         FROM edges e JOIN hierarchy h ON e.source=h.id
+         WHERE e.kind='extends'
+           AND COALESCE(json_extract(e.metadata,'$.rel'),'extends') IN ('extends','implements')
            AND h.depth<32
        )
        SELECT id,depth FROM hierarchy WHERE depth>=? ORDER BY depth,id`,
@@ -1369,14 +1342,14 @@ export class SqlitePendingRefResolver {
     this.functionPointerSlots.clear();
     for (const row of this.all<{ container_type: string; field: string }>(
       `SELECT DISTINCT
-         json_extract(resolution_hints,
+         json_extract(json_extract(metadata,'$.resolutionHints'),
                       '$.functionPointerRegistration.containerType')
            AS container_type,
-         json_extract(resolution_hints,
+         json_extract(json_extract(metadata,'$.resolutionHints'),
                       '$.functionPointerRegistration.field') AS field
        FROM edges
-       WHERE source_language IN ('c','cpp')
-         AND json_type(resolution_hints,
+       WHERE json_extract(metadata,'$.sourceLanguage') IN ('c','cpp')
+         AND json_type(json_extract(metadata,'$.resolutionHints'),
                        '$.functionPointerRegistration')='object'`,
     ))
       this.functionPointerSlots.add(
@@ -1531,28 +1504,56 @@ export class SqlitePendingRefResolver {
     this.bufferedResolvedRefIds.clear();
   }
 
+  private aggregateBufferedEdges(): BufferedEdge[] {
+    // Group edges that share the same (source, target, kind, provenance, rel)
+    // so they can be merged into a single row. The unique index on
+    // edges(source, target, kind, line, col) would otherwise cause
+    // INSERT OR IGNORE to drop the second edge.
+    const groups = new Map<string, BufferedEdge>();
+    for (const edge of this.bufferedEdges) {
+      const metadata = JSON.parse(edge.metadata) as Record<string, unknown>;
+      const key = `${edge.source}\0${edge.target}\0${edge.kind}\0${metadata.rel ?? ""}\0${edge.provenance}`;
+      const existing = groups.get(key);
+      if (!existing) {
+        groups.set(key, { ...edge });
+        continue;
+      }
+      const existingMeta = JSON.parse(existing.metadata) as Record<string, unknown>;
+      // Merge metadata: take union of all fields, sum counts.
+      // Fields like importedName/localName from an import_binding edge
+      // are preserved even when the first edge lacked them.
+      for (const [k, v] of Object.entries(metadata)) {
+        if (k === "count") continue;
+        if (existingMeta[k] === undefined && v !== undefined && v !== null) {
+          existingMeta[k] = v;
+        }
+      }
+      existingMeta.count =
+        (Number(existingMeta.count) || 1) + (Number(metadata.count) || 1);
+      existing.metadata = JSON.stringify(existingMeta);
+      if (
+        existing.line === null ||
+        (edge.line !== null && edge.line < existing.line)
+      ) {
+        existing.line = edge.line;
+      }
+    }
+    return [...groups.values()];
+  }
+
   private flushProjectionBuffers(): void {
     if (this.bufferedEdges.length > 0) {
+      const aggregated = this.aggregateBufferedEdges();
       this.database
         .prepare(
-          `INSERT OR REPLACE INTO edges(
-             id,src_id,dst_id,src_is_file,dst_is_file,kind,rel,count,first_line,
-             ref_name,source_language,imported_name,local_name,receiver_kind,
-             receiver_name,member_name,resolution_hints,provenance,confidence,evidence
-           )
-           SELECT json_extract(value,'$.id'),json_extract(value,'$.src_id'),
-                  json_extract(value,'$.dst_id'),json_extract(value,'$.src_is_file'),
-                  json_extract(value,'$.dst_is_file'),json_extract(value,'$.kind'),
-                  json_extract(value,'$.rel'),json_extract(value,'$.count'),
-                  json_extract(value,'$.first_line'),json_extract(value,'$.ref_name'),
-                  json_extract(value,'$.source_language'),json_extract(value,'$.imported_name'),
-                  json_extract(value,'$.local_name'),json_extract(value,'$.receiver_kind'),
-                  json_extract(value,'$.receiver_name'),json_extract(value,'$.member_name'),
-                  json_extract(value,'$.resolution_hints'),json_extract(value,'$.provenance'),
-                  json_extract(value,'$.confidence'),json_extract(value,'$.evidence')
+          `INSERT OR IGNORE INTO edges(source, target, kind, metadata, line, col, provenance)
+           SELECT json_extract(value,'$.source'),json_extract(value,'$.target'),
+                  json_extract(value,'$.kind'),json_extract(value,'$.metadata'),
+                  json_extract(value,'$.line'),json_extract(value,'$.col'),
+                  json_extract(value,'$.provenance')
            FROM json_each(?)`,
         )
-        .run(JSON.stringify(this.bufferedEdges));
+        .run(JSON.stringify(aggregated));
     }
     if (this.bufferedDynamicRefs.length > 0) {
       const dynamicJson = JSON.stringify(this.bufferedDynamicRefs);
@@ -1560,33 +1561,12 @@ export class SqlitePendingRefResolver {
         .prepare(
           `UPDATE unresolved_refs AS unresolved
            SET status='dynamic',
-               dynamic_reason=json_extract(item.value,'$.reason'),
-               member_name=json_extract(item.value,'$.member_name'),
-               receiver_kind=json_extract(item.value,'$.receiver_kind'),
-               receiver_name=json_extract(item.value,'$.receiver_name'),
-               resolution_hints=json_extract(item.value,'$.resolution_hints')
+               candidates=json_extract(item.value,'$.candidates'),
+               metadata=json_patch(COALESCE(metadata,'{}'),json_extract(item.value,'$.metadata'))
            FROM json_each(?) AS item
            WHERE unresolved.id=json_extract(item.value,'$.id')`,
         )
         .run(dynamicJson);
-      this.database
-        .prepare(
-          `DELETE FROM edge_candidates
-           WHERE edge_id IN (
-             SELECT json_extract(value,'$.id') FROM json_each(?)
-           )`,
-        )
-        .run(dynamicJson);
-    }
-    if (this.bufferedCandidates.length > 0) {
-      this.database
-        .prepare(
-          `INSERT INTO edge_candidates(edge_id,target_id,reason,confidence)
-           SELECT json_extract(value,'$.edge_id'),json_extract(value,'$.target_id'),
-                  json_extract(value,'$.reason'),json_extract(value,'$.confidence')
-           FROM json_each(?)`,
-        )
-        .run(JSON.stringify(this.bufferedCandidates));
     }
     if (this.bufferedExternalRefIds.size > 0) {
       this.database
@@ -1599,7 +1579,7 @@ export class SqlitePendingRefResolver {
     if (this.bufferedResolvedRefIds.size > 0) {
       this.database
         .prepare(
-          `DELETE FROM unresolved_refs
+          `UPDATE unresolved_refs SET status='resolved'
            WHERE id IN (SELECT value FROM json_each(?))`,
         )
         .run(JSON.stringify([...this.bufferedResolvedRefIds]));
@@ -1615,33 +1595,29 @@ export class SqlitePendingRefResolver {
     if (this.failedRefIds.size === 0) return;
     this.database
       .prepare(
-        `UPDATE unresolved_refs SET status='failed',last_attempt=?
+        `UPDATE unresolved_refs
+         SET status='failed',
+             metadata=json_set(COALESCE(metadata,'{}'),'$.lastAttempt',?)
          WHERE id IN (SELECT value FROM json_each(?))`,
       )
       .run(attempt, JSON.stringify([...this.failedRefIds]));
   }
 
   private nextAttempt(): number {
-    const row = this.database
-      .prepare(
-        `INSERT INTO graph_meta(key,value) VALUES('pending_ref_attempt','1')
-         ON CONFLICT(key) DO UPDATE SET value=CAST(value AS INTEGER)+1
-         RETURNING value`,
-      )
-      .get() as { value: string };
-    return Number(row.value);
+    this.attemptCounter++;
+    return this.attemptCounter;
   }
 }
 
 function resolvePhaseCondition(phase: ResolvePhase): string {
-  if (phase === "imports") return "(owner_is_file=1 OR ref_kind='import')";
+  if (phase === "imports") return "(owner_is_file=1 OR ref_kind='imports')";
   if (phase === "inheritance")
     return "owner_is_file=0 AND ref_kind IN ('extends','implements','overrides')";
   if (phase === "instantiations") return "owner_is_file=0 AND ref_kind='new'";
   if (phase === "function_registrations")
     return "owner_is_file=0 AND json_type(resolution_hints,'$.functionPointerRegistration')='object'";
   return `owner_is_file=0
-    AND ref_kind NOT IN ('import','extends','implements','overrides','new')
+    AND ref_kind NOT IN ('imports','extends','implements','overrides','new')
     AND COALESCE(json_type(
       resolution_hints,'$.functionPointerRegistration'
     ),'null')<>'object'`;
@@ -1655,8 +1631,39 @@ function refReceiver(name: string): string {
   return name.split(/(?:[./]|::)/, 1)[0] ?? name;
 }
 
+function edgeKindToDb(kind: "CALLS" | "REFS" | "INHERITS"): string {
+  if (kind === "CALLS") return "calls";
+  if (kind === "REFS") return "references";
+  return "extends";
+}
+
+function buildEdgeMetadata(
+  ref: RefRow,
+  rel: string,
+  metadata: {
+    provenance: "static" | "heuristic";
+    confidence: number;
+    evidence?: string;
+  },
+): string {
+  const payload: Record<string, unknown> = {};
+  payload.rel = rel;
+  payload.count = 1;
+  payload.refName = ref.ref_name;
+  if (ref.source_language) payload.sourceLanguage = ref.source_language;
+  if (ref.imported_name) payload.importedName = ref.imported_name;
+  if (ref.local_name) payload.localName = ref.local_name;
+  if (ref.receiver_kind) payload.receiverKind = ref.receiver_kind;
+  if (ref.receiver_name) payload.receiverName = ref.receiver_name;
+  if (ref.member_name) payload.member = ref.member_name;
+  if (ref.resolution_hints) payload.resolutionHints = ref.resolution_hints;
+  payload.confidence = metadata.confidence;
+  if (metadata.evidence) payload.evidence = metadata.evidence;
+  return JSON.stringify(payload);
+}
+
 function refKindToEdgeKind(kind: string): "CALLS" | "REFS" | "INHERITS" {
-  if (kind === "call") return "CALLS";
+  if (kind === "call" || kind === "calls") return "CALLS";
   if (kind === "extends" || kind === "implements" || kind === "overrides")
     return "INHERITS";
   return "REFS";

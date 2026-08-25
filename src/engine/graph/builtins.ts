@@ -255,6 +255,7 @@ export function isExternalRefName(refName: string, language?: string): boolean {
       : language === "cpp"
         ? CPP_BUILTINS
         : language &&
+            language !== "unknown" &&
             !["javascript", "jsx", "typescript", "tsx"].includes(language)
           ? new Set<string>()
           : JS_BUILTINS;

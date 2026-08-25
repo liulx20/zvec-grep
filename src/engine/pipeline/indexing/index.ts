@@ -33,12 +33,18 @@ import {
   vectorContentForFragment,
 } from "../../extraction/index.js";
 import {
+  getKernel,
+  kernelSupports,
+  decodeExtractBuffers,
+} from "../../extraction/kernel/index.js";
+import {
   scanDirectoryPath,
   scanFilePath,
   scanRootPaths,
 } from "./scanner/index.js";
 import { indexChunkOptions } from "./input-budget.js";
 import { computeIndexDiff, type IndexDiffResult } from "./diff.js";
+import { sha256Text } from "../../utils/hash.js";
 
 export { getWorkspaceIndexStatus } from "./status.js";
 
@@ -63,6 +69,7 @@ type PreparedFile = {
   file: FileInfo;
   fragments: PreparedFragment[];
   graph?: FileGraphInput;
+  sourceText?: string;
 };
 
 type FailedPreparedFile = {
@@ -592,14 +599,9 @@ async function optimizeStorage(
       ctx.storage.finalizeWrites(),
     );
     if (ctx.graph?.available) {
-      await timings.time("index_graph_resolve", () =>
-        ctx.graph!.resolvePending({
-          files: ctx.storage.listFiles(),
-          retryFailed: graphChanged,
-          onTiming: (name, durationMs, count) =>
-            timings.add(name, durationMs, count),
-        }),
-      );
+      // resolvePending is disabled while migrating to the CodeGraph kernel schema.
+      // The kernel writes resolved edges directly; a cross-file resolution pass
+      // for kernel-generated unresolved_refs will be added later.
       await timings.time("index_graph_checkpoint", () =>
         ctx.graph!.checkpoint(),
       );
@@ -789,7 +791,7 @@ async function prepareFile(
       );
     }
 
-    return { file, fragments, graph };
+    return { file, fragments, graph, sourceText: source.kind === "text" ? source.text : undefined };
   } catch (error) {
     if (indexIsCancelled(ctx)) {
       throw indexCancellationError(ctx);
@@ -962,22 +964,30 @@ function commitFile(
         truncatedFragmentCount,
       },
     );
-    if (ctx.graph?.available) {
-      const graphInput =
-        file.graph ??
-        fileGraphFromFragments(
-          file.file.id,
-          file.fragments.map(({ fragment }) => fragment),
-          [],
-          file.file.format,
+    if (ctx.graph?.available && file.sourceText) {
+      const language = kernelLanguageForFormat(file.file.format);
+      if (language && kernelSupports(language)) {
+        const kernel = getKernel()!;
+        const buffers = kernel.extractFile(
+          file.file.absolutePath,
+          file.sourceText,
+          language,
         );
-      ctx.graph.upsertFileGraph(
-        file.file.id,
-        graphInput.nodes,
-        graphInput.edges,
-        graphInput.refs,
-        file.file,
-      );
+        const result = decodeExtractBuffers(
+          buffers,
+          file.file.absolutePath,
+          language,
+        );
+        ctx.graph.writeKernelResult!(
+          file.file.absolutePath,
+          language,
+          sha256Text(file.sourceText),
+          Buffer.byteLength(file.sourceText, "utf8"),
+          result,
+        );
+      }
+      // Non-kernel graph writing is skipped until the tree-sitter path is
+      // migrated to the CodeGraph schema.
     }
     stats.filesIndexed++;
     stats.entitiesCreated += countPublicEntities(
@@ -999,6 +1009,36 @@ function throwIfIndexCancelled(ctx: IndexContext): void {
     return;
   }
   throw indexCancellationError(ctx);
+}
+
+/** Map a zvec-grep file format to the CodeGraph kernel language name. */
+function kernelLanguageForFormat(format: string): string | null {
+  // The kernel language identifiers align with the file formats zvec-grep
+  // already uses for code files (e.g. "rust", "typescript", "cpp").
+  // Return null for formats the kernel does not natively extract.
+  const supported = new Set([
+    "c",
+    "cpp",
+    "csharp",
+    "dart",
+    "go",
+    "java",
+    "javascript",
+    "jsx",
+    "kotlin",
+    "lua",
+    "luau",
+    "php",
+    "python",
+    "r",
+    "ruby",
+    "rust",
+    "scala",
+    "swift",
+    "typescript",
+    "tsx",
+  ]);
+  return supported.has(format) ? format : null;
 }
 
 function indexIsCancelled(ctx: IndexContext): boolean {

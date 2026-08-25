@@ -55,7 +55,7 @@ export class DirectSemanticCandidateIndex {
       file_id: string;
       kind: string;
     }>(
-      `SELECT id,name,qualified_name,file_id,kind FROM symbols
+      `SELECT id,name,qualified_name,file_path AS file_id,kind FROM nodes
        WHERE name IS NOT NULL
          AND kind IN ('class','interface','trait','abstract_class')`,
     )) {
@@ -84,13 +84,13 @@ export class DirectSemanticCandidateIndex {
       parent_qualified_name: string | null;
       parent_kind: string | null;
     }>(
-      `SELECT member.id,member.file_id,member.name,member.qualified_name,member.signature,
-              member.arity,member.kind AS member_kind,parent.name AS parent_name,
+      `SELECT member.id,member.file_path AS file_id,member.name,member.qualified_name,member.signature,
+              member.arity AS arity,member.kind AS member_kind,parent.name AS parent_name,
               parent.qualified_name AS parent_qualified_name,
               parent.kind AS parent_kind
-       FROM symbols member
-       LEFT JOIN contains ownership ON ownership.child_id=member.id
-       LEFT JOIN symbols parent ON parent.id=ownership.parent_id
+       FROM nodes member
+       LEFT JOIN edges ownership ON ownership.target=member.id AND ownership.kind='contains'
+       LEFT JOIN nodes parent ON parent.id=ownership.source
        WHERE member.name IS NOT NULL
          AND member.kind IN (${CALLABLE_SYMBOL_KINDS_SQL})`,
     )) {
@@ -122,27 +122,29 @@ export class DirectSemanticCandidateIndex {
     }
 
     for (const row of database.all<{
-      src_id: string;
-      dst_id: string;
+      source: string;
+      target: string;
       rel: string;
     }>(
-      `SELECT DISTINCT src_id,dst_id,rel FROM edges
-       WHERE kind='INHERITS' AND src_is_file=0 AND dst_is_file=0`,
+      `SELECT DISTINCT source,target,
+              COALESCE(json_extract(metadata,'$.rel'),'extends') AS rel
+       FROM edges
+       WHERE kind='extends'`,
     )) {
-      appendLink(this.basesByDerived, row.src_id, {
-        id: row.dst_id,
+      appendLink(this.basesByDerived, row.source, {
+        id: row.target,
         rel: row.rel,
       });
-      appendLink(this.derivedByBase, row.dst_id, {
-        id: row.src_id,
+      appendLink(this.derivedByBase, row.target, {
+        id: row.source,
         rel: row.rel,
       });
     }
-    for (const row of database.all<{ dst_id: string }>(
-      `SELECT DISTINCT dst_id FROM edges
-       WHERE kind='INSTANTIATES' AND dst_is_file=0`,
+    for (const row of database.all<{ target: string }>(
+      `SELECT DISTINCT target FROM edges
+       WHERE kind='instantiates'`,
     ))
-      this.instantiatedContainers.add(row.dst_id);
+      this.instantiatedContainers.add(row.target);
   }
 
   resolve(query: DirectCandidateQuery): SemanticCandidateResolution | null {

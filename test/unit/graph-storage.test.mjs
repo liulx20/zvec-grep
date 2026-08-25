@@ -171,7 +171,7 @@ test("resolved references move their durable source facts onto edges", async () 
   class InspectableGraph extends SqliteGraphStorage {
     resolvedOccurrenceCount() {
       return this.database.db
-        .prepare("SELECT COUNT(*) AS count FROM edges WHERE kind='CALLS'")
+        .prepare("SELECT COUNT(*) AS count FROM edges WHERE kind='calls'")
         .get().count;
     }
     graphTableNames() {
@@ -199,12 +199,10 @@ test("resolved references move their durable source facts onto edges", async () 
   assert.equal(graph.stats().refCount, 0);
   assert.equal(graph.resolvedOccurrenceCount(), 1);
   assert.deepEqual(graph.graphTableNames(), [
-    "contains",
-    "edge_candidates",
     "edges",
     "files",
-    "graph_meta",
-    "symbols",
+    "nodes",
+    "schema_versions",
     "unresolved_refs",
   ]);
   graph.close();
@@ -232,7 +230,7 @@ test("new same-name symbols invalidate ordinary resolved projections", async () 
   assert.equal(
     graph.database.db
       .prepare(
-        "SELECT evidence FROM edges WHERE src_id='caller' AND kind='CALLS'",
+        "SELECT json_extract(metadata,'$.evidence') AS evidence FROM edges WHERE source='caller' AND kind='calls'",
       )
       .get().evidence,
     "workspace_unique",
@@ -276,7 +274,7 @@ test("new same-name symbols preserve same-file resolved projections", async () =
   assert.equal(
     graph.database.db
       .prepare(
-        "SELECT evidence FROM edges WHERE src_id='local-caller' AND kind='CALLS'",
+        "SELECT json_extract(metadata,'$.evidence') AS evidence FROM edges WHERE source='local-caller' AND kind='calls'",
       )
       .get().evidence,
     null,
@@ -361,7 +359,7 @@ test("new symbols in an imported file invalidate preferred-file projections", as
   assert.equal(
     graph.database.db
       .prepare(
-        "SELECT evidence FROM edges WHERE src_id='preferred-caller' AND kind='CALLS'",
+        "SELECT json_extract(metadata,'$.evidence') AS evidence FROM edges WHERE source='preferred-caller' AND kind='calls'",
       )
       .get().evidence,
     "preferred_file",
@@ -406,26 +404,43 @@ test("preferred-file invalidation ignores unrelated names in another import", ()
     [],
     [],
   );
-  const insert = graph.database.db.prepare(
-    `INSERT INTO edges(
-       id,src_id,dst_id,src_is_file,dst_is_file,kind,rel,count,first_line,
-       ref_name,member_name,provenance,confidence,evidence
-     ) VALUES(?,?,?,0,0,'CALLS','call',1,1,?,?,'static',1,'preferred_file')`,
+  const insertCall = graph.database.db.prepare(
+    `INSERT INTO edges(source,target,kind,metadata,line,col,provenance)
+     VALUES(?,?,?,?,?,?,?)`,
   );
-  insert.run("call-foo", "caller", "foo", "foo", "foo");
-  insert.run("call-bar", "caller", "bar", "bar", "bar");
+  insertCall.run(
+    "caller", "foo", "calls",
+    JSON.stringify({rel:"call",count:1,refName:"foo",confidence:1,evidence:"preferred_file"}),
+    1, 0, "static",
+  );
+  insertCall.run(
+    "caller", "bar", "calls",
+    JSON.stringify({rel:"call",count:1,refName:"bar",confidence:1,evidence:"preferred_file"}),
+    1, 0, "static",
+  );
   const insertImport = graph.database.db.prepare(
-    `INSERT INTO edges(
-       id,src_id,dst_id,src_is_file,dst_is_file,kind,rel,count,first_line,
-       ref_name,provenance,confidence
-     ) VALUES(?,?,?,1,1,'IMPORTS','import',1,1,'*','static',1)`,
+    `INSERT INTO edges(source,target,kind,metadata,line,col,provenance)
+     VALUES(?,?,?,?,-1,0,'static')`,
   );
-  insertImport.run("import-a", "caller-file", "file-a");
-  insertImport.run("import-b", "caller-file", "file-b");
+  insertImport.run(
+    "caller-file", "file-a", "imports",
+    JSON.stringify({rel:"import",count:1,refName:"*",confidence:1}),
+  );
+  insertImport.run(
+    "caller-file", "file-b", "imports",
+    JSON.stringify({rel:"import",count:1,refName:"*",confidence:1}),
+  );
+
+  const callFooId = graph.database.db
+    .prepare("SELECT id FROM edges WHERE source='caller' AND target='foo' AND kind='calls'")
+    .get().id;
+  const callBarId = graph.database.db
+    .prepare("SELECT id FROM edges WHERE source='caller' AND target='bar' AND kind='calls'")
+    .get().id;
 
   const affected = graph.writer.affectedResolvedEdgeIds("file-b", ["baz"]);
-  assert.equal(affected.includes("call-foo"), false);
-  assert.equal(affected.includes("call-bar"), true);
+  assert.equal(affected.includes(String(callFooId)), false);
+  assert.equal(affected.includes(String(callBarId)), true);
   graph.close();
 });
 
@@ -461,19 +476,34 @@ test("RTA invalidation expands concrete types to receiver interfaces", async () 
   );
   graph.database.db
     .prepare(
-      `INSERT INTO edges(
-       id,src_id,dst_id,src_is_file,dst_is_file,kind,rel,count,first_line,
-       ref_name,source_language,receiver_kind,receiver_name,member_name,
-       resolution_hints,provenance,confidence,evidence
-     ) VALUES('dispatch','caller','fallback-run',0,0,'CALLS','call',1,1,
-       'value.run','java','qualified','value','run',?,'heuristic',0.75,
-       'receiver_type_member')`,
+      `INSERT INTO unresolved_refs(from_node_id,reference_name,reference_kind,line,col,file_path,language,status,name_tail,metadata)
+       VALUES('caller','value.run','calls',1,0,'caller-file','java','resolved','',?)`,
     )
     .run(
       JSON.stringify({
-        receiverType: "Runner",
-        candidateTypes: ["Runner"],
-        dispatch: "interface",
+        receiverKind:"qualified",receiverName:"value",member:"run",
+        resolutionHints:{
+          receiverType:"Runner",
+          candidateTypes:["Runner"],
+          dispatch:"interface",
+        },
+      }),
+    );
+  graph.database.db
+    .prepare(
+      `INSERT INTO edges(source,target,kind,metadata,line,col,provenance)
+       VALUES('caller','fallback-run','calls',?,1,0,'heuristic')`,
+    )
+    .run(
+      JSON.stringify({
+        rel:"call",count:1,refName:"value.run",sourceLanguage:"java",
+        receiverKind:"qualified",receiverName:"value",member:"run",
+        resolutionHints:{
+          receiverType:"Runner",
+          candidateTypes:["Runner"],
+          dispatch:"interface",
+        },
+        confidence:0.75,evidence:"receiver_type_member",
       }),
     );
 
@@ -551,19 +581,34 @@ test("RTA distinguishes unrelated same-name concrete type identities", async () 
   );
   graph.database.db
     .prepare(
-      `INSERT INTO edges(
-       id,src_id,dst_id,src_is_file,dst_is_file,kind,rel,count,first_line,
-       ref_name,source_language,receiver_kind,receiver_name,member_name,
-       resolution_hints,provenance,confidence,evidence
-     ) VALUES('same-name-dispatch','same-name-caller','run-one',0,0,
-       'CALLS','call',1,1,'value.run','java','qualified','value','run',?,
-       'heuristic',0.75,'receiver_type_member')`,
+      `INSERT INTO unresolved_refs(from_node_id,reference_name,reference_kind,line,col,file_path,language,status,name_tail,metadata)
+       VALUES('same-name-caller','value.run','calls',1,0,'','java','resolved','',?)`,
     )
     .run(
       JSON.stringify({
-        receiverType: "RunnerOne",
-        candidateTypes: ["RunnerOne"],
-        dispatch: "interface",
+        receiverKind:"qualified",receiverName:"value",member:"run",
+        resolutionHints:{
+          receiverType:"RunnerOne",
+          candidateTypes:["RunnerOne"],
+          dispatch:"interface",
+        },
+      }),
+    );
+  graph.database.db
+    .prepare(
+      `INSERT INTO edges(source,target,kind,metadata,line,col,provenance)
+       VALUES('same-name-caller','run-one','calls',?,1,0,'heuristic')`,
+    )
+    .run(
+      JSON.stringify({
+        rel:"call",count:1,refName:"value.run",sourceLanguage:"java",
+        receiverKind:"qualified",receiverName:"value",member:"run",
+        resolutionHints:{
+          receiverType:"RunnerOne",
+          candidateTypes:["RunnerOne"],
+          dispatch:"interface",
+        },
+        confidence:0.75,evidence:"receiver_type_member",
       }),
     );
 
@@ -748,7 +793,7 @@ test("retry batches process unrelated names only once per invocation", async () 
     pendingAttempts() {
       return this.database.db
         .prepare(
-          "SELECT ref_name,last_attempt,COUNT(*) AS count FROM unresolved_refs WHERE status='failed' GROUP BY ref_name,last_attempt ORDER BY ref_name,last_attempt",
+          "SELECT reference_name AS ref_name,COALESCE(json_extract(metadata,'$.lastAttempt'),0) AS last_attempt,COUNT(*) AS count FROM unresolved_refs WHERE status='failed' GROUP BY ref_name,last_attempt ORDER BY ref_name,last_attempt",
         )
         .all()
         .map((row) => ({ ...row }));
@@ -1036,7 +1081,7 @@ test("reprojecting a local constructor keeps one instantiation fact", async () =
     instantiationRows() {
       return this.database.db
         .prepare(
-          "SELECT COUNT(*) AS count FROM edges WHERE kind='INSTANTIATES'",
+          "SELECT COUNT(*) AS count FROM edges WHERE kind='instantiates'",
         )
         .get().count;
     }

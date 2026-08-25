@@ -68,7 +68,8 @@ export function resolveRef(
     return {
       status: "resolved",
       dst: defaultExportHit.id,
-      edgeKind: ref.ref_kind === "call" ? "CALLS" : "REFS",
+      edgeKind:
+        ref.ref_kind === "call" || ref.ref_kind === "calls" ? "CALLS" : "REFS",
       evidence: "preferred_file",
     };
   }
@@ -78,7 +79,9 @@ export function resolveRef(
       dst: namespaceHit.id,
       edgeKind: isInheritanceRef(ref.ref_kind)
         ? "INHERITS"
-        : ref.ref_kind === "call" || ref.ref_kind === "new"
+        : ref.ref_kind === "call" ||
+            ref.ref_kind === "calls" ||
+            ref.ref_kind === "new"
           ? "CALLS"
           : "REFS",
       evidence: "preferred_file",
@@ -111,7 +114,9 @@ export function resolveRef(
 
   const edgeKind = isInheritanceRef(ref.ref_kind)
     ? "INHERITS"
-    : ref.ref_kind === "call" || ref.ref_kind === "new"
+    : ref.ref_kind === "call" ||
+        ref.ref_kind === "calls" ||
+        ref.ref_kind === "new"
       ? "CALLS"
       : "REFS";
 

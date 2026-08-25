@@ -297,4 +297,13 @@ export interface GraphStorage extends GraphReader {
   ): void;
   deleteFileGraph(fileId: string): void;
   resolvePending(options?: ResolvePendingOptions): Promise<void>;
+
+  /** Write a CodeGraph kernel extraction result directly (CodeGraph schema). */
+  writeKernelResult?(
+    filePath: string,
+    language: string,
+    contentHash: string,
+    size: number,
+    result: import("../extraction/kernel/types.js").ExtractionResult,
+  ): void;
 }

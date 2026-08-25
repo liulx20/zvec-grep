@@ -6,9 +6,11 @@ import type {
   SymNode,
 } from "./types.js";
 import type { FileInfo } from "../types.js";
+import type { ExtractionResult } from "../extraction/kernel/types.js";
 import { SqlitePendingRefResolver } from "./persistence/sqlite/pending-ref-resolver.js";
 import { SqliteGraphReader } from "./persistence/sqlite/reader.js";
 import { SqliteGraphWriter } from "./persistence/sqlite/writer.js";
+import { KernelGraphWriter } from "./persistence/sqlite/kernel-graph-writer.js";
 
 /** Public SQLite graph facade composed from reader, writer and resolver units. */
 export class SqliteGraphStorage
@@ -17,6 +19,7 @@ export class SqliteGraphStorage
 {
   private readonly writer: SqliteGraphWriter;
   private readonly resolver: SqlitePendingRefResolver;
+  private readonly kernelWriter: KernelGraphWriter;
 
   constructor(
     directory: string,
@@ -25,6 +28,7 @@ export class SqliteGraphStorage
     super(directory, options);
     this.writer = new SqliteGraphWriter(this.database);
     this.resolver = new SqlitePendingRefResolver(this.database);
+    this.kernelWriter = new KernelGraphWriter(this.database);
   }
 
   checkpoint(): Promise<void> {
@@ -47,5 +51,21 @@ export class SqliteGraphStorage
 
   resolvePending(options?: ResolvePendingOptions): Promise<void> {
     return this.resolver.resolvePending(options);
+  }
+
+  writeKernelResult(
+    filePath: string,
+    language: string,
+    contentHash: string,
+    size: number,
+    result: ExtractionResult,
+  ): void {
+    this.kernelWriter.writeFileGraph(
+      filePath,
+      language,
+      contentHash,
+      size,
+      result,
+    );
   }
 }
