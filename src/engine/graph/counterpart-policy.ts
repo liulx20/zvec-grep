@@ -59,22 +59,29 @@ export function semanticPathAffinity(
   right: string,
   additionallyIgnored: ReadonlySet<string> = new Set(),
 ): number {
-  const parts = (path: string): Set<string> =>
-    new Set(
-      path
-        .toLowerCase()
-        .replaceAll("\\", "/")
-        .split("/")
-        .slice(0, -1)
-        .filter(
-          (part) =>
-            part &&
-            !NON_SEMANTIC_PATH_SEGMENTS.has(part) &&
-            !additionallyIgnored.has(part),
-        ),
-    );
-  const leftParts = parts(left);
+  const leftParts = semanticPathTokens(left, additionallyIgnored);
   let score = 0;
-  for (const part of parts(right)) if (leftParts.has(part)) score += 1;
+  for (const part of semanticPathTokens(right, additionallyIgnored))
+    if (leftParts.has(part)) score += 1;
   return score;
+}
+
+/** Meaningful module/directory tokens shared by graph ranking policies. */
+export function semanticPathTokens(
+  path: string,
+  additionallyIgnored: ReadonlySet<string> = new Set(),
+): Set<string> {
+  return new Set(
+    path
+      .toLowerCase()
+      .replaceAll("\\", "/")
+      .split("/")
+      .slice(0, -1)
+      .filter(
+        (part) =>
+          part &&
+          !NON_SEMANTIC_PATH_SEGMENTS.has(part) &&
+          !additionallyIgnored.has(part),
+      ),
+  );
 }

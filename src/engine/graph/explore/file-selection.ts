@@ -18,7 +18,10 @@ export type ExploreFileRoleEvidenceKind =
   | "call_path";
 
 export type ExploreFileEvidenceKind =
-  ExploreFileRoleEvidenceKind | `concept:${string}`;
+  | ExploreFileRoleEvidenceKind
+  | `concept:${string}`
+  | `symbol:${string}`
+  | `path:${string}`;
 
 export type ExploreFileCandidate = {
   fileId: string;
@@ -71,6 +74,13 @@ const SCALED_EVIDENCE = new Set<ExploreFileEvidenceKind>([
   "aligned_change_surface",
   "integration",
   "query_alignment",
+]);
+
+const NOVELTY_EVIDENCE = new Set<ExploreFileRoleEvidenceKind>([
+  "entrypoint",
+  "hierarchy",
+  "call_path",
+  "root_counterpart",
 ]);
 
 /**
@@ -143,6 +153,7 @@ function evidenceWeight(
   intent: ExploreIntent,
 ): number {
   if (kind.startsWith("concept:")) return intent === "concept" ? 0.35 : 0.2;
+  if (kind.startsWith("symbol:") || kind.startsWith("path:")) return 0;
   return weights[kind as ExploreFileRoleEvidenceKind];
 }
 
@@ -163,27 +174,68 @@ function marginalGain(
 ): number {
   if (selected.length === 0) return candidate.score;
   const covered = new Set(
-    selected.flatMap((item) => [...item.evidence.keys()]),
+    selected.flatMap((item) => noveltyEvidence(item.evidence)),
   );
-  const roles = [...candidate.evidence.keys()];
-  const novelty = roles.filter((role) => !covered.has(role)).length;
+  const novelty = noveltyEvidence(candidate.evidence).filter(
+    (role) => !covered.has(role),
+  ).length;
   const redundancy = Math.max(
-    ...selected.map((item) =>
-      evidenceOverlap(candidate.evidence, item.evidence),
-    ),
+    ...selected.map((item) => fileSimilarity(candidate, item)),
     0,
   );
   return candidate.score + novelty * 0.18 - redundancy * 0.2;
 }
 
-function evidenceOverlap(
-  left: ReadonlyMap<ExploreFileEvidenceKind, number>,
-  right: ReadonlyMap<ExploreFileEvidenceKind, number>,
+function noveltyEvidence(
+  evidence: ReadonlyMap<ExploreFileEvidenceKind, number>,
+): ExploreFileEvidenceKind[] {
+  return [...evidence.keys()].filter(
+    (kind) =>
+      kind.startsWith("concept:") ||
+      NOVELTY_EVIDENCE.has(kind as ExploreFileRoleEvidenceKind),
+  );
+}
+
+function fileSimilarity(
+  left: ExploreFileCandidate,
+  right: ExploreFileCandidate,
 ): number {
-  const union = new Set([...left.keys(), ...right.keys()]);
+  return (
+    setOverlap(
+      features(left.evidence, "symbol:"),
+      features(right.evidence, "symbol:"),
+    ) *
+      0.55 +
+    setOverlap(
+      features(left.evidence, "concept:"),
+      features(right.evidence, "concept:"),
+    ) *
+      0.25 +
+    setOverlap(
+      features(left.evidence, "path:"),
+      features(right.evidence, "path:"),
+    ) *
+      0.2
+  );
+}
+
+function features(
+  evidence: ReadonlyMap<ExploreFileEvidenceKind, number>,
+  prefix: "concept:" | "symbol:" | "path:",
+): Set<string> {
+  return new Set(
+    [...evidence.keys()].filter((kind) => kind.startsWith(prefix)),
+  );
+}
+
+function setOverlap(
+  left: ReadonlySet<string>,
+  right: ReadonlySet<string>,
+): number {
+  const union = new Set([...left, ...right]);
   if (union.size === 0) return 0;
   let intersection = 0;
-  for (const role of left.keys()) if (right.has(role)) intersection += 1;
+  for (const value of left) if (right.has(value)) intersection += 1;
   return intersection / union.size;
 }
 

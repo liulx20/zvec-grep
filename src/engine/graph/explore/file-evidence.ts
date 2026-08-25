@@ -1,3 +1,4 @@
+import { semanticPathTokens } from "../counterpart-policy.js";
 import { isLowValuePath } from "../path-policy.js";
 import {
   isTypeishKind,
@@ -53,6 +54,12 @@ export function collectExploreFileEvidence(input: {
   const changeSurface = new Set(input.pool.fileIds("change_surface"));
   for (const [fileId, fileNodes] of byFile) {
     const path = fileNodes[0]?.entity?.file.relativePath;
+    for (const node of fileNodes) {
+      const identity = symbolIdentity(node);
+      if (identity) input.pool.addFileEvidence(fileId, `symbol:${identity}`);
+    }
+    for (const token of semanticPathTokens(path ?? ""))
+      input.pool.addFileEvidence(fileId, `path:${token}`);
     if (path && isLowValuePath(path) && !queryTargetsPath(input.query, path))
       input.pool.addFileEvidence(fileId, "low_value_path");
     const coveredTerms = fileSemanticTerms(fileNodes, terms);
@@ -67,6 +74,12 @@ export function collectExploreFileEvidence(input: {
         coveredTerms.size,
       );
   }
+}
+
+function symbolIdentity(node: ExploreNode): string | undefined {
+  const metadata = node.entity?.entity.metadata;
+  if (metadata?.kind !== "code" || !metadata.symbolName) return undefined;
+  return `${metadata.symbolType}:${metadata.scope ?? ""}:${metadata.symbolName}:${metadata.arity ?? ""}`;
 }
 
 function fileSemanticTerms(

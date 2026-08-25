@@ -7,7 +7,36 @@ import {
   exploreSubgraph,
   queryGraphNeighborhood,
 } from "../../dist/engine/graph/index.js";
+import { selectExploreFiles } from "../../dist/engine/graph/explore/file-selection.js";
 import { entityStorage, graphEntity as entity } from "../helpers/graph.mjs";
+
+test("file selection uses symbol overlap rather than role labels for redundancy", () => {
+  const selected = selectExploreFiles({
+    ordered: [
+      ["root", 10],
+      ["duplicate", 9],
+      ["distinct", 8.5],
+    ],
+    maxFiles: 2,
+    intent: "exact_symbol",
+    evidence: new Map([
+      [
+        "root",
+        new Map([
+          ["root", 1],
+          ["symbol:class::Root", 1],
+        ]),
+      ],
+      ["duplicate", new Map([["symbol:class::Root", 1]])],
+      ["distinct", new Map([["symbol:class::Other", 1]])],
+    ]),
+  });
+
+  assert.deepEqual(
+    selected.map(({ fileId }) => fileId),
+    ["root", "distinct"],
+  );
+});
 
 test("exploreSubgraph expands and RWR-scores multiple seeds without context assembly", () => {
   const graph = new SqliteGraphStorage("", { inMemory: true });
