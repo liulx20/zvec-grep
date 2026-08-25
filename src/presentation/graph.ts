@@ -476,17 +476,6 @@ function selectBoundedRelationships<T extends { src: string; dst: string }>(
   );
 }
 
-/**
- * Associate declaration and implementation members with a queried container.
- *
- * Some language adapters produce distinct nodes for a member declaration and
- * its out-of-line definition. C/C++ definitions can also be attached to a
- * constructor-shaped implementation container. Direct CONTAINS traversal
- * therefore misses relationships originating in the implementation file.
- * Propagate root ownership through equivalent member identities and then
- * through their containment descendants. This is language-neutral and keeps
- * presentation ranking independent from source-file layout conventions.
- */
 function rootSemanticMemberOwners(
   result: ExploreOutput,
   rootIds: ReadonlySet<string>,
@@ -496,112 +485,34 @@ function rootSemanticMemberOwners(
 } {
   const owners = new Map<string, string>();
   const equivalents = new Set<string>();
-  const contains = result.edges.filter((edge) => edge.kind === "CONTAINS");
-  const nodes = new Map(result.nodes.map((node) => [node.id, node]));
-  const identity = (id: string): string | undefined => {
-    const entity = nodes.get(id)?.entity;
-    return entity?.name ? `${entity.kind ?? ""}\0${entity.name}` : undefined;
+  const relations = new Map<string, { id: string; counterpart: boolean }[]>();
+  const append = (src: string, id: string, counterpart: boolean) => {
+    const targets = relations.get(src) ?? [];
+    targets.push({ id, counterpart });
+    relations.set(src, targets);
   };
-
-  const rootIdentities = new Map<string, { owner: string; path: string }[]>();
-  for (const rootId of rootIds) {
-    const key = identity(rootId);
-    const path = nodes.get(rootId)?.entity?.file.relativePath;
-    if (!key || !path) continue;
-    const candidates = rootIdentities.get(key) ?? [];
-    candidates.push({ owner: rootId, path });
-    rootIdentities.set(key, candidates);
-  }
-  for (const node of result.nodes) {
-    if (rootIds.has(node.id)) continue;
-    const key = identity(node.id);
-    const path = node.entity?.file.relativePath;
-    const match =
-      key && path
-        ? rootIdentities
-            .get(key)
-            ?.find((candidate) =>
-              semanticCounterpartPaths(candidate.path, path),
-            )
-        : undefined;
-    if (match) {
-      owners.set(node.id, match.owner);
-      equivalents.add(node.id);
+  for (const edge of result.edges) {
+    if (edge.kind === "CONTAINS") append(edge.src, edge.dst, false);
+    if (edge.kind === "COUNTERPART") {
+      append(edge.src, edge.dst, true);
+      append(edge.dst, edge.src, true);
     }
   }
 
-  for (const edge of contains) {
-    if (rootIds.has(edge.src)) owners.set(edge.dst, edge.src);
-  }
-
-  let changed = true;
-  while (changed) {
-    changed = false;
-    const identityOwners = new Map<string, { owner: string; path: string }[]>();
-    for (const [id, owner] of owners) {
-      const key = identity(id);
-      const path = nodes.get(id)?.entity?.file.relativePath;
-      if (!key || !path) continue;
-      const candidates = identityOwners.get(key) ?? [];
-      candidates.push({ owner, path });
-      identityOwners.set(key, candidates);
-    }
-    for (const node of result.nodes) {
-      if (owners.has(node.id) || rootIds.has(node.id)) continue;
-      const key = identity(node.id);
-      const path = node.entity?.file.relativePath;
-      const match =
-        key && path
-          ? identityOwners
-              .get(key)
-              ?.find((candidate) =>
-                semanticCounterpartPaths(candidate.path, path),
-              )
-          : undefined;
-      if (match) {
-        owners.set(node.id, match.owner);
-        changed = true;
-      }
-    }
-    for (const edge of contains) {
-      if (owners.has(edge.dst)) continue;
-      const owner = owners.get(edge.src);
-      if (owner) {
-        owners.set(edge.dst, owner);
-        changed = true;
-      }
+  const queue = [...rootIds].map((id) => ({ id, owner: id, rootPeer: true }));
+  for (const root of queue) owners.set(root.id, root.owner);
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+    for (const relation of relations.get(current.id) ?? []) {
+      if (owners.has(relation.id)) continue;
+      owners.set(relation.id, current.owner);
+      const rootPeer = current.rootPeer && relation.counterpart;
+      if (rootPeer) equivalents.add(relation.id);
+      queue.push({ id: relation.id, owner: current.owner, rootPeer });
     }
   }
+  for (const rootId of rootIds) owners.delete(rootId);
   return { owners, equivalents };
-}
-
-function semanticCounterpartPaths(left: string, right: string): boolean {
-  if (left === right) return true;
-  const normalize = (path: string) =>
-    path
-      .toLowerCase()
-      .replaceAll("\\", "/")
-      .replace(/\.d\.[^.]+$/, "");
-  const leftNormalized = normalize(left);
-  const rightNormalized = normalize(right);
-  const stem = (path: string) =>
-    path
-      .split("/")
-      .at(-1)
-      ?.replace(/\.[^.]+$/, "") ?? "";
-  if (stem(leftNormalized) !== stem(rightNormalized)) return false;
-  const ignored = new Set(["include", "src", "source", "lib"]);
-  const directories = (path: string) =>
-    new Set(
-      path
-        .split("/")
-        .slice(0, -1)
-        .filter((part) => part && !ignored.has(part)),
-    );
-  const leftDirectories = directories(leftNormalized);
-  return [...directories(rightNormalized)].some((part) =>
-    leftDirectories.has(part),
-  );
 }
 
 function endpointIsRepresented(

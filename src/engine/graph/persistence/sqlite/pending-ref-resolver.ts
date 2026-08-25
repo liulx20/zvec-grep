@@ -168,18 +168,31 @@ export class SqlitePendingRefResolver {
   ): T | undefined {
     return this.database.one<T>(sql, ...params);
   }
+
+  private timed<T>(
+    options: ResolvePendingOptions,
+    name: string,
+    work: () => T,
+  ): T {
+    const startedAt = performance.now();
+    const result = work();
+    options.onTiming?.(
+      name,
+      performance.now() - startedAt,
+      typeof result === "number" ? result : undefined,
+    );
+    return result;
+  }
+
   async resolvePending(options: ResolvePendingOptions = {}): Promise<void> {
     this.assertWritable();
-    let startedAt = performance.now();
     const rebuildCounterparts = this.database.isBulkLoad();
-    this.database.endBulkLoad();
+    this.timed(options, "graph_bulk_finalize", () =>
+      this.database.endBulkLoad(),
+    );
     resetImportResolutionCaches();
-    options.onTiming?.("graph_bulk_finalize", performance.now() - startedAt);
-    startedAt = performance.now();
-    this.counterparts.refresh(rebuildCounterparts);
-    options.onTiming?.(
-      "graph_counterpart_projection",
-      performance.now() - startedAt,
+    this.timed(options, "graph_counterpart_projection", () =>
+      this.counterparts.refresh(rebuildCounterparts),
     );
     const retryFailed = options.retryFailed ?? true;
     const resolvable =
@@ -189,7 +202,7 @@ export class SqlitePendingRefResolver {
         retryFailed ? 1 : 0,
       )?.count ?? 0;
     if (resolvable === 0) return;
-    startedAt = performance.now();
+    const prepareStartedAt = performance.now();
     const names = new NameIndex();
     this.fileDirectories.clear();
     this.filesByDirectory.clear();
@@ -254,78 +267,54 @@ export class SqlitePendingRefResolver {
       this.callableReturnCache.set(name, candidates);
     this.functionPointerSlots.clear();
     const attempt = this.nextAttempt();
-    options.onTiming?.("graph_resolve_prepare", performance.now() - startedAt);
-    startedAt = performance.now();
-    const imports = this.drainPhase("imports", attempt, retryFailed, (ref) =>
-      this.resolveImport(ref, paths, attempt),
-    );
-    this.retireResolvedRustImportAlternatives(attempt);
     options.onTiming?.(
-      "graph_resolve_imports",
-      performance.now() - startedAt,
-      imports,
+      "graph_resolve_prepare",
+      performance.now() - prepareStartedAt,
     );
-    startedAt = performance.now();
-    this.prepareResolutionContext();
-    this.loadDefaultExportCandidates(names, filePaths);
-    options.onTiming?.("graph_resolve_context", performance.now() - startedAt);
-    startedAt = performance.now();
-    const inheritance = this.drainPhase(
-      "inheritance",
-      attempt,
-      retryFailed,
-      (ref) => this.resolveSymbol(ref, names, attempt, new Map()),
-    );
-    options.onTiming?.(
-      "graph_resolve_inheritance",
-      performance.now() - startedAt,
-      inheritance,
+    this.timed(options, "graph_resolve_imports", () => {
+      const count = this.drainPhase("imports", attempt, retryFailed, (ref) =>
+        this.resolveImport(ref, paths, attempt),
+      );
+      this.retireResolvedRustImportAlternatives(attempt);
+      return count;
+    });
+    this.timed(options, "graph_resolve_context", () => {
+      this.prepareResolutionContext();
+      this.loadDefaultExportCandidates(names, filePaths);
+    });
+    this.timed(options, "graph_resolve_inheritance", () =>
+      this.drainPhase("inheritance", attempt, retryFailed, (ref) =>
+        this.resolveSymbol(ref, names, attempt, new Map()),
+      ),
     );
     this.semanticCandidateCache.clear();
-    startedAt = performance.now();
-    const functionRegistrations = this.drainPhase(
-      "function_registrations",
-      attempt,
-      retryFailed,
-      (ref) => this.resolveSymbol(ref, names, attempt, new Map()),
-    );
-    this.loadFunctionPointerSlots();
-    options.onTiming?.(
-      "graph_resolve_function_registrations",
-      performance.now() - startedAt,
-      functionRegistrations,
+    this.timed(options, "graph_resolve_function_registrations", () => {
+      const count = this.drainPhase(
+        "function_registrations",
+        attempt,
+        retryFailed,
+        (ref) => this.resolveSymbol(ref, names, attempt, new Map()),
+      );
+      this.loadFunctionPointerSlots();
+      return count;
+    });
+    this.semanticCandidateCache.clear();
+    this.timed(options, "graph_resolve_instantiations", () =>
+      this.drainPhase("instantiations", attempt, retryFailed, (ref) =>
+        this.resolveSymbol(ref, names, attempt, new Map()),
+      ),
     );
     this.semanticCandidateCache.clear();
-    startedAt = performance.now();
-    const instantiations = this.drainPhase(
-      "instantiations",
-      attempt,
-      retryFailed,
-      (ref) => this.resolveSymbol(ref, names, attempt, new Map()),
-    );
-    options.onTiming?.(
-      "graph_resolve_instantiations",
-      performance.now() - startedAt,
-      instantiations,
-    );
-    this.semanticCandidateCache.clear();
-    startedAt = performance.now();
-    this.directCandidates = new DirectSemanticCandidateIndex(this.database);
-    options.onTiming?.(
-      "graph_resolve_direct_index",
-      performance.now() - startedAt,
-    );
+    this.timed(options, "graph_resolve_direct_index", () => {
+      this.directCandidates = new DirectSemanticCandidateIndex(this.database);
+    });
     // Build/cache hierarchy lookups only after every inheritance batch has
     // completed, so calls never observe a partial inheritance graph.
     const hierarchyCache = new Map<string, readonly string[]>();
-    startedAt = performance.now();
-    const symbols = this.drainPhase("symbols", attempt, retryFailed, (ref) =>
-      this.resolveSymbol(ref, names, attempt, hierarchyCache),
-    );
-    options.onTiming?.(
-      "graph_resolve_symbols",
-      performance.now() - startedAt,
-      symbols,
+    this.timed(options, "graph_resolve_symbols", () =>
+      this.drainPhase("symbols", attempt, retryFailed, (ref) =>
+        this.resolveSymbol(ref, names, attempt, hierarchyCache),
+      ),
     );
     options.onTiming?.(
       "graph_resolve_semantic_queries",
