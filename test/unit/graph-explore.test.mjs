@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   SqliteGraphStorage,
+  UnavailableGraphStorage,
   exploreGraph,
   exploreSubgraph,
   queryGraphNeighborhood,
@@ -566,75 +567,7 @@ test("queryGraphNeighborhood supports impact direction", () => {
 });
 
 test("exploreGraph reports graph_unavailable", () => {
-  const graph = {
-    available: false,
-    symbolScope() {
-      return [];
-    },
-    fileScope() {
-      return [];
-    },
-    expandSeeds() {
-      return [];
-    },
-    expandContainers() {
-      return [];
-    },
-    expandFileNeighbors() {
-      return [];
-    },
-    callers() {
-      return [];
-    },
-    callees() {
-      return [];
-    },
-    impact() {
-      return [];
-    },
-    usages() {
-      return [];
-    },
-    pathBetween() {
-      return null;
-    },
-    hierarchy() {
-      return [];
-    },
-    members() {
-      return [];
-    },
-    deadCode() {
-      return [];
-    },
-    context() {
-      return {
-        focal: { id: "" },
-        containers: [],
-        members: [],
-        incoming: [],
-        outgoing: [],
-      };
-    },
-    traverse() {
-      return [];
-    },
-    stats() {
-      return {
-        symCount: 0,
-        fileCount: 0,
-        refCount: 0,
-        pendingRefCount: 0,
-        failedRefCount: 0,
-        dynamicBoundaryCount: 0,
-        externalRefCount: 0,
-        callsCount: 0,
-        refsCount: 0,
-        inheritsCount: 0,
-      };
-    },
-  };
-  Object.assign(graph, entityStorage([]));
+  const graph = new UnavailableGraphStorage();
   const result = exploreGraph(graph, { query: "X" });
   assert.equal(result.available, false);
   assert.equal(result.emptyReason, "graph_unavailable");

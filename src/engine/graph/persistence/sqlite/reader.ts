@@ -25,7 +25,6 @@ import type {
   DynamicBoundary,
   GraphStats,
   InducedEdgesResult,
-  SeedNeighbor,
   SymContext,
   SymRef,
   TraverseOpts,
@@ -661,33 +660,6 @@ export class SqliteGraphReader {
     );
   }
 
-  symbolScope(root: string, depth: number, limit: number): string[] {
-    return this.traverse(root, {
-      edgeKinds: ["CALLS", "REFS"],
-      direction: "both",
-      maxDepth: depth,
-      limit,
-    }).map((r) => r.id);
-  }
-  fileScope(fileId: string, depth: number, limit: number): string[] {
-    return this.bfs(fileId, ["IMPORTS"], "both", depth, limit).map((r) => r.id);
-  }
-
-  expandSeeds(symIds: readonly string[], limit: number): SeedNeighbor[] {
-    const out: SeedNeighbor[] = [];
-    for (const sid of symIds) {
-      for (const edge of this.adjacentEdges([sid], ["CALLS"], "both", limit)) {
-        out.push({
-          sid,
-          id: edge.src === sid ? edge.dst : edge.src,
-          count: edge.count,
-          direction: edge.src === sid ? "out" : "in",
-        });
-      }
-    }
-    return out;
-  }
-
   expandContainers(
     symIds: readonly string[],
     limit: number,
@@ -995,24 +967,6 @@ export class SqliteGraphReader {
       id,
     );
   }
-  deadCode(limit: number): SymRef[] {
-    return this.all<{ id: string; kind: string }>(
-      `SELECT s.id,s.kind FROM symbols s
-       WHERE s.is_exported=0 AND s.kind IN ('function','method')
-         AND NOT EXISTS(
-           SELECT 1 FROM edges edge
-           WHERE edge.dst_id=s.id AND edge.dst_is_file=0
-             AND edge.kind IN ('CALLS','REFS','INSTANTIATES')
-         )
-         AND NOT EXISTS(
-           SELECT 1 FROM edge_candidates candidate
-           WHERE candidate.target_id=s.id
-         )
-       ORDER BY s.id LIMIT ?`,
-      limit,
-    );
-  }
-
   context(id: string): SymContext {
     const containers: SymRef[] = [];
     let current = id;

@@ -16,7 +16,6 @@ export type {
   ImportBindingRawRef,
   RefResolveResult,
   ResolvePendingOptions,
-  SeedNeighbor,
   SymContext,
   SymNode,
   SymRef,

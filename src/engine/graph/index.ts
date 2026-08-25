@@ -18,7 +18,6 @@ export type {
   ImportRawRef,
   ImportBindingRawRef,
   RefResolveResult,
-  SeedNeighbor,
   SymContext,
   SymNode,
   SymRef,

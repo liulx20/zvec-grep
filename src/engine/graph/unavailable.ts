@@ -8,7 +8,6 @@ import type {
   LocalEdge,
   RawRef,
   ResolvePendingOptions,
-  SeedNeighbor,
   SymContext,
   SymNode,
   SymRef,
@@ -46,15 +45,6 @@ export class UnavailableGraphStorage implements GraphStorage {
   findSymbolIdsByName(): string[] {
     return [];
   }
-  symbolScope(): string[] {
-    return [];
-  }
-  fileScope(): string[] {
-    return [];
-  }
-  expandSeeds(): SeedNeighbor[] {
-    return [];
-  }
   expandContainers(): ContainerNeighbor[] {
     return [];
   }
@@ -80,9 +70,6 @@ export class UnavailableGraphStorage implements GraphStorage {
     return [];
   }
   members(): SymRef[] {
-    return [];
-  }
-  deadCode(): SymRef[] {
     return [];
   }
   context(symId: string): SymContext {

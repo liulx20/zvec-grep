@@ -17,13 +17,6 @@ export type UsageRef = {
   count?: number;
 };
 
-export type SeedNeighbor = {
-  sid: string;
-  id: string;
-  count: number;
-  direction: "out" | "in";
-};
-
 export type ContainerNeighbor = {
   sid: string;
   parent_id: string;
@@ -231,10 +224,6 @@ export interface GraphReader {
   /** Case-insensitive exact lookup over the indexed symbol name column. */
   findSymbolIdsByName(name: string, limit: number): string[];
 
-  symbolScope(rootSymId: string, depth: number, limit: number): string[];
-  fileScope(fileId: string, depth: number, limit: number): string[];
-
-  expandSeeds(symIds: readonly string[], limit: number): SeedNeighbor[];
   expandContainers(
     symIds: readonly string[],
     limit: number,
@@ -262,7 +251,6 @@ export interface GraphReader {
     limit: number,
   ): SymRef[];
   members(symId: string): SymRef[];
-  deadCode(limit: number): SymRef[];
   context(symId: string): SymContext;
   traverse(startSymId: string, opts: TraverseOpts): SymRef[];
   outgoingEdges(

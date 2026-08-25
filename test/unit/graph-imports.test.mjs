@@ -221,8 +221,6 @@ export function formatDate() {
     neighbors.map((n) => n.id),
     [b.id],
   );
-  assert.deepEqual(graph.fileScope(a.id, 1, 10), [b.id]);
-
   // Imported file disambiguates call target when multiple formatDate exist.
   const c = codeFile("file-c", "src/other.ts");
   graph.upsertFileGraph(

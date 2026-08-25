@@ -85,7 +85,6 @@ HTML 原生标签、框架内建组件和 Svelte runes 不进入关系图。
 - `traverse`：按边类型、方向和深度进行通用遍历。
 - `edges`：按节点集合和边类型直接返回真实边及其 `rel`、`count`、`first_line`、`ref_name`，
   但只保留起点和终点都在给定集合内的诱导子图边。Explore 用它恢复选定子图内部的真实关系。
-- `deadCode`：基于图入边的启发式死代码候选。
 - `stats`：文件、符号、待解析引用和各类边的计数。
 
 ### 2.4 对外入口
@@ -297,7 +296,7 @@ pending occurrence，以便再次解析。import binding 的 `local_name`、`imp
 3. `traverse`、`impact`、`hierarchy` 等在应用层维护 BFS frontier；每一层通过 `json_each()` 批量
    查询该层节点的邻接边，将剩余节点预算作为稳定排序后的 SQL `LIMIT` 下推，再批量读取目标节点类型，
    避免逐节点 N+1 查询和高扇入/扇出节点的无界物化。
-   `expandSeeds()` 和 `expandFileNeighbors()` 的 limit 则按输入 seed 独立执行，避免高扇出 seed
+   `expandFileNeighbors()` 的 limit 按输入 seed 独立执行，避免高扇出 seed
    占满其他 seed 的结果窗口。混合关系遍历先给每种 edge kind 分配基础配额，再把空类型的剩余预算
    轮转补给仍有结果的类型，避免 `CALLS` 长期挤掉 `IMPORTS` 或 `INSTANTIATES`。
 4. Explore 只把预算内局部子图放进内存并运行 RWR，内存占用与查询子图规模相关，而不是与完整
@@ -794,8 +793,6 @@ occurrence 仍依赖提取遍历顺序，尚未使用 column 或稳定 source ra
   因此保留候选边界而非伪造确定 CALLS。带默认参数、可选参数、rest/splat 的 callable 不再使用错误的
   固定 arity 过滤；当前 schema 还没有 min/max arity，因此这类 callable 以未知精确 arity 保存。
   该次 16,527 条 symbol refs 的 graph resolve 约 915ms。
-- `deadCode` 是基于图入边的候选判断，不能证明代码不可达。
-
 ### 6.6 覆盖面与可观测性
 
 - 现有测试覆盖本地/跨文件 CALLS、REFS、INHERITS、IMPORTS、SQLite 持久化、query 和 explore
