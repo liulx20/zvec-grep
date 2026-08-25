@@ -10,20 +10,10 @@ import {
   rawRef,
   resolveImportPath,
 } from "../../dist/engine/graph/index.js";
+import { codeFile as makeCodeFile } from "../helpers/graph.mjs";
 
-function codeFile(id, relativePath, format = "typescript") {
-  return {
-    id,
-    collectionId: "collection-1",
-    absolutePath: `/repo/${relativePath}`,
-    relativePath,
-    rootPath: "/repo",
-    sizeBytes: 100,
-    lastModifiedTime: 1,
-    kind: "code",
-    format,
-  };
-}
+const codeFile = (id, relativePath, format = "typescript") =>
+  makeCodeFile(relativePath, { id, format });
 
 test("expandFileNeighbors applies limit independently to every seed", async () => {
   const first = codeFile("a-seed", "src/a.ts");

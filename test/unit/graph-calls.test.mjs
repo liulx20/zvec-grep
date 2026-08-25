@@ -6,19 +6,28 @@ import {
   extractFileGraph,
 } from "../../dist/engine/graph/index.js";
 import { NameIndex } from "../../dist/engine/graph/name-index.js";
+import {
+  codeFile,
+  extractGraph,
+  extractSourceGraph,
+  resolveGraph,
+} from "../helpers/graph.mjs";
 
-function codeFile(relativePath = "mod.ts") {
-  return {
-    id: "file-1",
-    collectionId: "collection-1",
-    absolutePath: `/repo/${relativePath}`,
-    relativePath,
-    rootPath: "/repo",
-    sizeBytes: 100,
-    lastModifiedTime: 1,
-    kind: "code",
-    format: "typescript",
-  };
+function containerName(input, memberId) {
+  const containerId = input.edges.find(
+    (edge) => edge.kind === "CONTAINS" && edge.dst === memberId,
+  )?.src;
+  return input.nodes.find((node) => node.id === containerId)?.name;
+}
+
+function memberIn(input, container, name) {
+  return input.nodes.find(
+    (node) => node.name === name && containerName(input, node.id) === container,
+  );
+}
+
+function candidateContainers(input, boundary) {
+  return boundary.candidates.map((id) => containerName(input, id));
 }
 
 test("equivalent declarations resolve independently of load order", () => {
@@ -55,9 +64,7 @@ export function run() {
   console.log("x");
 }
 `;
-  const source = { kind: "text", text, file };
-  const fragments = await new CodeExtractor().extract(source);
-  const graphInput = await extractFileGraph(source, fragments);
+  const graphInput = await extractGraph(file, text);
 
   assert.ok(graphInput.nodes.some((n) => n.name === "run"));
   assert.ok(graphInput.nodes.some((n) => n.name === "helper"));
@@ -83,14 +90,7 @@ export function run() {
     "builtin console should be dropped early",
   );
 
-  const graph = new SqliteGraphStorage("", { inMemory: true });
-  graph.upsertFileGraph(
-    file.id,
-    graphInput.nodes,
-    graphInput.edges,
-    graphInput.refs,
-  );
-  await graph.resolvePending();
+  const graph = await resolveGraph(file, graphInput);
 
   const run = graphInput.nodes.find((n) => n.name === "run");
   const helper = graphInput.nodes.find((n) => n.name === "helper");
@@ -486,10 +486,7 @@ class Second {
   run() { return Demo.helper(); }
 }`,
   };
-  const input = await extractFileGraph(
-    source,
-    await new CodeExtractor().extract(source),
-  );
+  const input = await extractSourceGraph(source);
   const nodesByName = (name) =>
     input.nodes.filter((node) => node.name === name);
   const helpers = nodesByName("helper");
@@ -530,10 +527,7 @@ class ChildWithOverride extends Base {
   own() { return this.helper(); }
 }`,
   };
-  const input = await extractFileGraph(
-    source,
-    await new CodeExtractor().extract(source),
-  );
+  const input = await extractSourceGraph(source);
   const contains = input.edges.filter((edge) => edge.kind === "CONTAINS");
   const containerFor = (id) =>
     input.nodes.find(
@@ -550,9 +544,7 @@ class ChildWithOverride extends Base {
   const own = findMember("ChildWithOverride", "own");
   assert.ok(baseHelper && inheritedRun && overridingHelper && other && own);
 
-  const graph = new SqliteGraphStorage("", { inMemory: true });
-  graph.upsertFileGraph(file.id, input.nodes, input.edges, input.refs);
-  await graph.resolvePending();
+  const graph = await resolveGraph(file, input);
   for (const caller of [inheritedRun, overridingHelper, other]) {
     assert.deepEqual(
       graph.callees(caller.id, 1, 10).map((item) => item.id),
@@ -639,11 +631,7 @@ class Child : public Base {
       ...codeFile(fixture.path),
       format: fixture.format,
     };
-    const source = { kind: "text", file, text: fixture.text };
-    const input = await extractFileGraph(
-      source,
-      await new CodeExtractor().extract(source),
-    );
+    const input = await extractGraph(file, fixture.text);
     const contains = input.edges.filter((edge) => edge.kind === "CONTAINS");
     const containerFor = (id) =>
       input.nodes.find(
@@ -657,9 +645,7 @@ class Child : public Base {
     const caller = member(fixture.child, fixture.caller);
     assert.ok(target && caller);
 
-    const graph = new SqliteGraphStorage("", { inMemory: true });
-    graph.upsertFileGraph(file.id, input.nodes, input.edges, input.refs);
-    await graph.resolvePending();
+    const graph = await resolveGraph(file, input);
     assert.deepEqual(
       graph.callees(caller.id, 1, 10).map((item) => item.id),
       [target.id],
@@ -694,7 +680,7 @@ export class Foo {
 });
 
 test("Go interface dispatch exposes implementation candidates as a dynamic boundary", async () => {
-  const file = { ...codeFile("dispatch.go"), format: "go" };
+  const file = codeFile("dispatch.go", { format: "go" });
   const source = {
     kind: "text",
     file,
@@ -707,16 +693,11 @@ func (Beta) Run() {}
 func invoke[T Runner](value T) { value.Run() }
 `,
   };
-  const input = await extractFileGraph(
-    source,
-    await new CodeExtractor().extract(source),
-  );
+  const input = await extractSourceGraph(source);
   const invoke = input.nodes.find((node) => node.name === "invoke");
   assert.ok(invoke);
 
-  const graph = new SqliteGraphStorage("", { inMemory: true });
-  graph.upsertFileGraph(file.id, input.nodes, input.edges, input.refs);
-  await graph.resolvePending();
+  const graph = await resolveGraph(file, input);
 
   const boundaries = graph.dynamicBoundaries([invoke.id], 10);
   assert.equal(boundaries.length, 1);
@@ -743,7 +724,7 @@ func invoke[T Runner](value T) { value.Run() }
 });
 
 test("Go concrete receiver type resolves a method call in its container", async () => {
-  const file = { ...codeFile("receiver.go"), format: "go" };
+  const file = codeFile("receiver.go", { format: "go" });
   const source = {
     kind: "text",
     file,
@@ -753,10 +734,7 @@ func (worker Worker) helper() {}
 func (worker Worker) run() { worker.helper() }
 `,
   };
-  const input = await extractFileGraph(
-    source,
-    await new CodeExtractor().extract(source),
-  );
+  const input = await extractSourceGraph(source);
   const run = input.nodes.find((node) => node.name === "run");
   const helper = input.nodes.find((node) => node.name === "helper");
   assert.ok(run && helper);
@@ -768,48 +746,37 @@ func (worker Worker) run() { worker.helper() }
   );
 });
 
-test("Rust AST arity excludes self and preserves generic parameter grouping", async () => {
-  const file = { ...codeFile("arity.rs"), format: "rust" };
-  const source = {
-    kind: "text",
-    file,
+for (const fixture of [
+  {
+    language: "Rust",
+    format: "rust",
+    path: "arity.rs",
     text: `use std::collections::HashMap;
 struct Value;
 impl Value {
   fn run(&self, values: HashMap<String, i32>) {}
 }
 `,
-  };
-  const input = await extractFileGraph(
-    source,
-    await new CodeExtractor().extract(source),
-  );
-  const run = input.nodes.find((node) => node.name === "run");
-  assert.ok(run);
-  assert.equal(run.arity, 1);
-});
-
-test("Python AST arity excludes self and preserves generic parameter grouping", async () => {
-  const file = { ...codeFile("arity.py"), format: "python" };
-  const source = {
-    kind: "text",
-    file,
+  },
+  {
+    language: "Python",
+    format: "python",
+    path: "arity.py",
     text: `class Value:
   def run(self, values: dict[str, int]):
     pass
 `,
-  };
-  const input = await extractFileGraph(
-    source,
-    await new CodeExtractor().extract(source),
-  );
-  const run = input.nodes.find((node) => node.name === "run");
-  assert.ok(run);
-  assert.equal(run.arity, 1);
-});
+  },
+]) {
+  test(`${fixture.language} AST arity excludes the implicit receiver`, async () => {
+    const file = codeFile(fixture.path, { format: fixture.format });
+    const input = await extractGraph(file, fixture.text);
+    assert.equal(input.nodes.find((node) => node.name === "run")?.arity, 1);
+  });
+}
 
 test("Rust trait dispatch owns impl methods and exposes implementations", async () => {
-  const file = { ...codeFile("dispatch.rs"), format: "rust" };
+  const file = codeFile("dispatch.rs", { format: "rust" });
   const source = {
     kind: "text",
     file,
@@ -819,10 +786,7 @@ impl Runner for Alpha { fn run(&self) {} }
 fn invoke(value: &dyn Runner) { value.run(); }
 `,
   };
-  const input = await extractFileGraph(
-    source,
-    await new CodeExtractor().extract(source),
-  );
+  const input = await extractSourceGraph(source);
   const invoke = input.nodes.find((node) => node.name === "invoke");
   const runMethods = input.nodes.filter((node) => node.name === "run");
   assert.ok(invoke);
@@ -852,9 +816,7 @@ fn invoke(value: &dyn Runner) { value.run(); }
     "the impl block, not the same-name struct, must own its method",
   );
 
-  const graph = new SqliteGraphStorage("", { inMemory: true });
-  graph.upsertFileGraph(file.id, input.nodes, input.edges, input.refs);
-  await graph.resolvePending();
+  const graph = await resolveGraph(file, input);
   const boundary = graph.dynamicBoundaries([invoke.id], 10)[0];
   assert.ok(boundary);
   assert.ok(boundary.candidates.includes(implRun.id));
@@ -862,7 +824,7 @@ fn invoke(value: &dyn Runner) { value.run(); }
 });
 
 test("this.field receiver uses the owner field type, not a later local", async () => {
-  const file = { ...codeFile("OwnerField.ts"), format: "typescript" };
+  const file = codeFile("OwnerField.ts", { format: "typescript" });
   const source = {
     kind: "text",
     file,
@@ -877,10 +839,7 @@ class Use {
   }
 }`,
   };
-  const input = await extractFileGraph(
-    source,
-    await new CodeExtractor().extract(source),
-  );
+  const input = await extractSourceGraph(source);
   const invoke = input.nodes.find((node) => node.name === "invoke");
   assert.ok(invoke);
   const calls = input.refs.filter(
@@ -895,13 +854,25 @@ class Use {
   assert.equal(calls[1].target.hints?.receiverType, "Other");
 });
 
-test("Go structural dispatch requires the complete interface method set", async () => {
-  const file = { ...codeFile("method-set.go"), format: "go" };
-  const source = {
-    kind: "text",
-    file,
-    text: `package p
-type Runner interface { Run(); Stop() }
+for (const fixture of [
+  {
+    name: "complete interface method set",
+    path: "method-set.go",
+    declarations: `type Runner interface { Run(); Stop() }`,
+  },
+  {
+    name: "embedded interface method set",
+    path: "embedded-method-set.go",
+    declarations: `type Base interface { Stop() }
+type Runner interface { Base; Run() }`,
+  },
+]) {
+  test(`Go structural dispatch checks the ${fixture.name}`, async () => {
+    const file = codeFile(fixture.path, { format: "go" });
+    const input = await extractGraph(
+      file,
+      `package p
+${fixture.declarations}
 type Alpha struct{}
 func (a Alpha) Run() {}
 func (a Alpha) Stop() {}
@@ -909,75 +880,21 @@ type Unrelated struct{}
 func (u Unrelated) Run() {}
 func invoke[T Runner](value T) { value.Run() }
 `,
-  };
-  const input = await extractFileGraph(
-    source,
-    await new CodeExtractor().extract(source),
-  );
-  const invoke = input.nodes.find((node) => node.name === "invoke");
-  assert.ok(invoke);
-  const graph = new SqliteGraphStorage("", { inMemory: true });
-  graph.upsertFileGraph(file.id, input.nodes, input.edges, input.refs);
-  await graph.resolvePending();
-  const boundary = graph.dynamicBoundaries([invoke.id], 10)[0];
-  assert.ok(boundary);
-  const parentByChild = new Map(
-    input.edges
-      .filter((edge) => edge.kind === "CONTAINS")
-      .map((edge) => [edge.dst, edge.src]),
-  );
-  const nameById = new Map(input.nodes.map((node) => [node.id, node.name]));
-  const candidateContainers = boundary.candidates.map((id) =>
-    nameById.get(parentByChild.get(id)),
-  );
-  assert.ok(candidateContainers.includes("Alpha"));
-  assert.equal(candidateContainers.includes("Unrelated"), false);
-  graph.close();
-});
-
-test("Go structural dispatch includes embedded interface method sets", async () => {
-  const file = { ...codeFile("embedded-method-set.go"), format: "go" };
-  const source = {
-    kind: "text",
-    file,
-    text: `package p
-type Base interface { Stop() }
-type Runner interface { Base; Run() }
-type Alpha struct{}
-func (a Alpha) Run() {}
-func (a Alpha) Stop() {}
-type Unrelated struct{}
-func (u Unrelated) Run() {}
-func invoke[T Runner](value T) { value.Run() }
-`,
-  };
-  const input = await extractFileGraph(
-    source,
-    await new CodeExtractor().extract(source),
-  );
-  const invoke = input.nodes.find((node) => node.name === "invoke");
-  assert.ok(invoke);
-  const graph = new SqliteGraphStorage("", { inMemory: true });
-  graph.upsertFileGraph(file.id, input.nodes, input.edges, input.refs);
-  await graph.resolvePending();
-  const boundary = graph.dynamicBoundaries([invoke.id], 10)[0];
-  assert.ok(boundary);
-  const parentByChild = new Map(
-    input.edges
-      .filter((edge) => edge.kind === "CONTAINS")
-      .map((edge) => [edge.dst, edge.src]),
-  );
-  const nameById = new Map(input.nodes.map((node) => [node.id, node.name]));
-  const candidateContainers = boundary.candidates.map((id) =>
-    nameById.get(parentByChild.get(id)),
-  );
-  assert.ok(candidateContainers.includes("Alpha"));
-  assert.equal(candidateContainers.includes("Unrelated"), false);
-  graph.close();
-});
+    );
+    const invoke = input.nodes.find((node) => node.name === "invoke");
+    assert.ok(invoke);
+    const graph = await resolveGraph(file, input);
+    const boundary = graph.dynamicBoundaries([invoke.id], 10)[0];
+    assert.ok(boundary);
+    const containers = candidateContainers(input, boundary);
+    assert.ok(containers.includes("Alpha"));
+    assert.equal(containers.includes("Unrelated"), false);
+    graph.close();
+  });
+}
 
 test("Go structural dispatch includes methods promoted from embedded providers", async () => {
-  const file = { ...codeFile("promoted-method-set.go"), format: "go" };
+  const file = codeFile("promoted-method-set.go", { format: "go" });
   const source = {
     kind: "text",
     file,
@@ -992,10 +909,7 @@ func (Unrelated) Run() {}
 func invoke[T Runner](value T) { value.Run() }
 `,
   };
-  const input = await extractFileGraph(
-    source,
-    await new CodeExtractor().extract(source),
-  );
+  const input = await extractSourceGraph(source);
   const invoke = input.nodes.find((node) => node.name === "invoke");
   const runBase = input.nodes.find((node) => node.name === "RunBase");
   const promotedRun = input.nodes.find(
@@ -1010,9 +924,7 @@ func invoke[T Runner](value T) { value.Run() }
   );
   assert.ok(invoke && runBase && promotedRun);
 
-  const graph = new SqliteGraphStorage("", { inMemory: true });
-  graph.upsertFileGraph(file.id, input.nodes, input.edges, input.refs);
-  await graph.resolvePending();
+  const graph = await resolveGraph(file, input);
 
   const boundary = graph.dynamicBoundaries([invoke.id], 10)[0];
   assert.ok(boundary);
@@ -1022,7 +934,7 @@ func invoke[T Runner](value T) { value.Run() }
 });
 
 test("Rust wrapped trait objects retain the inner dynamic trait", async () => {
-  const file = { ...codeFile("wrapped-dispatch.rs"), format: "rust" };
+  const file = codeFile("wrapped-dispatch.rs", { format: "rust" });
   const source = {
     kind: "text",
     file,
@@ -1032,10 +944,7 @@ impl Runner for Alpha { fn run(&self) {} }
 fn invoke(value: Box<dyn Runner>) { value.run(); }
 `,
   };
-  const input = await extractFileGraph(
-    source,
-    await new CodeExtractor().extract(source),
-  );
+  const input = await extractSourceGraph(source);
   const invoke = input.nodes.find((node) => node.name === "invoke");
   assert.ok(invoke);
   const call = input.refs.find(
@@ -1048,9 +957,7 @@ fn invoke(value: Box<dyn Runner>) { value.run(); }
   assert.deepEqual(call?.target.hints?.candidateTypes, ["Runner"]);
   assert.equal(call?.target.hints?.dispatch, "trait");
 
-  const graph = new SqliteGraphStorage("", { inMemory: true });
-  graph.upsertFileGraph(file.id, input.nodes, input.edges, input.refs);
-  await graph.resolvePending();
+  const graph = await resolveGraph(file, input);
   const boundary = graph.dynamicBoundaries([invoke.id], 10)[0];
   assert.ok(boundary);
   assert.ok(boundary.candidates.length > 0);
@@ -1058,7 +965,7 @@ fn invoke(value: Box<dyn Runner>) { value.run(); }
 });
 
 test("Java interface receiver keeps virtual implementations as candidates", async () => {
-  const file = { ...codeFile("Dispatch.java"), format: "java" };
+  const file = codeFile("Dispatch.java", { format: "java" });
   const source = {
     kind: "text",
     file,
@@ -1067,15 +974,10 @@ class Alpha implements Runner { public void run() {} }
 class Use { void invoke(Runner value) { value.run(); } }
 `,
   };
-  const input = await extractFileGraph(
-    source,
-    await new CodeExtractor().extract(source),
-  );
+  const input = await extractSourceGraph(source);
   const invoke = input.nodes.find((node) => node.name === "invoke");
   assert.ok(invoke);
-  const graph = new SqliteGraphStorage("", { inMemory: true });
-  graph.upsertFileGraph(file.id, input.nodes, input.edges, input.refs);
-  await graph.resolvePending();
+  const graph = await resolveGraph(file, input);
 
   const boundary = graph.dynamicBoundaries([invoke.id], 10)[0];
   assert.ok(boundary);
@@ -1087,7 +989,7 @@ class Use { void invoke(Runner value) { value.run(); } }
 });
 
 test("abstract interface targets remain dynamic without concrete implementations", async () => {
-  const file = { ...codeFile("AbstractDispatch.java"), format: "java" };
+  const file = codeFile("AbstractDispatch.java", { format: "java" });
   const source = {
     kind: "text",
     file,
@@ -1095,15 +997,10 @@ test("abstract interface targets remain dynamic without concrete implementations
 class Use { void invoke(Runner value) { value.run(); } }
 `,
   };
-  const input = await extractFileGraph(
-    source,
-    await new CodeExtractor().extract(source),
-  );
+  const input = await extractSourceGraph(source);
   const invoke = input.nodes.find((node) => node.name === "invoke");
   assert.ok(invoke);
-  const graph = new SqliteGraphStorage("", { inMemory: true });
-  graph.upsertFileGraph(file.id, input.nodes, input.edges, input.refs);
-  await graph.resolvePending();
+  const graph = await resolveGraph(file, input);
 
   assert.deepEqual(graph.callees(invoke.id, 1, 10), []);
   const boundary = graph.dynamicBoundaries([invoke.id], 10)[0];
@@ -1115,7 +1012,7 @@ class Use { void invoke(Runner value) { value.run(); } }
 });
 
 test("Java RTA retains methods inherited by instantiated subclasses", async () => {
-  const file = { ...codeFile("InheritedRta.java"), format: "java" };
+  const file = codeFile("InheritedRta.java", { format: "java" });
   const source = {
     kind: "text",
     file,
@@ -1129,30 +1026,13 @@ class Use {
 }
 `,
   };
-  const input = await extractFileGraph(
-    source,
-    await new CodeExtractor().extract(source),
-  );
+  const input = await extractSourceGraph(source);
   const invoke = input.nodes.find((node) => node.name === "invoke");
-  const parentByChild = new Map(
-    input.edges
-      .filter((edge) => edge.kind === "CONTAINS")
-      .map((edge) => [edge.dst, edge.src]),
-  );
-  const nameById = new Map(input.nodes.map((node) => [node.id, node.name]));
-  const method = (containerName) =>
-    input.nodes.find(
-      (node) =>
-        node.name === "run" &&
-        nameById.get(parentByChild.get(node.id)) === containerName,
-    );
-  const baseRun = method("Base");
-  const otherRun = method("Other");
+  const baseRun = memberIn(input, "Base", "run");
+  const otherRun = memberIn(input, "Other", "run");
   assert.ok(invoke && baseRun && otherRun);
 
-  const graph = new SqliteGraphStorage("", { inMemory: true });
-  graph.upsertFileGraph(file.id, input.nodes, input.edges, input.refs);
-  await graph.resolvePending();
+  const graph = await resolveGraph(file, input);
 
   assert.deepEqual(graph.callees(invoke.id, 1, 10), []);
   const boundary = graph.dynamicBoundaries([invoke.id], 10)[0];
@@ -1165,7 +1045,7 @@ class Use {
 });
 
 test("Java abstract class methods remain dynamic targets", async () => {
-  const file = { ...codeFile("AbstractClass.java"), format: "java" };
+  const file = codeFile("AbstractClass.java", { format: "java" });
   const source = {
     kind: "text",
     file,
@@ -1173,18 +1053,13 @@ test("Java abstract class methods remain dynamic targets", async () => {
 class Use { void invoke(Runner value) { value.run(); } }
 `,
   };
-  const input = await extractFileGraph(
-    source,
-    await new CodeExtractor().extract(source),
-  );
+  const input = await extractSourceGraph(source);
   const runner = input.nodes.find((node) => node.name === "Runner");
   const invoke = input.nodes.find((node) => node.name === "invoke");
   assert.ok(runner && invoke);
   assert.equal(runner.kind, "abstract_class");
 
-  const graph = new SqliteGraphStorage("", { inMemory: true });
-  graph.upsertFileGraph(file.id, input.nodes, input.edges, input.refs);
-  await graph.resolvePending();
+  const graph = await resolveGraph(file, input);
 
   assert.deepEqual(graph.callees(invoke.id, 1, 10), []);
   const boundary = graph.dynamicBoundaries([invoke.id], 10)[0];
@@ -1195,7 +1070,7 @@ class Use { void invoke(Runner value) { value.run(); } }
 });
 
 test("RTA narrows virtual candidates to instantiated implementations", async () => {
-  const file = { ...codeFile("Rta.java"), format: "java" };
+  const file = codeFile("Rta.java", { format: "java" });
   const source = {
     kind: "text",
     file,
@@ -1208,28 +1083,15 @@ class Use {
 }
 `,
   };
-  const input = await extractFileGraph(
-    source,
-    await new CodeExtractor().extract(source),
-  );
+  const input = await extractSourceGraph(source);
   const invoke = input.nodes.find((node) => node.name === "invoke");
   const create = input.nodes.find((node) => node.name === "create");
   const alphaType = input.nodes.find((node) => node.name === "Alpha");
-  const alphaRun = input.nodes.find((node) => {
-    if (node.name !== "run") return false;
-    const parent = input.edges.find(
-      (edge) => edge.kind === "CONTAINS" && edge.dst === node.id,
-    )?.src;
-    return (
-      input.nodes.find((candidate) => candidate.id === parent)?.name === "Alpha"
-    );
-  });
+  const alphaRun = memberIn(input, "Alpha", "run");
   assert.ok(invoke && create && alphaType && alphaRun);
   assert.ok(input.edges.some((edge) => edge.kind === "INSTANTIATES"));
 
-  const graph = new SqliteGraphStorage("", { inMemory: true });
-  graph.upsertFileGraph(file.id, input.nodes, input.edges, input.refs);
-  await graph.resolvePending();
+  const graph = await resolveGraph(file, input);
   assert.equal(
     graph.edges([create.id, alphaType.id], ["INSTANTIATES"], 10).edges.length,
     1,
@@ -1252,11 +1114,7 @@ test("changing the only maker from Alpha to Beta reprojects virtual dispatch", a
     format: "java",
   };
   const makerFile = { ...codeFile("Maker.java"), id: "maker", format: "java" };
-  const prepare = async (file, text) => {
-    const source = { kind: "text", file, text };
-    return extractFileGraph(source, await new CodeExtractor().extract(source));
-  };
-  const types = await prepare(
+  const types = await extractGraph(
     typesFile,
     `interface Runner { void run(); }
 class Alpha implements Runner { public void run() {} }
@@ -1264,31 +1122,15 @@ class Beta implements Runner { public void run() {} }
 class Use { void invoke(Runner value) { value.run(); } }`,
   );
   const invoke = types.nodes.find((node) => node.name === "invoke");
-  const alphaRun = types.nodes.find((node) => {
-    if (node.name !== "run") return false;
-    const parent = types.edges.find(
-      (edge) => edge.kind === "CONTAINS" && edge.dst === node.id,
-    )?.src;
-    return (
-      types.nodes.find((candidate) => candidate.id === parent)?.name === "Alpha"
-    );
-  });
-  const betaRun = types.nodes.find((node) => {
-    if (node.name !== "run") return false;
-    const parent = types.edges.find(
-      (edge) => edge.kind === "CONTAINS" && edge.dst === node.id,
-    )?.src;
-    return (
-      types.nodes.find((candidate) => candidate.id === parent)?.name === "Beta"
-    );
-  });
+  const alphaRun = memberIn(types, "Alpha", "run");
+  const betaRun = memberIn(types, "Beta", "run");
   assert.ok(invoke && alphaRun && betaRun);
   const graph = new SqliteGraphStorage("", { inMemory: true });
   graph.upsertFileGraph(typesFile.id, types.nodes, types.edges, types.refs);
   await graph.resolvePending();
   assert.ok(graph.dynamicBoundaries([invoke.id], 10)[0]);
 
-  const maker = await prepare(
+  const maker = await extractGraph(
     makerFile,
     "class Maker { void make() { new Alpha(); } }",
   );
@@ -1301,7 +1143,7 @@ class Use { void invoke(Runner value) { value.run(); } }`,
     [alphaRun.id],
   );
 
-  const changedMaker = await prepare(
+  const changedMaker = await extractGraph(
     makerFile,
     "class Maker { void make() { new Beta(); } }",
   );
@@ -1331,11 +1173,7 @@ test("deleting the only maker removes the stale RTA projection", async () => {
     id: "delete-maker",
     format: "java",
   };
-  const prepare = async (file, text) => {
-    const source = { kind: "text", file, text };
-    return extractFileGraph(source, await new CodeExtractor().extract(source));
-  };
-  const types = await prepare(
+  const types = await extractGraph(
     typesFile,
     `interface Runner { void run(); }
 class Alpha implements Runner { public void run() {} }
@@ -1344,7 +1182,7 @@ class Use { void invoke(Runner value) { value.run(); } }`,
   );
   const invoke = types.nodes.find((node) => node.name === "invoke");
   assert.ok(invoke);
-  const maker = await prepare(
+  const maker = await extractGraph(
     makerFile,
     "class Maker { void make() { new Alpha(); } }",
   );
@@ -1381,11 +1219,7 @@ test("removing one of multiple Alpha makers keeps the stable RTA projection", as
     id: "maker-b",
     format: "java",
   };
-  const prepare = async (file, text) => {
-    const source = { kind: "text", file, text };
-    return extractFileGraph(source, await new CodeExtractor().extract(source));
-  };
-  const types = await prepare(
+  const types = await extractGraph(
     typesFile,
     `interface Runner { void run(); }
 class Alpha implements Runner { public void run() {} }
@@ -1393,21 +1227,13 @@ class Beta implements Runner { public void run() {} }
 class Use { void invoke(Runner value) { value.run(); } }`,
   );
   const invoke = types.nodes.find((node) => node.name === "invoke");
-  const alphaRun = types.nodes.find((node) => {
-    if (node.name !== "run") return false;
-    const parent = types.edges.find(
-      (edge) => edge.kind === "CONTAINS" && edge.dst === node.id,
-    )?.src;
-    return (
-      types.nodes.find((candidate) => candidate.id === parent)?.name === "Alpha"
-    );
-  });
+  const alphaRun = memberIn(types, "Alpha", "run");
   assert.ok(invoke && alphaRun);
-  const makerA = await prepare(
+  const makerA = await extractGraph(
     makerAFile,
     "class MakerA { void make() { new Alpha(); } }",
   );
-  const makerB = await prepare(
+  const makerB = await extractGraph(
     makerBFile,
     "class MakerB { void make() { new Alpha(); } }",
   );
@@ -1429,7 +1255,7 @@ class Use { void invoke(Runner value) { value.run(); } }`,
 });
 
 test("Java RTA never promotes instantiated unrelated same-name methods", async () => {
-  const file = { ...codeFile("NominalRta.java"), format: "java" };
+  const file = codeFile("NominalRta.java", { format: "java" });
   const source = {
     kind: "text",
     file,
@@ -1442,10 +1268,7 @@ class Use {
 }
 `,
   };
-  const input = await extractFileGraph(
-    source,
-    await new CodeExtractor().extract(source),
-  );
+  const input = await extractSourceGraph(source);
   const invoke = input.nodes.find((node) => node.name === "invoke");
   const unrelatedRun = input.nodes.find((node) => {
     if (node.name !== "run") return false;
@@ -1459,9 +1282,7 @@ class Use {
   });
   assert.ok(invoke && unrelatedRun);
 
-  const graph = new SqliteGraphStorage("", { inMemory: true });
-  graph.upsertFileGraph(file.id, input.nodes, input.edges, input.refs);
-  await graph.resolvePending();
+  const graph = await resolveGraph(file, input);
 
   assert.equal(
     graph
@@ -1476,7 +1297,7 @@ class Use {
 });
 
 test("dynamic candidate selection filters overloads by call arity", async () => {
-  const file = { ...codeFile("Overload.java"), format: "java" };
+  const file = codeFile("Overload.java", { format: "java" });
   const source = {
     kind: "text",
     file,
@@ -1487,18 +1308,13 @@ test("dynamic candidate selection filters overloads by call arity", async () => 
 class Use { void invoke(Target value) { value.run(1); } }
 `,
   };
-  const input = await extractFileGraph(
-    source,
-    await new CodeExtractor().extract(source),
-  );
+  const input = await extractSourceGraph(source);
   const invoke = input.nodes.find((node) => node.name === "invoke");
   const oneArg = input.nodes.find(
     (node) => node.name === "run" && node.arity === 1,
   );
   assert.ok(invoke && oneArg);
-  const graph = new SqliteGraphStorage("", { inMemory: true });
-  graph.upsertFileGraph(file.id, input.nodes, input.edges, input.refs);
-  await graph.resolvePending();
+  const graph = await resolveGraph(file, input);
   assert.deepEqual(
     graph.callees(invoke.id, 1, 10).map((candidate) => candidate.id),
     [oneArg.id],
@@ -1510,12 +1326,11 @@ test("resolved dispatch facts are recomputed when a later override is indexed", 
   const workerFile = { ...codeFile("worker.ts"), id: "worker-file" };
   const callerFile = { ...codeFile("caller.ts"), id: "caller-file" };
   const specialFile = { ...codeFile("special.ts"), id: "special-file" };
-  const prepare = async (file, text) => {
-    const source = { kind: "text", file, text };
-    return extractFileGraph(source, await new CodeExtractor().extract(source));
-  };
-  const worker = await prepare(workerFile, "export class Worker { help() {} }");
-  const caller = await prepare(
+  const worker = await extractGraph(
+    workerFile,
+    "export class Worker { help() {} }",
+  );
+  const caller = await extractGraph(
     callerFile,
     'import { Worker } from "./worker"; export function invoke(value: Worker) { value.help(); }',
   );
@@ -1532,7 +1347,7 @@ test("resolved dispatch facts are recomputed when a later override is indexed", 
     [workerHelp.id],
   );
 
-  const special = await prepare(
+  const special = await extractGraph(
     specialFile,
     'import { Worker } from "./worker"; export class Special extends Worker { help() {} }',
   );
@@ -1556,13 +1371,15 @@ test("target file rebuild preserves structured dispatch facts", async () => {
   const workerFile = { ...codeFile("worker.ts"), id: "worker-file" };
   const otherFile = { ...codeFile("other.ts"), id: "other-file" };
   const callerFile = { ...codeFile("caller.ts"), id: "caller-file" };
-  const prepare = async (file, text) => {
-    const source = { kind: "text", file, text };
-    return extractFileGraph(source, await new CodeExtractor().extract(source));
-  };
-  const worker = await prepare(workerFile, "export class Worker { help() {} }");
-  const other = await prepare(otherFile, "export class Other { help() {} }");
-  const caller = await prepare(
+  const worker = await extractGraph(
+    workerFile,
+    "export class Worker { help() {} }",
+  );
+  const other = await extractGraph(
+    otherFile,
+    "export class Other { help() {} }",
+  );
+  const caller = await extractGraph(
     callerFile,
     'import { Worker } from "./worker"; export function invoke(value: Worker) { value.help(); }',
   );

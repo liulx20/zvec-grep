@@ -5,20 +5,14 @@ import {
   SqliteGraphStorage,
   extractFileGraph,
 } from "../../dist/engine/graph/index.js";
+import {
+  codeFile as makeCodeFile,
+  extractGraph,
+  resolveGraph,
+} from "../helpers/graph.mjs";
 
-function codeFile(id, relativePath, format = "typescript") {
-  return {
-    id,
-    collectionId: "collection-1",
-    absolutePath: `/repo/${relativePath}`,
-    relativePath,
-    rootPath: "/repo",
-    sizeBytes: 100,
-    lastModifiedTime: 1,
-    kind: "code",
-    format,
-  };
-}
+const codeFile = (id, relativePath, format = "typescript") =>
+  makeCodeFile(relativePath, { id, format });
 
 test("extractFileGraph builds local INHERITS for TS class/interface", async () => {
   const file = codeFile("f1", "types.ts");
@@ -28,9 +22,7 @@ export interface IFace {}
 export class Child extends Base implements IFace {}
 export interface IChild extends IFace {}
 `;
-  const source = { kind: "text", text, file };
-  const fragments = await new CodeExtractor().extract(source);
-  const graphInput = await extractFileGraph(source, fragments);
+  const graphInput = await extractGraph(file, text);
 
   const inherits = graphInput.edges.filter((e) => e.kind === "INHERITS");
   assert.equal(inherits.length, 3);
@@ -47,14 +39,7 @@ export interface IChild extends IFace {}
     ),
   );
 
-  const graph = new SqliteGraphStorage("", { inMemory: true });
-  graph.upsertFileGraph(
-    file.id,
-    graphInput.nodes,
-    graphInput.edges,
-    graphInput.refs,
-  );
-  await graph.resolvePending();
+  const graph = await resolveGraph(file, graphInput);
 
   const child = graphInput.nodes.find((n) => n.name === "Child");
   const base = graphInput.nodes.find((n) => n.name === "Base");
@@ -236,9 +221,7 @@ class Base:
 class Child(Base, object):
     pass
 `;
-  const source = { kind: "text", text, file };
-  const fragments = await new CodeExtractor().extract(source);
-  const graphInput = await extractFileGraph(source, fragments);
+  const graphInput = await extractGraph(file, text);
   const inherits = graphInput.edges.filter((e) => e.kind === "INHERITS");
   assert.equal(inherits.length, 1);
   assert.equal(inherits[0].ref_name, "Base");
@@ -251,9 +234,7 @@ class Child(Base, object):
 test("extractFileGraph drops JS builtin base Object", async () => {
   const file = codeFile("js", "a.ts");
   const text = `export class A extends Object {}`;
-  const source = { kind: "text", text, file };
-  const fragments = await new CodeExtractor().extract(source);
-  const graphInput = await extractFileGraph(source, fragments);
+  const graphInput = await extractGraph(file, text);
   assert.equal(graphInput.edges.filter((e) => e.kind === "INHERITS").length, 0);
   assert.equal(
     graphInput.refs.some((r) => r.ref_name === "Object"),

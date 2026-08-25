@@ -5,20 +5,12 @@ import {
   SqliteGraphStorage,
   extractFileGraph,
 } from "../../dist/engine/graph/index.js";
-
-function codeFile(relativePath = "mod.ts", format = "typescript") {
-  return {
-    id: "file-1",
-    collectionId: "collection-1",
-    absolutePath: `/repo/${relativePath}`,
-    relativePath,
-    rootPath: "/repo",
-    sizeBytes: 100,
-    lastModifiedTime: 1,
-    kind: "code",
-    format,
-  };
-}
+import {
+  codeFile,
+  extractGraph,
+  extractSourceGraph,
+  resolveGraph,
+} from "../helpers/graph.mjs";
 
 test("extractFileGraph builds local REFS for type annotations", async () => {
   const file = codeFile("types.ts");
@@ -31,9 +23,7 @@ export function run(x: Helper): Result {
   return { ok: true };
 }
 `;
-  const source = { kind: "text", text, file };
-  const fragments = await new CodeExtractor().extract(source);
-  const graphInput = await extractFileGraph(source, fragments);
+  const graphInput = await extractGraph(file, text);
 
   const refs = graphInput.edges.filter((e) => e.kind === "REFS");
   assert.ok(
@@ -50,14 +40,7 @@ export function run(x: Helper): Result {
     "predefined / literal types should be dropped",
   );
 
-  const graph = new SqliteGraphStorage("", { inMemory: true });
-  graph.upsertFileGraph(
-    file.id,
-    graphInput.nodes,
-    graphInput.edges,
-    graphInput.refs,
-  );
-  await graph.resolvePending();
+  const graph = await resolveGraph(file, graphInput);
 
   const run = graphInput.nodes.find((n) => n.name === "run");
   const helper = graphInput.nodes.find((n) => n.name === "Helper");
@@ -81,9 +64,7 @@ export function run(obj: { field: number }) {
   callTarget();
 }
 `;
-  const source = { kind: "text", text, file };
-  const fragments = await new CodeExtractor().extract(source);
-  const graphInput = await extractFileGraph(source, fragments);
+  const graphInput = await extractGraph(file, text);
 
   const memberRef = graphInput.refs.find(
     (ref) => ref.ref_kind === "member" && ref.ref_name === "obj.field",
@@ -117,10 +98,7 @@ class Override {
   helper() { return 2; }
 }`,
   };
-  const graphInput = await extractFileGraph(
-    source,
-    await new CodeExtractor().extract(source),
-  );
+  const graphInput = await extractSourceGraph(source);
   const run = graphInput.nodes.find((node) => node.name === "run");
   assert.ok(run);
   assert.ok(
