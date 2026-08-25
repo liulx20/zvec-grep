@@ -27,7 +27,7 @@ export class SqliteCounterpartProjector {
   constructor(private readonly database: SqliteGraphDatabase) {}
 
   refresh(rebuild: boolean): void {
-    const dirtyFiles = this.database.consumeCounterpartDirtyFiles();
+    const dirtyFiles = this.database.counterpartDirtyFileSnapshot();
     if (!rebuild && dirtyFiles.length === 0) return;
     const dirtyJson = JSON.stringify(dirtyFiles);
     this.database.transaction(() => {
@@ -107,6 +107,7 @@ export class SqliteCounterpartProjector {
         );
       }
     });
+    this.database.acknowledgeCounterpartDirtyFiles(dirtyFiles);
   }
 }
 

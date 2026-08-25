@@ -10,6 +10,8 @@ import {
   openGraphStorage,
   rawRef,
 } from "../../dist/engine/graph/index.js";
+import { SqliteCounterpartProjector } from "../../dist/engine/graph/persistence/sqlite/counterpart-projector.js";
+import { SqliteGraphDatabase } from "../../dist/engine/graph/persistence/sqlite/database.js";
 
 function edge(src, dst, kind, rel) {
   return {
@@ -155,6 +157,25 @@ test("counterpart edges are projected and invalidated at index time", async () =
     false,
   );
   graph.close();
+});
+
+test("counterpart dirty files survive a failed projection", (t) => {
+  const database = new SqliteGraphDatabase("", { inMemory: true });
+  t.after(() => database.close());
+  const projector = new SqliteCounterpartProjector(database);
+  const transaction = database.transaction.bind(database);
+  let attempts = 0;
+  database.transaction = (work) => {
+    attempts += 1;
+    if (attempts === 1) throw new Error("injected projection failure");
+    transaction(work);
+  };
+  database.markCounterpartDirty("changed-file");
+
+  assert.throws(() => projector.refresh(false), /injected projection failure/);
+  projector.refresh(false);
+
+  assert.equal(attempts, 2);
 });
 
 test("SQLite graph upsert resolves callers and reattaches incoming edges", async (t) => {

@@ -74,10 +74,12 @@ export class SqliteGraphDatabase {
     this.counterpartDirtyFiles.add(fileId);
   }
 
-  consumeCounterpartDirtyFiles(): string[] {
-    const files = [...this.counterpartDirtyFiles];
-    this.counterpartDirtyFiles.clear();
-    return files;
+  counterpartDirtyFileSnapshot(): string[] {
+    return [...this.counterpartDirtyFiles];
+  }
+
+  acknowledgeCounterpartDirtyFiles(files: readonly string[]): void {
+    for (const file of files) this.counterpartDirtyFiles.delete(file);
   }
 
   endBulkLoad(): void {
