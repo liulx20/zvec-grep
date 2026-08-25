@@ -1,5 +1,8 @@
 import { EngineError } from "../../errors.js";
-import { COMPONENT_CODE_FORMATS } from "../../code-formats.js";
+import {
+  COMPONENT_CODE_FORMATS,
+  type StructuredCodeFormat,
+} from "../../code-formats.js";
 import type {
   CodeEntityMetadata,
   CodeEntityModifier,
@@ -16,7 +19,31 @@ import type { ChunkOptions } from "../types.js";
 import { extractPlainTextFragments } from "../text/extractor.js";
 import { chunkOptionsForMetadata } from "../vector-content.js";
 import { resolveAdapter, type LanguageAdapter } from "./adapter.js";
+import {
+  collectCallSites,
+  extractCallName,
+  isCallNode,
+  type CallSite,
+} from "./call-sites.js";
 import { hasJavascriptTypescriptFunctionValue } from "./families/js-ts.js";
+import {
+  collectInheritanceSites as collectInheritanceSitesFromNode,
+  type InheritanceSite,
+} from "./inheritance-sites.js";
+import {
+  collectRefSites as collectRefSitesFromNode,
+  type RefSite,
+} from "./ref-sites.js";
+import { collectImportSpecsFromNode, type ImportSpec } from "./import-sites.js";
+import { collectValueRefSites } from "./value-ref-sites.js";
+import { collectFunctionRefSites } from "./function-ref-sites.js";
+import { referenceTargetFromSyntax } from "../../reference-target.js";
+import {
+  extractCallableReturnType,
+  inferConstructedCallableReturnType,
+  isDeferredCallable,
+} from "./callable-shape.js";
+import type { CallResolutionFact } from "./call-resolution-facts.js";
 
 const DEFAULT_CODE_CHUNK_CHARS = 3600;
 const DEFAULT_CODE_CHUNK_OVERLAP_CHARS = 540;
@@ -38,23 +65,37 @@ export class CodeExtractor {
     source: Source,
     options: ChunkOptions = {},
   ): Promise<PreparedCodeFragment[]> {
+    return (await this.analyzeForIndexing(source, options)).fragments;
+  }
+
+  async analyzeForIndexing(
+    source: Source,
+    options: ChunkOptions = {},
+  ): Promise<PreparedCodeAnalysis> {
     if (source.kind !== "text" || source.file.kind !== "code") {
-      return [];
+      return emptyPreparedCodeAnalysis();
     }
 
     validateSourceFile(source);
     const chunkOptions = resolveCodeChunkOptions(options);
 
     if (isScriptBlockFormat(source.file.format)) {
-      const fragments = await this.extractScriptBlocks(source, chunkOptions);
-      return fragments.length > 0
-        ? fragments
-        : this.fallback(source, chunkOptions);
+      const analysis = await this.analyzeScriptBlocks(source, chunkOptions);
+      return {
+        ...analysis,
+        fragments:
+          analysis.fragments.length > 0
+            ? analysis.fragments
+            : this.fallback(source, chunkOptions),
+      };
     }
 
     const adapter = resolveAdapter(source.file.format);
     if (!hasGrammar(source.file.format) || !adapter) {
-      return this.fallback(source, chunkOptions);
+      return {
+        ...emptyPreparedCodeAnalysis(),
+        fragments: this.fallback(source, chunkOptions),
+      };
     }
 
     const extracted = await withParser(
@@ -62,7 +103,7 @@ export class CodeExtractor {
       source.file.format,
       (tree) => {
         const collected: CodeEntity[] = [];
-        walkCodeNode(tree.rootNode, adapter, [], collected);
+        walkCodeNode(tree.rootNode, adapter, [], undefined, collected);
 
         const output: PreparedCodeFragment[] = [];
         let entityIdIndex = 0;
@@ -78,7 +119,6 @@ export class CodeExtractor {
             fragments[0]?.group === ""
               ? makeEntityId(source.file.id, entityIdIndex)
               : null;
-
           for (const item of fragments) {
             const id = makeEntityId(source.file.id, entityIdIndex);
             const { embeddingText, ...fragment } = item;
@@ -98,12 +138,54 @@ export class CodeExtractor {
           appendEntity(entity);
         }
 
-        return output;
+        const imports = collectImportSpecsFromNode(
+          tree.rootNode,
+          source.file.format,
+        );
+        const callableReturnTypes = callableReturnTypesFromEntities(
+          collected,
+          adapter.format,
+        );
+        const resolutionFacts = callResolutionFactsFromEntities(
+          collected,
+          adapter,
+          callableReturnTypes,
+        );
+        return {
+          fragments: output,
+          imports,
+          calls: callsFromEntities(
+            collected,
+            adapter,
+            callableReturnTypes,
+            resolutionFacts,
+          ),
+          refs: refsFromEntities(
+            collected,
+            adapter,
+            source.file.format,
+            imports,
+            resolutionFacts,
+          ),
+          inheritance: inheritanceFromEntities(collected, source.file.format),
+          ownership: ownershipFromEntities(collected),
+          sourceLanguage: source.file.format as StructuredCodeFormat,
+        };
       },
     );
 
-    if (!extracted || extracted.length === 0) {
-      return this.fallback(source, chunkOptions);
+    if (!extracted) {
+      return {
+        ...emptyPreparedCodeAnalysis(),
+        fragments: this.fallback(source, chunkOptions),
+      };
+    }
+
+    if (extracted.fragments.length === 0) {
+      return {
+        ...extracted,
+        fragments: this.fallback(source, chunkOptions),
+      };
     }
 
     return extracted;
@@ -120,18 +202,23 @@ export class CodeExtractor {
     ).map((fragment) => ({ fragment }));
   }
 
-  private async extractScriptBlocks(
+  private async analyzeScriptBlocks(
     source: TextSource,
     options: Required<ChunkOptions>,
-  ): Promise<PreparedCodeFragment[]> {
-    const fragments: PreparedCodeFragment[] = [];
+  ): Promise<PreparedCodeAnalysis> {
+    const merged = emptyPreparedCodeAnalysis();
+    const languages: StructuredCodeFormat[] = [];
+    const componentName = componentNameForFile(source.file.relativePath);
+    merged.fragments.push(
+      componentFragment(source, componentName, options.maxChunkChars),
+    );
 
     for (const block of findScriptBlocks(source.text)) {
       const blockFile = {
         ...source.file,
         format: block.format,
       };
-      const blockFragments = await this.extractForIndexing(
+      const analysis = await this.analyzeForIndexing(
         {
           kind: "text",
           file: blockFile,
@@ -139,19 +226,77 @@ export class CodeExtractor {
         },
         options,
       );
-
-      fragments.push(
-        ...remapScriptBlockFragments(
-          source.file.id,
-          blockFragments,
-          fragments.length,
-          block.startLine,
-          block.startOffset,
-        ),
+      const fragmentStartIndex = merged.fragments.length;
+      const remappedFragments = remapScriptBlockFragments(
+        source.file.id,
+        analysis.fragments,
+        fragmentStartIndex,
+        block.startLine,
+        block.startOffset,
       );
+      merged.fragments.push(...remappedFragments);
+      merged.imports = [
+        ...merged.imports,
+        ...analysis.imports.map((item) => ({
+          ...item,
+          line: remapScriptBlockLine(item.line, block.startLine),
+        })),
+      ];
+      merged.calls = [
+        ...merged.calls,
+        ...analysis.calls
+          .map((item) => remapScriptBlockRelationOwner(item, block))
+          .map((item) =>
+            source.file.format === "svelte"
+              ? {
+                  ...item,
+                  sites: item.sites.filter(
+                    (site) => !SVELTE_TEMPLATE_BUILTINS.has(site.name),
+                  ),
+                }
+              : item,
+          ),
+      ];
+      merged.refs = [
+        ...merged.refs,
+        ...analysis.refs.map((item) =>
+          remapScriptBlockRelationOwner(item, block),
+        ),
+      ];
+      merged.inheritance = [
+        ...merged.inheritance,
+        ...analysis.inheritance.map((item) =>
+          remapScriptBlockRelationOwner(item, block),
+        ),
+      ];
+      merged.ownership = [
+        ...merged.ownership,
+        ...remappedFragments.flatMap(({ fragment }) =>
+          fragment.range.kind === "text" &&
+          fragment.metadata?.kind === "code" &&
+          !fragment.metadata.scope
+            ? [
+                {
+                  parentStartOffset: 0,
+                  childStartOffset: fragment.range.startOffset,
+                },
+              ]
+            : [],
+        ),
+        ...analysis.ownership.map((item) => ({
+          parentStartOffset: block.startOffset + item.parentStartOffset,
+          childStartOffset: block.startOffset + item.childStartOffset,
+        })),
+      ];
+      languages.push(block.format);
     }
 
-    return fragments;
+    const templateRelations = componentTemplateRelations(source, componentName);
+    merged.calls = [...merged.calls, ...templateRelations.calls];
+    merged.refs = [...merged.refs, ...templateRelations.refs];
+
+    merged.sourceLanguage = componentGraphLanguage(languages);
+    return merged;
   }
 }
 
@@ -191,10 +336,12 @@ function resolveCodeChunkOptions(
 
 type CodeEntity = {
   node: TSNode;
+  ownerStartOffset?: number;
   name?: string;
   symbolType: CodeSymbolType;
   breadcrumb: readonly string[];
   signature?: string;
+  arity?: number;
   doc?: string;
   modifiers: readonly CodeEntityModifier[];
 };
@@ -214,6 +361,194 @@ export type PreparedCodeFragment = {
   embeddingText?: string;
 };
 
+export type PreparedCodeAnalysis = {
+  fragments: PreparedCodeFragment[];
+  imports: readonly ImportSpec[];
+  calls: readonly FunctionCallSites[];
+  refs: readonly SymbolRefSites[];
+  inheritance: readonly TypeInheritanceSites[];
+  ownership: readonly EntityOwnership[];
+  sourceLanguage?: StructuredCodeFormat;
+};
+
+export type EntityOwnership = {
+  parentStartOffset: number;
+  childStartOffset: number;
+};
+
+function emptyPreparedCodeAnalysis(): PreparedCodeAnalysis {
+  return {
+    fragments: [],
+    imports: [],
+    calls: [],
+    refs: [],
+    inheritance: [],
+    ownership: [],
+  };
+}
+
+function callsFromEntities(
+  entities: readonly CodeEntity[],
+  adapter: LanguageAdapter,
+  callableReturnTypes: ReadonlyMap<string, string>,
+  resolutionFacts: ReadonlyMap<number, ReadonlyMap<string, CallResolutionFact>>,
+): FunctionCallSites[] {
+  return entities
+    .filter((entity) => entity.symbolType === "function")
+    .map((entity) => ({
+      name: entity.name,
+      symbolType: entity.symbolType,
+      startOffset: entity.node.startIndex,
+      startLine: entity.node.startPosition.row + 1,
+      sites: collectCallSites(entity.node, adapter, {
+        callableReturnTypes,
+        resolutionFacts: resolutionFacts.get(entity.node.startIndex),
+      }),
+    }));
+}
+
+function callResolutionFactsFromEntities(
+  entities: readonly CodeEntity[],
+  adapter: LanguageAdapter,
+  callableReturnTypes: ReadonlyMap<string, string>,
+): Map<number, ReadonlyMap<string, CallResolutionFact>> {
+  const result = new Map<number, ReadonlyMap<string, CallResolutionFact>>();
+  for (const entity of entities) {
+    if (entity.symbolType !== "function") continue;
+    const facts = adapter.extractCallResolutionFacts?.(entity.node, {
+      callableReturnTypes,
+    });
+    if (facts) result.set(entity.node.startIndex, facts);
+  }
+  return result;
+}
+
+function callableReturnTypesFromEntities(
+  entities: readonly CodeEntity[],
+  language: string,
+): Map<string, string> {
+  const result = new Map<string, string>();
+  const bareTypes = new Map<string, Set<string>>();
+  for (const entity of entities) {
+    if (entity.symbolType !== "function" || !entity.name) continue;
+    // The call-resolution fact currently models the value returned by a
+    // direct call, not an awaitable's fulfilled value. Treating an async
+    // callable's annotation/body as the direct result makes `make().run()`
+    // look like an instance call even though `make()` returns a Promise or
+    // coroutine. Keep async/generator factories unresolved until the IR can
+    // represent awaited/yielded result types explicitly.
+    if (isDeferredCallable(entity.node, language)) continue;
+    const returnType =
+      (entity.signature
+        ? extractCallableReturnType(entity.signature, entity.name, language)
+        : undefined) ??
+      inferConstructedCallableReturnType(entity.node, language);
+    if (returnType) {
+      const resolvedReturnType =
+        (returnType === "Self" || returnType === "self") &&
+        entity.breadcrumb.length > 0
+          ? entity.breadcrumb.at(-1)!
+          : returnType;
+      // Preserve the owner-qualified identity for chained associated/factory
+      // calls (`Router::new().route()`, `Factory.create().run()`). A bare
+      // callable name is only safe when every same-file declaration agrees on
+      // its return type; overwriting `new`/`create` with the last declaration
+      // made resolution depend on AST traversal order.
+      const owner = entity.breadcrumb.at(-1);
+      if (owner) {
+        result.set(`${owner}::${entity.name}`, resolvedReturnType);
+        result.set(`${owner}.${entity.name}`, resolvedReturnType);
+      }
+      const candidates = bareTypes.get(entity.name) ?? new Set<string>();
+      candidates.add(resolvedReturnType);
+      bareTypes.set(entity.name, candidates);
+    }
+  }
+  for (const [name, types] of bareTypes) {
+    if (types.size === 1) result.set(name, types.values().next().value!);
+  }
+  return result;
+}
+
+function inheritanceFromEntities(
+  entities: readonly CodeEntity[],
+  language: string,
+): TypeInheritanceSites[] {
+  return entities.flatMap((entity) => {
+    if (entity.symbolType !== "class" && entity.symbolType !== "interface") {
+      return [];
+    }
+    const sites = collectInheritanceSitesFromNode(entity.node, language);
+    return sites.length === 0
+      ? []
+      : [
+          {
+            name: entity.name,
+            symbolType: entity.symbolType,
+            startOffset: entity.node.startIndex,
+            startLine: entity.node.startPosition.row + 1,
+            sites,
+          },
+        ];
+  });
+}
+
+function refsFromEntities(
+  entities: readonly CodeEntity[],
+  adapter: LanguageAdapter,
+  language: string,
+  imports: readonly ImportSpec[],
+  resolutionFacts: ReadonlyMap<number, ReadonlyMap<string, CallResolutionFact>>,
+): SymbolRefSites[] {
+  const valueNames = new Set(
+    entities
+      .filter((entity) => entity.symbolType === "value" && entity.name)
+      .map((entity) => entity.name!),
+  );
+  const functionNames = new Set([
+    ...entities
+      .filter((entity) => entity.symbolType === "function" && entity.name)
+      .map((entity) => entity.name!),
+    ...imports.flatMap((item) =>
+      (item.bindings ?? [])
+        .filter((binding) => binding.local !== "*")
+        .map((binding) => binding.local),
+    ),
+  ]);
+  return entities.flatMap((entity) => {
+    if (
+      entity.symbolType !== "function" &&
+      entity.symbolType !== "class" &&
+      entity.symbolType !== "interface" &&
+      entity.symbolType !== "value"
+    ) {
+      return [];
+    }
+    const sites = [
+      ...collectRefSitesFromNode(entity.node, adapter, language),
+      ...collectValueRefSites(entity.node, adapter, valueNames),
+      ...collectFunctionRefSites(
+        entity.node,
+        adapter,
+        functionNames,
+        language,
+        resolutionFacts.get(entity.node.startIndex),
+      ),
+    ];
+    return sites.length === 0
+      ? []
+      : [
+          {
+            name: entity.name,
+            symbolType: entity.symbolType,
+            startOffset: entity.node.startIndex,
+            startLine: entity.node.startPosition.row + 1,
+            sites,
+          },
+        ];
+  });
+}
+
 type ScriptBlock = {
   text: string;
   format: "javascript" | "jsx" | "typescript" | "tsx";
@@ -225,6 +560,7 @@ function walkCodeNode(
   node: TSNode,
   adapter: LanguageAdapter,
   breadcrumb: readonly string[],
+  ownerStartOffset: number | undefined,
   out: CodeEntity[],
 ): void {
   for (const child of node.children) {
@@ -250,10 +586,12 @@ function walkCodeNode(
 
         out.push({
           node: entity,
+          ...(ownerStartOffset === undefined ? {} : { ownerStartOffset }),
           name,
           symbolType,
           breadcrumb: entityBreadcrumb,
           signature: adapter.extractSignature?.(entity),
+          arity: adapter.extractArity?.(entity),
           doc: adapter.extractDoc?.(entity),
           modifiers: adapter.extractModifiers?.(entity) ?? [],
         });
@@ -263,19 +601,42 @@ function walkCodeNode(
     if (isScope) {
       const name = adapter.extractName(child);
       const scopeNode = adapter.enterScopeNode?.(child) ?? child;
+      const indexedScope = isEntity
+        ? (
+            adapter.resolveEntities?.(child) ?? [
+              adapter.resolveEntity ? adapter.resolveEntity(child) : child,
+            ]
+          ).find((entity) => sameNode(entity, scopeNode))
+        : undefined;
       walkCodeNode(
         scopeNode,
         adapter,
         name ? [...breadcrumb, name] : breadcrumb,
+        indexedScope?.startIndex ?? ownerStartOffset,
         out,
       );
       continue;
     }
 
     if (!isEntity) {
-      walkCodeNode(child, adapter, breadcrumb, out);
+      walkCodeNode(child, adapter, breadcrumb, ownerStartOffset, out);
     }
   }
+}
+
+function ownershipFromEntities(
+  entities: readonly CodeEntity[],
+): EntityOwnership[] {
+  return entities.flatMap((entity) =>
+    entity.ownerStartOffset === undefined
+      ? []
+      : [
+          {
+            parentStartOffset: entity.ownerStartOffset,
+            childStartOffset: entity.node.startIndex,
+          },
+        ],
+  );
 }
 
 function codeEntityToSearchFragments(
@@ -824,49 +1185,173 @@ function collectFunctionCallNames(node: TSNode): string[] {
   return calls;
 }
 
-function isCallNode(node: TSNode): boolean {
-  return (
-    node.type === "call" ||
-    node.type === "call_expression" ||
-    node.type === "function_call_expression" ||
-    node.type === "method_invocation" ||
-    node.type === "object_creation_expression" ||
-    node.type === "new_expression"
+/**
+ * Collect call sites per indexed function entity.
+ * Must finish inside withParser — SyntaxNode handles are invalid after the tree is freed.
+ */
+export async function collectFunctionCallSites(
+  source: TextSource,
+): Promise<readonly FunctionCallSites[]> {
+  if (source.file.kind !== "code") {
+    return [];
+  }
+  if (isScriptBlockFormat(source.file.format)) {
+    return [];
+  }
+  const adapter = resolveAdapter(source.file.format);
+  if (!adapter || !hasGrammar(source.file.format)) {
+    return [];
+  }
+
+  const collected = await withParser(
+    source.text,
+    source.file.format,
+    (tree) => {
+      const entities: CodeEntity[] = [];
+      walkCodeNode(tree.rootNode, adapter, [], undefined, entities);
+      const callableReturnTypes = callableReturnTypesFromEntities(
+        entities,
+        adapter.format,
+      );
+      const out: FunctionCallSites[] = [];
+      for (const entity of entities) {
+        if (entity.symbolType !== "function") {
+          continue;
+        }
+        out.push({
+          name: entity.name,
+          symbolType: entity.symbolType,
+          startOffset: entity.node.startIndex,
+          startLine: entity.node.startPosition.row + 1,
+          sites: collectCallSites(entity.node, adapter, {
+            callableReturnTypes,
+          }),
+        });
+      }
+      return out;
+    },
   );
+
+  return collected ?? [];
 }
 
-function extractCallName(node: TSNode): string | undefined {
-  const target =
-    node.childForFieldName("function") ??
-    node.childForFieldName("name") ??
-    node.childForFieldName("constructor") ??
-    node.childForFieldName("type") ??
-    node.namedChildren[0];
-
-  if (!target) {
-    return undefined;
+/**
+ * Collect extends/implements sites per indexed type entity.
+ * Must finish inside withParser — SyntaxNode handles are invalid after free.
+ */
+export async function collectTypeInheritanceSites(
+  source: TextSource,
+): Promise<readonly TypeInheritanceSites[]> {
+  if (source.file.kind !== "code") {
+    return [];
+  }
+  if (isScriptBlockFormat(source.file.format)) {
+    return [];
+  }
+  const adapter = resolveAdapter(source.file.format);
+  if (!adapter || !hasGrammar(source.file.format)) {
+    return [];
   }
 
-  return normalizeCallName(target.text);
+  const language = source.file.format;
+  const collected = await withParser(source.text, language, (tree) => {
+    const entities: CodeEntity[] = [];
+    walkCodeNode(tree.rootNode, adapter, [], undefined, entities);
+    const out: TypeInheritanceSites[] = [];
+    for (const entity of entities) {
+      if (entity.symbolType !== "class" && entity.symbolType !== "interface") {
+        continue;
+      }
+      const sites = collectInheritanceSitesFromNode(entity.node, language);
+      if (sites.length === 0) {
+        continue;
+      }
+      out.push({
+        name: entity.name,
+        symbolType: entity.symbolType,
+        startOffset: entity.node.startIndex,
+        startLine: entity.node.startPosition.row + 1,
+        sites,
+      });
+    }
+    return out;
+  });
+
+  return collected ?? [];
 }
 
-function normalizeCallName(value: string): string | undefined {
-  const cleaned = value
-    .replace(/\s+/g, " ")
-    .replace(/^new\s+/, "")
-    .trim();
+export type FunctionCallSites = {
+  name?: string;
+  symbolType: CodeSymbolType;
+  startOffset: number;
+  startLine: number;
+  sites: readonly CallSite[];
+};
 
-  if (
-    cleaned.length === 0 ||
-    cleaned.length > OUTLINE_MAX_LINE_CHARS ||
-    /[\n\r]/.test(cleaned) ||
-    !/[A-Za-z_$][A-Za-z0-9_$]*/.test(cleaned)
-  ) {
-    return undefined;
+export type TypeInheritanceSites = {
+  name?: string;
+  symbolType: CodeSymbolType;
+  startOffset: number;
+  startLine: number;
+  sites: readonly InheritanceSite[];
+};
+
+/**
+ * Collect type / member / decorator refs per indexed symbol entity.
+ * Must finish inside withParser — SyntaxNode handles are invalid after free.
+ */
+export async function collectSymbolRefSites(
+  source: TextSource,
+): Promise<readonly SymbolRefSites[]> {
+  if (source.file.kind !== "code") {
+    return [];
+  }
+  if (isScriptBlockFormat(source.file.format)) {
+    return [];
+  }
+  const adapter = resolveAdapter(source.file.format);
+  if (!adapter || !hasGrammar(source.file.format)) {
+    return [];
   }
 
-  return cleaned;
+  const language = source.file.format;
+  const collected = await withParser(source.text, language, (tree) => {
+    const entities: CodeEntity[] = [];
+    walkCodeNode(tree.rootNode, adapter, [], undefined, entities);
+    const out: SymbolRefSites[] = [];
+    for (const entity of entities) {
+      if (
+        entity.symbolType !== "function" &&
+        entity.symbolType !== "class" &&
+        entity.symbolType !== "interface"
+      ) {
+        continue;
+      }
+      const sites = collectRefSitesFromNode(entity.node, adapter, language);
+      if (sites.length === 0) {
+        continue;
+      }
+      out.push({
+        name: entity.name,
+        symbolType: entity.symbolType,
+        startOffset: entity.node.startIndex,
+        startLine: entity.node.startPosition.row + 1,
+        sites,
+      });
+    }
+    return out;
+  });
+
+  return collected ?? [];
 }
+
+export type SymbolRefSites = {
+  name?: string;
+  symbolType: CodeSymbolType;
+  startOffset: number;
+  startLine: number;
+  sites: readonly RefSite[];
+};
 
 function sameNode(left: TSNode, right: TSNode): boolean {
   return (
@@ -894,6 +1379,7 @@ function codeEntityMetadata(entity: CodeEntity): CodeEntityMetadata {
     scope: entity.breadcrumb.length > 0 ? entity.breadcrumb.join("::") : null,
     nodeType: entity.node.type,
     signature: entity.signature ?? null,
+    arity: entity.arity ?? null,
     doc: entity.doc ?? null,
     modifiers: entity.modifiers,
   };
@@ -1041,6 +1527,181 @@ function scriptBlockFormat(attrs: string): ScriptBlock["format"] {
   return "javascript";
 }
 
+const VUE_BUILTIN_COMPONENTS = new Set([
+  "Component",
+  "KeepAlive",
+  "Slot",
+  "Suspense",
+  "Teleport",
+  "Transition",
+  "TransitionGroup",
+]);
+
+const SVELTE_TEMPLATE_BUILTINS = new Set([
+  "$bindable",
+  "$derived",
+  "$effect",
+  "$host",
+  "$inspect",
+  "$props",
+  "$snippet",
+  "$state",
+]);
+
+function componentNameForFile(relativePath: string): string {
+  const parts = relativePath.split(/[\\/]/).filter(Boolean);
+  const fileName = parts.at(-1) ?? relativePath;
+  const baseName = fileName.replace(/\.(?:vue|svelte)$/i, "");
+  if (baseName.toLowerCase() === "index" && parts.length > 1) {
+    return parts.at(-2) ?? baseName;
+  }
+  return baseName;
+}
+
+function componentFragment(
+  source: TextSource,
+  componentName: string,
+  maxChars: number,
+): PreparedCodeFragment {
+  return {
+    fragment: {
+      id: makeEntityId(source.file.id, 0),
+      fileId: source.file.id,
+      content: {
+        kind: "text",
+        text:
+          source.text.length <= maxChars
+            ? source.text
+            : `component ${componentName}`,
+      },
+      range: {
+        kind: "text",
+        startLine: 1,
+        endLine: lineAtOffset(source.text, source.text.length),
+        startOffset: 0,
+        endOffset: source.text.length,
+      },
+      metadata: {
+        kind: "code",
+        symbolType: "component",
+        symbolName: componentName,
+        scope: null,
+        nodeType: "component_file",
+        signature: null,
+        arity: null,
+        doc: null,
+        modifiers: ["exported"],
+      },
+    },
+    embeddingText: `component ${componentName} ${source.file.relativePath}`,
+  };
+}
+
+function componentTemplateRelations(
+  source: TextSource,
+  componentName: string,
+): {
+  calls: FunctionCallSites[];
+  refs: SymbolRefSites[];
+} {
+  const covered = componentNonTemplateRanges(source.text);
+  const refSites: RefSite[] = [];
+  const callSites: CallSite[] = [];
+  const isCovered = (offset: number): boolean =>
+    covered.some(([start, end]) => offset >= start && offset < end);
+
+  const tagPattern = /<([A-Za-z][A-Za-z0-9_-]*)\b/g;
+  for (const match of source.text.matchAll(tagPattern)) {
+    if (isCovered(match.index)) continue;
+    const raw = match[1]!;
+    const name =
+      source.file.format === "vue" && raw.includes("-")
+        ? kebabToPascal(raw)
+        : raw;
+    if (!/^[A-Z]/.test(name) || VUE_BUILTIN_COMPONENTS.has(name)) continue;
+    refSites.push({
+      name,
+      target: referenceTargetFromSyntax(name),
+      line: lineAtOffset(source.text, match.index),
+      kind: "member",
+    });
+  }
+
+  if (source.file.format === "svelte") {
+    const expressionPattern = /\{([^}#/:@][^}]*)\}/g;
+    for (const expression of source.text.matchAll(expressionPattern)) {
+      if (isCovered(expression.index)) continue;
+      const body = expression[1] ?? "";
+      const callPattern = /\b([A-Za-z_$][\w$.]*)\s*\(/g;
+      for (const call of body.matchAll(callPattern)) {
+        const name = call[1]!;
+        if (
+          SVELTE_TEMPLATE_BUILTINS.has(name) ||
+          name === "await" ||
+          name === "each" ||
+          name === "else" ||
+          name === "if"
+        )
+          continue;
+        callSites.push({
+          name,
+          target: referenceTargetFromSyntax(name),
+          line: lineAtOffset(source.text, expression.index + call.index),
+          kind: "call",
+        });
+      }
+    }
+  }
+
+  return {
+    calls:
+      callSites.length > 0
+        ? [
+            {
+              name: componentName,
+              symbolType: "component",
+              startOffset: 0,
+              startLine: 1,
+              sites: callSites,
+            },
+          ]
+        : [],
+    refs:
+      refSites.length > 0
+        ? [
+            {
+              name: componentName,
+              symbolType: "component",
+              startOffset: 0,
+              startLine: 1,
+              sites: refSites,
+            },
+          ]
+        : [],
+  };
+}
+
+function componentNonTemplateRanges(text: string): Array<[number, number]> {
+  return [
+    ...text.matchAll(/<(script|style)(\s[^>]*)?>[\s\S]*?<\/\1>/gi),
+    ...text.matchAll(/<!--[\s\S]*?-->/g),
+  ]
+    .map(
+      (match) =>
+        [match.index, match.index + match[0].length] as [number, number],
+    )
+    .sort((left, right) => left[0] - right[0]);
+}
+
+function kebabToPascal(name: string): string {
+  return name
+    .split("-")
+    .map((part) =>
+      part.length > 0 ? `${part[0]!.toUpperCase()}${part.slice(1)}` : "",
+    )
+    .join("");
+}
+
 function lineAtOffset(text: string, offset: number): number {
   let line = 1;
 
@@ -1096,4 +1757,39 @@ function remapScriptBlockRange(
     startOffset: startOffset + range.startOffset,
     endOffset: startOffset + range.endOffset,
   };
+}
+
+function remapScriptBlockRelationOwner<
+  T extends {
+    startOffset: number;
+    startLine: number;
+    sites: readonly { line: number }[];
+  },
+>(owner: T, block: ScriptBlock): T {
+  return {
+    ...owner,
+    startOffset: block.startOffset + owner.startOffset,
+    startLine: remapScriptBlockLine(owner.startLine, block.startLine),
+    sites: owner.sites.map((site) => ({
+      ...site,
+      line: remapScriptBlockLine(site.line, block.startLine),
+    })),
+  } as T;
+}
+
+function remapScriptBlockLine(line: number, startLine: number): number {
+  return startLine + line - 1;
+}
+
+function componentGraphLanguage(
+  languages: readonly StructuredCodeFormat[],
+): StructuredCodeFormat | undefined {
+  if (languages.length === 0) return undefined;
+  if (languages.every((language) => language === languages[0]))
+    return languages[0];
+  return languages.some(
+    (language) => language === "typescript" || language === "tsx",
+  )
+    ? "typescript"
+    : "javascript";
 }

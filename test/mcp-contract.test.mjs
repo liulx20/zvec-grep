@@ -14,6 +14,7 @@ import {
   resolveMcpToolset,
 } from "../dist/mcp/toolset.js";
 import { EMBEDDING_ENVIRONMENT_META_KEY } from "../dist/mcp/request-metadata.js";
+import { zvecGrepSearchOutputSchema } from "../dist/mcp/schemas.js";
 import { indexProgressFromMessage } from "../dist/index-progress.js";
 import { formatAgentContextResult } from "../dist/cli/format/context.js";
 import { ZVEC_GREP_WORKSPACE_EVIDENCE_RULES } from "../dist/prompts/zvec-grep-guidance.js";
@@ -21,6 +22,33 @@ import { ZVEC_GREP_WORKSPACE_EVIDENCE_RULES } from "../dist/prompts/zvec-grep-gu
 const root = resolve("test/fixtures/repository");
 const longIndexedContent = "x".repeat(8_000);
 const longRgContent = "r".repeat(8_000);
+
+test("search output contract accepts INSTANTIATES relationships", () => {
+  const parsed = zvecGrepSearchOutputSchema.safeParse({
+    root,
+    freshness: "fresh",
+    result: {
+      query: "create service",
+      root,
+      source: "index",
+      coverage: "ranked_sample",
+      relationships: [
+        {
+          srcId: "symbol:createService",
+          dstId: "symbol:Service",
+          srcLabel: "createService",
+          dstLabel: "Service",
+          kind: "INSTANTIATES",
+          scope: "symbol",
+        },
+      ],
+      diagnostics: {},
+      items: [],
+    },
+  });
+
+  assert.equal(parsed.success, true);
+});
 
 function createBackend() {
   return {
@@ -142,8 +170,87 @@ function createBackend() {
         ],
       },
     }),
+    explore: async (input) => ({
+      root: input.root,
+      available: true,
+      query: input.query,
+      roots: [],
+      nodes: [],
+      edges: [],
+      callPaths: [],
+      blastRadius: [],
+      changeSurface: [],
+      files: [],
+      emptyReason: "no_seeds",
+    }),
+    graphNeighborhood: async (input) => ({
+      root: input.root,
+      available: true,
+      direction: input.direction,
+      query: input.query,
+      depth: input.depth ?? 1,
+      limit: input.limit ?? 20,
+      seeds: [],
+      neighbors: [],
+    }),
   };
 }
+
+test("graph tool failures are returned as MCP errors", async (t) => {
+  const backend = createBackend();
+  backend.explore = async () => {
+    throw new Error("graph index missing");
+  };
+  backend.graphNeighborhood = async () => {
+    throw new Error("graph model load failed");
+  };
+  const { client, server } = await connect(backend);
+  t.after(async () => {
+    await client.close();
+    await server.close();
+  });
+
+  const explore = await client.callTool({
+    name: "zvec_grep_explore",
+    arguments: { root, query: "login" },
+  });
+  assert.equal(explore.isError, true);
+  assert.match(explore.content[0].text, /graph index missing/);
+
+  for (const direction of ["callers", "callees", "impact"]) {
+    const result = await client.callTool({
+      name: `zvec_grep_${direction}`,
+      arguments: { root, query: "login" },
+    });
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /graph model load failed/);
+  }
+});
+
+test("graph neighborhood tools pass the definition file filter", async (t) => {
+  const backend = createBackend();
+  let received;
+  backend.graphNeighborhood = async (input) => {
+    received = input;
+    return await createBackend().graphNeighborhood(input);
+  };
+  const { client, server } = await connect(backend);
+  t.after(async () => {
+    await client.close();
+    await server.close();
+  });
+
+  const result = await client.callTool({
+    name: "zvec_grep_callers",
+    arguments: {
+      root,
+      query: "Service",
+      file: "apps/api/service.ts",
+    },
+  });
+  assert.equal(result.isError, undefined);
+  assert.equal(received.file, "apps/api/service.ts");
+});
 
 async function connect(backend = createBackend(), options = {}) {
   const server = createZvecGrepMcpServer(backend, "1.0.0", options);
@@ -177,7 +284,7 @@ test("MCP toolset resolution prefers explicit configuration and defaults to agen
   assert.throws(() => parseMcpToolset("all"), /Expected "agent" or "full"/);
 });
 
-test("default agent contract exposes only indexed search", async (t) => {
+test("default agent contract exposes indexed search and code graph tools", async (t) => {
   const backend = createBackend();
   let managementCalls = 0;
   backend.index = async (input) => {
@@ -204,8 +311,15 @@ test("default agent contract exposes only indexed search", async (t) => {
 
   const listed = await client.listTools();
   assert.deepEqual(listed.tools.map((tool) => tool.name).toSorted(), [
+    "zvec_grep_callees",
+    "zvec_grep_callers",
+    "zvec_grep_explore",
+    "zvec_grep_impact",
     "zvec_grep_search",
   ]);
+  for (const tool of listed.tools) {
+    assert.ok(tool.inputSchema.required.includes("root"));
+  }
 
   const instructions = client.getInstructions();
   assert.equal(instructions, ZVEC_GREP_AGENT_MCP_INSTRUCTIONS);
@@ -302,6 +416,10 @@ test("full server contract exposes all tools with stable annotations", async (t)
   assert.deepEqual(
     tools.map((tool) => tool.name),
     [
+      "zvec_grep_callees",
+      "zvec_grep_callers",
+      "zvec_grep_explore",
+      "zvec_grep_impact",
       "zvec_grep_index",
       "zvec_grep_index_drop",
       "zvec_grep_index_status",
@@ -378,6 +496,10 @@ test("full server contract exposes all tools with stable annotations", async (t)
   assert.equal(annotations.zvec_grep_search.readOnlyHint, false);
   assert.equal(annotations.zvec_grep_search.openWorldHint, true);
   assert.equal(annotations.zvec_grep_rg.openWorldHint, false);
+  assert.equal(annotations.zvec_grep_explore.readOnlyHint, true);
+  assert.equal(annotations.zvec_grep_callers.readOnlyHint, true);
+  assert.equal(annotations.zvec_grep_callees.readOnlyHint, true);
+  assert.equal(annotations.zvec_grep_impact.readOnlyHint, true);
   assert.equal(annotations.zvec_grep_index_status.readOnlyHint, true);
   assert.equal(annotations.zvec_grep_server_status.readOnlyHint, true);
   const index = tools.find((tool) => tool.name === "zvec_grep_index");
@@ -455,9 +577,15 @@ test("full server contract exposes all tools with stable annotations", async (t)
   );
   assert.equal(rg.outputSchema, undefined);
   assert.equal(search.outputSchema, undefined);
-  for (const tool of tools.filter(
-    (tool) => tool.name !== "zvec_grep_rg" && tool.name !== "zvec_grep_search",
-  )) {
+  const textOnlyTools = new Set([
+    "zvec_grep_rg",
+    "zvec_grep_search",
+    "zvec_grep_explore",
+    "zvec_grep_callers",
+    "zvec_grep_callees",
+    "zvec_grep_impact",
+  ]);
+  for (const tool of tools.filter((tool) => !textOnlyTools.has(tool.name))) {
     assert.ok(tool.outputSchema, `${tool.name} must declare structured output`);
   }
 });

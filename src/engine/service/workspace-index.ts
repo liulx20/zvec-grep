@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+
 import {
   workspaceIndexDetail,
   detail,
@@ -5,22 +7,27 @@ import {
   errorDetails,
 } from "../errors.js";
 import type { EmbeddingModel } from "../models/index.js";
-import {
-  getWorkspaceIndexStatus,
-  indexWorkspace,
-  indexWorkspacePaths,
-} from "../pipeline/indexing/index.js";
 import { searchWorkspaceIndex } from "../pipeline/search/index.js";
+import type { GraphReader, GraphStorage } from "../graph/public-types.js";
+import { openGraphStorage } from "../graph/open.js";
 import {
   createWorkspaceIndexStorage,
+  resolveWorkspaceIndexLayout,
+  type StoredEntity,
+  type StorageSearchHit,
   type WorkspaceIndexStorage,
 } from "../storage/index.js";
+import {
+  matchesExactSymbolQuery,
+  symbolLookupLeaf,
+} from "../graph/symbol-lookup.js";
 import type {
   WorkspaceIndexEmbeddingSchema,
   WorkspaceIndexStatus,
   WorkspaceIndexInfo,
   IndexOptions,
   IndexResult,
+  FileInfo,
   SearchPlan,
   SearchPlanResult,
 } from "../types.js";
@@ -33,6 +40,7 @@ export type WorkspaceIndexOptions = {
 
 export class WorkspaceIndex {
   private readonly storage: WorkspaceIndexStorage;
+  private readonly graphStorage: GraphStorage;
   private readonly embedding: WorkspaceIndexEmbeddingSchema;
   private readonly embeddingModel?: EmbeddingModel;
   private closed = false;
@@ -60,13 +68,23 @@ export class WorkspaceIndex {
         readOnly: true,
       });
     }
+    this.graphStorage = openGraphStorage(
+      resolveWorkspaceIndexLayout(info.path).graphPath,
+      {
+        readOnly: options.mode === "read",
+      },
+    );
+  }
+
+  get graph(): GraphReader {
+    return this.graphStorage;
   }
 
   get name(): string {
     return this.info.name;
   }
 
-  index(options: IndexOptions = {}): Promise<IndexResult> {
+  async index(options: IndexOptions = {}): Promise<IndexResult> {
     if (this.storage.readOnly) {
       throw new EngineError("Cannot update a read-only workspace index", {
         code: "ZVEC_GREP.ENGINE.WORKSPACE_INDEX.READ_ONLY",
@@ -80,16 +98,21 @@ export class WorkspaceIndex {
       workspaceIndex: this.info,
       embeddingModel,
       storage: this.storage,
+      graph: this.graphStorage,
       embeddingConcurrency: options.embeddingConcurrency,
       onProgress: options.onProgress,
       signal: options.signal,
     };
+    const { indexWorkspace, indexWorkspacePaths } =
+      await import("../pipeline/indexing/index.js");
     return options.changedPaths && options.changedPaths.length > 0
       ? indexWorkspacePaths(context, options.changedPaths)
       : indexWorkspace(context);
   }
 
-  status(): Promise<WorkspaceIndexStatus> {
+  async status(): Promise<WorkspaceIndexStatus> {
+    const { getWorkspaceIndexStatus } =
+      await import("../pipeline/indexing/status.js");
     return getWorkspaceIndexStatus(this.info, this.storage.listFiles());
   }
 
@@ -98,7 +121,67 @@ export class WorkspaceIndex {
       workspaceIndex: this.info,
       embeddingModel: this.embeddingModel,
       storage: this.storage,
+      graph: this.graphStorage,
     });
+  }
+
+  getEntity(entityId: string) {
+    return this.storage.getEntity(entityId);
+  }
+
+  listEntitiesByFile(
+    fileId: string,
+    options?: { limit?: number; offset?: number },
+  ) {
+    return this.storage.listEntitiesByFile(fileId, options);
+  }
+
+  findSymbolsByName(name: string, limit = 20) {
+    const trimmed = name.trim();
+    if (!trimmed || limit <= 0) return [];
+    const leaf = symbolLookupLeaf(trimmed);
+    const candidates = this.storage.findSymbolsByNames
+      ? this.storage.findSymbolsByNames([leaf], Math.max(limit * 4, 100))
+      : this.storage.searchFts(leaf, Math.max(limit * 4, 100), {
+          symbolNames: [leaf],
+        });
+    const graphEntities = this.graphStorage
+      .findSymbolIdsByName(leaf, Math.max(limit * 4, 100))
+      .map((id) => this.storage.getEntity(id))
+      .filter((item): item is StoredEntity => item !== null);
+    const lexicalFallback = this.storage.searchFts(
+      leaf,
+      Math.max(limit * 4, 100),
+    );
+    return [
+      ...new Map(
+        [
+          ...graphEntities,
+          ...uniqueStoredEntities(candidates, this.storage, false),
+          ...uniqueStoredEntities(lexicalFallback, this.storage, false),
+        ].map((item) => [item.entity.id, item]),
+      ).values(),
+    ]
+      .filter((item) => matchesExactSymbolQuery(item, trimmed))
+      .slice(0, limit);
+  }
+
+  findSymbolsByQuery(query: string, limit = 40) {
+    const trimmed = query.trim();
+    if (!trimmed || limit <= 0) return [];
+    return uniqueStoredEntities(
+      this.storage.searchFts(trimmed, limit),
+      this.storage,
+      true,
+    );
+  }
+
+  readFileText(file: FileInfo): string | null {
+    try {
+      return readFileSync(file.absolutePath, "utf8");
+    } catch {
+      return null;
+    }
   }
 
   close(): void {
@@ -106,6 +189,7 @@ export class WorkspaceIndex {
       return;
     }
 
+    this.graphStorage.close();
     this.storage.close();
     this.closed = true;
   }
@@ -202,6 +286,25 @@ export class WorkspaceIndex {
 
     return this.embeddingModel;
   }
+}
+
+function uniqueStoredEntities(
+  hits: readonly StorageSearchHit[],
+  storage: WorkspaceIndexStorage,
+  codeOnly: boolean,
+): StoredEntity[] {
+  const out: StoredEntity[] = [];
+  const seen = new Set<string>();
+  for (const hit of hits) {
+    const id = hit.fragment.group ?? hit.fragment.id;
+    if (seen.has(id)) continue;
+    const stored = storage.getEntity(id);
+    if (!stored || (codeOnly && stored.entity.metadata?.kind !== "code"))
+      continue;
+    seen.add(id);
+    out.push(stored);
+  }
+  return out;
 }
 
 function workspaceIndexOperationDetails(

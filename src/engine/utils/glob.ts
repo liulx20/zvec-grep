@@ -1,3 +1,5 @@
+import { escapeRegExp } from "./regex.js";
+
 export function normalizePathPattern(pattern: string): string {
   let normalized = pattern.trim().replaceAll("\\", "/").replace(/\/+/g, "/");
 
@@ -286,8 +288,4 @@ function literalPrefixBeforeFirstGlob(pattern: string): string {
   }
 
   return pattern.slice(0, Math.min(...indexes));
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[|\\{}()[\]^$+*?.]/g, "\\$&");
 }

@@ -66,7 +66,7 @@ export function resolveEmbeddingRuntimeOptions(
   explicit: EmbeddingRuntimeConfig,
   workspace: EmbeddingRuntimeConfig,
   config: ZvecGrepGlobalConfig,
-  environment: NodeJS.ProcessEnv = process.env,
+  environment: Readonly<Record<string, string | undefined>> = process.env,
 ): ResolvedEmbeddingRuntimeConfig {
   const provider = providerFromEmbedding(reference);
   const local = provider === "local";
@@ -462,7 +462,7 @@ function optionalDevice(
 
 function environmentApiKey(
   provider: string | undefined,
-  environment: NodeJS.ProcessEnv,
+  environment: Readonly<Record<string, string | undefined>>,
 ): string | undefined {
   const values =
     provider === "qwen"
@@ -482,7 +482,9 @@ function nonEmptyEnvironmentValue(
   return normalized ? normalized : undefined;
 }
 
-function environmentDevice(environment: NodeJS.ProcessEnv): EmbeddingDevice {
+function environmentDevice(
+  environment: Readonly<Record<string, string | undefined>>,
+): EmbeddingDevice {
   const normalized = environment.ZVEC_GREP_DEVICE?.trim().toLowerCase() ?? "";
   if (["auto", "cpu", "metal", "vulkan", "cuda"].includes(normalized))
     return normalized as EmbeddingDevice;

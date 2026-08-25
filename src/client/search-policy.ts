@@ -1,4 +1,8 @@
-import type { CliOptions } from "../cli/types.js";
+export type SearchRefreshMode = "background" | "wait" | "off";
+
+export type SearchPolicyInput = {
+  refresh?: SearchRefreshMode;
+};
 
 export type ServerSearchPolicy = {
   freshness: "eventual" | "wait_for_fresh";
@@ -11,7 +15,7 @@ export type DirectSearchPolicy = {
 };
 
 export function resolveServerSearchPolicy(
-  options: Pick<CliOptions, "refresh">,
+  options: SearchPolicyInput,
 ): ServerSearchPolicy {
   const refresh = options.refresh ?? "background";
   return {
@@ -21,7 +25,7 @@ export function resolveServerSearchPolicy(
 }
 
 export function resolveDirectSearchPolicy(
-  options: Pick<CliOptions, "refresh">,
+  options: SearchPolicyInput,
 ): DirectSearchPolicy {
   const wait = options.refresh === "wait";
   return {

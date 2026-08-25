@@ -112,6 +112,192 @@ export type ZvecGrepContextOptions = {
   embeddingConcurrency?: number;
 };
 
+export type ZvecGrepExploreOptions = {
+  root?: string;
+  query: string;
+  seedId?: string;
+  searchLimit?: number;
+  traversalDepth?: number;
+  maxNodes?: number;
+  maxFiles?: number;
+  maxChars?: number;
+};
+
+export type ZvecGrepGraphNeighborhoodOptions = {
+  root?: string;
+  direction: ZvecGrepGraphDirection;
+  query: string;
+  seedId?: string;
+  /** Narrow same-named definitions to this relative or absolute source path. */
+  file?: string;
+  depth?: number;
+  limit?: number;
+};
+
+export type ZvecGrepGraphDirection = "callers" | "callees" | "impact";
+
+export type ZvecGrepGraphFile = {
+  id: string;
+  absolutePath: string;
+  relativePath: string;
+  rootPath?: string;
+};
+
+export type ZvecGrepGraphEntity = {
+  entityId: string;
+  name?: string;
+  kind?: string;
+  /** Stable semantic owner/namespace emitted by language extraction. */
+  scope?: string;
+  file: ZvecGrepGraphFile;
+  range: Range;
+};
+
+export type ZvecGrepGraphNode = {
+  id: string;
+  kind?: string;
+  isRoot: boolean;
+  entity: ZvecGrepGraphEntity | null;
+};
+
+export type ZvecGrepGraphEdgeKind =
+  | "CONTAINS"
+  | "CALLS"
+  | "REFS"
+  | "INHERITS"
+  | "DEFINES"
+  | "IMPORTS"
+  | "INSTANTIATES";
+
+export type ZvecGrepGraphEdge = {
+  src: string;
+  dst: string;
+  kind: ZvecGrepGraphEdgeKind;
+  rel: string;
+  count: number;
+  firstLine: number;
+  refName: string;
+  provenance: "static" | "heuristic";
+  confidence: number;
+  evidence?: string;
+};
+
+export type ZvecGrepGraphSeed = {
+  id: string;
+  entity: ZvecGrepGraphEntity;
+};
+
+export type ZvecGrepGraphNeighbor = {
+  id: string;
+  kind?: string;
+  count?: number;
+  entity: ZvecGrepGraphEntity | null;
+};
+
+export type ZvecGrepGraphNeighborhoodGroup = {
+  seed: ZvecGrepGraphSeed;
+  members: ZvecGrepGraphSeed[];
+  truncated?: boolean;
+  neighbors: ZvecGrepGraphNeighbor[];
+};
+
+export type ZvecGrepExploreFileBundle = {
+  file: ZvecGrepGraphFile;
+  score: number;
+  isCentral: boolean;
+  isChangeSurface: boolean;
+  reasons: string[];
+  symbols: {
+    id: string;
+    name: string;
+    kind?: string;
+    range: Range;
+    content: string;
+  }[];
+  text: string;
+};
+
+export type ZvecGrepExploreResult = {
+  root: string;
+  available: boolean;
+  unavailableReason?: string;
+  query: string;
+  ambiguous?: boolean;
+  seedCandidates?: ZvecGrepGraphNode[];
+  roots: ZvecGrepGraphNode[];
+  nodes: ZvecGrepGraphNode[];
+  edges: ZvecGrepGraphEdge[];
+  edgesTruncated: boolean;
+  callPaths: { from: string; to: string; nodes: string[] }[];
+  blastRadius: {
+    rootId: string;
+    dependents: { id: string; entity: ZvecGrepGraphEntity | null }[];
+    tests: { id: string; entity: ZvecGrepGraphEntity | null }[];
+  }[];
+  changeSurface: {
+    rootId: string;
+    id: string;
+    rel: "type" | "return";
+    entity: ZvecGrepGraphEntity;
+    rescued: boolean;
+  }[];
+  dynamicBoundaries: {
+    sourceId: string;
+    target: {
+      raw: string;
+      member: string;
+      receiver?: { kind: "owner" | "super" | "qualified"; name: string };
+      hints?: {
+        receiverType?: string;
+        candidateTypes?: string[];
+        genericBounds?: string[];
+        dispatch?: "static" | "virtual" | "interface" | "trait" | "dynamic";
+        callArity?: number;
+        dynamicDispatch?: {
+          form: "computed_member" | "getattr" | "reflection";
+          key?: string;
+        };
+      };
+    };
+    reason:
+      | "unknown_receiver_type"
+      | "polymorphic_dispatch"
+      | "lexical_dispatch"
+      | "runtime_dispatch";
+    candidates: string[];
+    candidatesTruncated: boolean;
+    occurrenceCount?: number;
+    candidateDetails: {
+      targetId: string;
+      displayName?: string;
+      filePath?: string;
+      reason: "hierarchy" | "generic_bound" | "method_set" | "function_pointer";
+      confidence: number;
+    }[];
+  }[];
+  dynamicBoundariesTruncated: boolean;
+  files: ZvecGrepExploreFileBundle[];
+  emptyReason?: "graph_unavailable" | "no_seeds" | "no_context";
+};
+
+export type ZvecGrepGraphNeighborhoodResult = {
+  root: string;
+  available: boolean;
+  unavailableReason?: string;
+  direction: ZvecGrepGraphDirection;
+  query: string;
+  depth: number;
+  limit: number;
+  seeds: ZvecGrepGraphSeed[];
+  ambiguous?: boolean;
+  groups?: ZvecGrepGraphNeighborhoodGroup[];
+  groupsTruncated?: boolean;
+  fileFilterMismatch?: string;
+  truncated?: boolean;
+  seed?: ZvecGrepGraphSeed;
+  neighbors: ZvecGrepGraphNeighbor[];
+};
+
 export type ZvecGrepSearchOptions = {
   extraArgs?: readonly string[];
   patternFiles?: readonly string[];
@@ -186,6 +372,24 @@ export type ZvecGrepContextWorkspaceIndex = {
   path: string;
 };
 
+export type ZvecGrepGraphRelationship = {
+  srcId: string;
+  dstId: string;
+  srcLabel: string;
+  dstLabel: string;
+  kind: "CALLS" | "REFS" | "INHERITS" | "CONTAINS" | "IMPORTS" | "INSTANTIATES";
+  scope: "symbol" | "file";
+  srcKind?: string;
+  dstKind?: string;
+  srcFile?: string;
+  dstFile?: string;
+  rel?: string;
+  count?: number;
+  provenance?: "static" | "heuristic";
+  confidence?: number;
+  evidence?: string;
+};
+
 export type ZvecGrepRgDiagnostics = {
   backend: "bundled-rg" | "rg";
   command: string;
@@ -220,6 +424,12 @@ export type ZvecGrepIndexDiagnostics = {
     mode: "fts" | "vector";
     query: string;
   }[];
+  graphExpand?: {
+    available: boolean;
+    unavailableReason?: string;
+    seeds: number;
+    neighborsAdded: number;
+  };
 };
 
 export type ZvecGrepContextDiagnostics = {
@@ -239,6 +449,7 @@ export type ZvecGrepContextResult = {
   items: ZvecGrepContextItem[];
   /** Per-query-group recall lists before cross-group deduplication and reranking. */
   groupResults?: ZvecGrepContextGroupResult[];
+  relationships?: ZvecGrepGraphRelationship[];
   diagnostics: ZvecGrepContextDiagnostics;
 };
 
@@ -249,6 +460,10 @@ export type ZvecGrep = {
   disableIndex(options?: ZvecGrepInfoOptions): Promise<ZvecGrepInfoResult>;
   info(options?: ZvecGrepInfoOptions): Promise<ZvecGrepInfoResult>;
   context(options: ZvecGrepContextOptions): Promise<ZvecGrepContextResult>;
+  explore(options: ZvecGrepExploreOptions): Promise<ZvecGrepExploreResult>;
+  graphNeighborhood(
+    options: ZvecGrepGraphNeighborhoodOptions,
+  ): Promise<ZvecGrepGraphNeighborhoodResult>;
   close(): Promise<void>;
 };
 

@@ -11,6 +11,7 @@ import {
   type ZvecGrep,
   type ZvecGrepInfoResult,
 } from "../index.js";
+import { openWorkspaceGraphReadSession } from "../engine/service/zvec-grep.js";
 import { globalConfigPath, updateGlobalConfig } from "../engine/config.js";
 import { listEmbeddingModels } from "../engine/models/index.js";
 import { DaemonClient } from "../client/daemon-client.js";
@@ -30,6 +31,10 @@ import {
   contextWarningLines,
   printCliContextResult,
 } from "./format/context.js";
+import {
+  printExploreResult,
+  printNeighborhoodResult,
+} from "./format/explore.js";
 import { printDebug } from "./format/debug.js";
 import { createIndexProgressReporter } from "./format/progress.js";
 import {
@@ -44,10 +49,6 @@ import {
   planRemoteIndexAuthorization,
   planRemoteSearchAuthorization,
 } from "../authorization/index.js";
-import {
-  indexCompletionFromStatus,
-  indexStatusNeedsRefresh,
-} from "../engine/index-status.js";
 import type { NormalizedSearchInput } from "../mcp/input-normalization.js";
 import { indexProgressFromMessage } from "../index-progress.js";
 import { normalizeManagedRgInput } from "./managed-rg.js";
@@ -56,6 +57,7 @@ import {
   parseServerSearchResponse,
 } from "./server-search.js";
 import { runInstall, runUninstall } from "./install.js";
+import { readPackageVersion } from "./version.js";
 import {
   runAuth,
   authorizationStore,
@@ -75,6 +77,14 @@ export async function runParsedCommand(parsed: ParsedArgs): Promise<void> {
   switch (parsed.command) {
     case "query":
       await runQuery(parsed);
+      return;
+    case "explore":
+      await runExplore(parsed);
+      return;
+    case "callers":
+    case "callees":
+    case "impact":
+      await runGraphNeighborhood(parsed);
       return;
     case "index":
       await runIndex(parsed);
@@ -566,6 +576,84 @@ async function runStatus(parsed: ParsedArgs): Promise<void> {
   }
 }
 
+async function runExplore(parsed: ParsedArgs): Promise<void> {
+  const query = parsed.positionals[0]!;
+  const root = resolve(process.cwd());
+  const input = {
+    root,
+    query,
+    seedId: parsed.options.seedId,
+    searchLimit: parsed.options.limit,
+    traversalDepth: parsed.options.depth,
+    maxFiles: parsed.options.maxFiles,
+  };
+  await routeByMode({
+    mode: resolveClientMode(parsed.options.mode),
+    serverAvailable: () => daemonIsReady(parsed.options.home),
+    server: async () => {
+      console.log(
+        await daemonClient(parsed.options).callTextTool("zvec_grep_explore", {
+          root,
+          query,
+          seedId: input.seedId,
+          limit: input.searchLimit,
+          depth: input.traversalDepth,
+          maxFiles: input.maxFiles,
+        }),
+      );
+    },
+    direct: async () => {
+      const service = openWorkspaceGraphReadSession(root);
+      try {
+        printExploreResult(await service.explore(input));
+      } finally {
+        await service.close();
+      }
+    },
+  });
+}
+
+async function runGraphNeighborhood(parsed: ParsedArgs): Promise<void> {
+  const direction = parsed.command;
+  if (
+    direction !== "callers" &&
+    direction !== "callees" &&
+    direction !== "impact"
+  ) {
+    throw new Error(`unexpected graph command: ${parsed.command}`);
+  }
+  const root = resolve(process.cwd());
+  const input = {
+    root,
+    direction,
+    query: parsed.positionals[0]!,
+    depth: parsed.options.depth,
+    limit: parsed.options.limit,
+    seedId: parsed.options.seedId,
+    file: parsed.options.definitionFile,
+  };
+  await routeByMode({
+    mode: resolveClientMode(parsed.options.mode),
+    serverAvailable: () => daemonIsReady(parsed.options.home),
+    server: async () => {
+      console.log(
+        await daemonClient(parsed.options).callTextTool(
+          `zvec_grep_${direction}`,
+          input,
+        ),
+      );
+    },
+    direct: async () => {
+      const service = openWorkspaceGraphReadSession(root);
+      try {
+        printNeighborhoodResult(await service.graphNeighborhood(input));
+      } finally {
+        await service.close();
+      }
+    },
+  });
+}
+
 async function runQuery(parsed: ParsedArgs): Promise<void> {
   const rgInput = parsed.options.rg
     ? normalizeManagedRgInput(parsed)
@@ -628,7 +716,7 @@ async function runDirectQuery(
         if (progressEvent.phase !== "done") progress.report(progressEvent);
       },
     );
-    const info = await directQueryInfo(zvecGrep);
+    const info = await directQueryInfo(zvecGrep, false);
     const schema = info.workspaceIndex?.embedding;
     const workspaceRuntime = workspaceRuntimeFromInfo(info);
     const modelInfo =
@@ -667,13 +755,6 @@ async function runDirectQuery(
     for (const line of contextWarningLines(result)) {
       console.error(line);
     }
-    if (
-      effectiveContextRequest.autoUpdate !== true &&
-      indexStatusNeedsRefresh(info.status)
-    ) {
-      printStaleIndexStatus("idle", indexCompletionFromStatus(info.status));
-    }
-
     if (commandOptions.debug) {
       printDebug(result, {
         trace: commandOptions.trace === true,
@@ -763,6 +844,7 @@ function daemonClient(options: CliOptions): DaemonClient {
     home: options.home,
     tokenFile: options.serverTokenFile,
     allowRemote: options.allowRemote,
+    expectedServerVersion: readPackageVersion(),
   });
 }
 
@@ -783,8 +865,11 @@ function ftsFallbackContextRequest(
   };
 }
 
-async function directQueryInfo(service: ZvecGrep): Promise<ZvecGrepInfoResult> {
-  return await service.info({ root: process.cwd() });
+async function directQueryInfo(
+  service: ZvecGrep,
+  includeStatus: boolean,
+): Promise<ZvecGrepInfoResult> {
+  return await service.info({ root: process.cwd(), includeStatus });
 }
 
 function normalizedDirectSearchInput(

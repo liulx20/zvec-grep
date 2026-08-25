@@ -33,10 +33,8 @@ test("npm package contains and exposes the supported public surface", async (t) 
   );
   const packDirectory = join(temporaryDirectory, "pack");
   const consumerDirectory = join(temporaryDirectory, "consumer");
-  const npmCache = join(temporaryDirectory, "npm-cache");
   const npmEnvironment = {
     ...process.env,
-    npm_config_cache: npmCache,
     npm_config_registry: "https://registry.npmjs.org/",
   };
   await mkdir(packDirectory, { recursive: true });
@@ -78,8 +76,33 @@ test("npm package contains and exposes the supported public surface", async (t) 
     join(consumerDirectory, "package.json"),
     JSON.stringify({ private: true, type: "module" }),
   );
+  // The package's local ranking backend is optional and is not exercised by
+  // this remote-embedding consumer test. `@zvec/zvec` also publishes its
+  // native bindings as optional packages, however, so install exactly the
+  // current platform binding while omitting the heavyweight optional tree.
+  const zvecPackageJson = JSON.parse(
+    await readFile(resolve("node_modules/@zvec/zvec/package.json"), "utf8"),
+  );
+  const zvecBinding = `@zvec/bindings-${process.platform}-${process.arch}`;
+  const zvecBindingVersion =
+    zvecPackageJson.optionalDependencies?.[zvecBinding];
+  assert.equal(
+    typeof zvecBindingVersion,
+    "string",
+    `@zvec/zvec does not publish a binding for ${process.platform}-${process.arch}`,
+  );
   await runNpm(
-    ["install", "--ignore-scripts", "--no-audit", "--no-fund", tarball],
+    [
+      "install",
+      "--ignore-scripts",
+      "--install-strategy=linked",
+      "--omit=optional",
+      "--no-audit",
+      "--no-fund",
+      "--prefer-offline",
+      tarball,
+      `${zvecBinding}@${zvecBindingVersion}`,
+    ],
     {
       cwd: consumerDirectory,
       env: npmEnvironment,
@@ -195,7 +218,10 @@ test("npm package contains and exposes the supported public surface", async (t) 
       "--eval",
       "import { createEmbeddingModel, createZvecGrep, EmbeddingPurpose } from '@zvec/zvec-grep'; if (typeof createZvecGrep !== 'function' || typeof createEmbeddingModel !== 'function' || EmbeddingPurpose.Query !== 'query') process.exit(1);",
     ],
-    { cwd: consumerDirectory },
+    {
+      cwd: consumerDirectory,
+      env: { ...process.env, NODE_NO_WARNINGS: "1" },
+    },
   );
   assert.equal(imported.stderr, "");
 
@@ -216,19 +242,27 @@ test("npm package contains and exposes the supported public surface", async (t) 
       "",
     ].join("\n"),
   );
-  await execFileAsync(
-    process.execPath,
-    [
-      resolve("node_modules/typescript/bin/tsc"),
-      "--noEmit",
-      "--target",
-      "ES2022",
-      "--module",
-      "NodeNext",
-      "--moduleResolution",
-      "NodeNext",
-      typeFixture,
-    ],
-    { cwd: consumerDirectory },
-  );
+  try {
+    await execFileAsync(
+      process.execPath,
+      [
+        resolve("node_modules/typescript/bin/tsc"),
+        "--noEmit",
+        "--target",
+        "ES2022",
+        "--module",
+        "NodeNext",
+        "--moduleResolution",
+        "NodeNext",
+        typeFixture,
+      ],
+      { cwd: consumerDirectory },
+    );
+  } catch (error) {
+    const output =
+      error && typeof error === "object"
+        ? `${"stdout" in error ? error.stdout : ""}${"stderr" in error ? error.stderr : ""}`
+        : "";
+    assert.fail(`packed declarations failed to typecheck:\n${output}`);
+  }
 });

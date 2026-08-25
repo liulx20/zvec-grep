@@ -32,6 +32,7 @@ export const timeInputSchema = z
   .optional();
 export const codeSymbolTypeSchema = z.enum([
   "module",
+  "component",
   "class",
   "interface",
   "function",
@@ -147,7 +148,7 @@ const searchFields = {
     .describe("Prefer exact indexed symbols when query names a symbol."),
   symbolTypes: z
     .array(codeSymbolTypeSchema)
-    .max(6)
+    .max(7)
     .default([])
     .describe("Restrict indexed results to symbol types."),
   modifiedAfter: timeInputSchema.describe(
@@ -355,7 +356,7 @@ const contextItemSchema = z.object({
   contentRole: z.enum(["source", "outline"]).optional(),
   status: z.enum(["fresh", "possibly_stale"]),
   score: z.number().optional(),
-  matchedBy: z.enum(["fts", "vector", "fts+vector", "lexical"]),
+  matchedBy: z.enum(["fts", "vector", "fts+vector", "graph", "lexical"]),
   metadata: z.unknown().optional(),
   entityId: z.string().optional(),
   container: z
@@ -403,6 +404,34 @@ const searchResultSchema = z.object({
       name: z.string(),
       path: z.string(),
     })
+    .optional(),
+  relationships: z
+    .array(
+      z.object({
+        srcId: z.string(),
+        dstId: z.string(),
+        srcLabel: z.string(),
+        dstLabel: z.string(),
+        kind: z.enum([
+          "CALLS",
+          "REFS",
+          "INHERITS",
+          "CONTAINS",
+          "IMPORTS",
+          "INSTANTIATES",
+        ]),
+        scope: z.enum(["symbol", "file"]),
+        srcKind: z.string().optional(),
+        dstKind: z.string().optional(),
+        srcFile: z.string().optional(),
+        dstFile: z.string().optional(),
+        rel: z.string().optional(),
+        count: z.number().int().positive().optional(),
+        provenance: z.enum(["static", "heuristic"]).optional(),
+        confidence: z.number().min(0).max(1).optional(),
+        evidence: z.string().optional(),
+      }),
+    )
     .optional(),
   diagnostics: z.object({
     emptyReason: z
@@ -598,6 +627,73 @@ export const zvecGrepServerStatusOutputSchema = z.object({
     active_leases: z.number().int().nonnegative(),
   }),
 });
+
+export const zvecGrepExploreInputSchema = {
+  root: absoluteRootSchema,
+  query: boundedString(
+    "Symbol name or short query used to seed the code-graph explore pack.",
+  ),
+  seedId: z
+    .string()
+    .min(1)
+    .max(256)
+    .optional()
+    .describe("Disambiguate when multiple symbols match the query."),
+  limit: z
+    .number()
+    .int()
+    .positive()
+    .max(32)
+    .optional()
+    .describe("Max seed symbols (default 8)."),
+  depth: z
+    .number()
+    .int()
+    .positive()
+    .max(8)
+    .optional()
+    .describe("Graph traversal depth (default 3)."),
+  maxFiles: z
+    .number()
+    .int()
+    .positive()
+    .max(32)
+    .optional()
+    .describe("Max files in the assembled context pack (default 8)."),
+};
+
+export const zvecGrepGraphNeighborhoodInputSchema = {
+  root: absoluteRootSchema,
+  query: boundedString("Exact symbol name or entity id."),
+  seedId: z
+    .string()
+    .min(1)
+    .max(256)
+    .optional()
+    .describe("Disambiguate when multiple symbols match the query."),
+  file: z
+    .string()
+    .min(1)
+    .max(1024)
+    .optional()
+    .describe(
+      "Narrow same-named definitions to a relative or absolute source path.",
+    ),
+  depth: z
+    .number()
+    .int()
+    .positive()
+    .max(10)
+    .optional()
+    .describe("Traversal depth (default 1 for callers/callees, 2 for impact)."),
+  limit: z
+    .number()
+    .int()
+    .positive()
+    .max(200)
+    .optional()
+    .describe("Max neighbors (default 20)."),
+};
 
 export type ZvecGrepIndexInput = z.infer<typeof zvecGrepIndexInputSchema>;
 export type ZvecGrepIndexRequest = ZvecGrepIndexInput & {

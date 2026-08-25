@@ -13,6 +13,10 @@ coverage/
 __pycache__/
 *.py[cod]
 
+# CodeGraph kernel native binaries (built from codegraph/codegraph-kernel)
+/codegraph-kernel/prebuilds/
+/kernel/*.node
+
 # Local tool state
 .cache/
 .zvec-grep/

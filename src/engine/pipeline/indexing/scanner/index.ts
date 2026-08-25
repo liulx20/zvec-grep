@@ -24,6 +24,7 @@ import type {
 import { detectFileType } from "../../../file-type.js";
 import { resolveMaxFileSizeBytes } from "../../../file-size-policy.js";
 import { sha256Text } from "../../../utils/hash.js";
+import { escapeRegExp } from "../../../utils/regex.js";
 import {
   matchesFileSelection,
   resolveFileTypePatterns,
@@ -1065,10 +1066,6 @@ function segmentGlobToRegExp(pattern: string): RegExp {
   }
 
   return new RegExp(`${expression}$`);
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[|\\{}()[\]^$+*?.]/g, "\\$&");
 }
 
 async function readFileInfo(

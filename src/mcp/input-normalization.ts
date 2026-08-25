@@ -1,6 +1,9 @@
 import type { CodeSymbolType, ZvecGrepContextOptions } from "../index.js";
-import { parseModifiedTime, splitPathFilters } from "../cli/args.js";
-import { parseManagedRgCommand } from "../cli/managed-rg.js";
+import {
+  parseModifiedTime,
+  splitPathFilters,
+} from "../input/search-filters.js";
+import { parseManagedRgCommand } from "../input/managed-rg-command.js";
 import type {
   StringListInput,
   TimeInput,
