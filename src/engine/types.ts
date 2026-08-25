@@ -303,35 +303,10 @@ export type WorkspaceIndexStatus = {
 // Search types
 // -----------------------------------------------------------------------------
 
-export type SearchMatchedBy = "fts" | "vector" | "fts+vector" | "graph";
-
-export type SearchGraphRelation = {
-  srcId: string;
-  dstId: string;
-  srcLabel: string;
-  dstLabel: string;
-  kind:
-    | "CALLS"
-    | "REFS"
-    | "INHERITS"
-    | "CONTAINS"
-    | "IMPORTS"
-    | "COUNTERPART"
-    | "INSTANTIATES";
-  scope: "symbol" | "file";
-  srcKind?: string;
-  dstKind?: string;
-  srcFile?: string;
-  dstFile?: string;
-  rel?: string;
-  count?: number;
-  provenance?: "static" | "heuristic";
-  confidence?: number;
-  evidence?: string;
-};
+export type SearchMatchedBy = "fts" | "vector" | "fts+vector";
 
 export type SearchRecallTrace = {
-  path: "fts" | "vector" | "graph";
+  path: "fts" | "vector";
   routeId?: string;
   query?: string;
   found: boolean;
@@ -364,7 +339,7 @@ export type SearchHitEvidence = {
   content: Content;
   metadata?: EntityMetadata;
   isEntity: boolean;
-  path: "fts" | "vector" | "graph";
+  path: "fts" | "vector";
   routeId?: string;
   query?: string;
   rank?: number;
@@ -416,19 +391,10 @@ export type ResolvedSearchPlan = Omit<SearchPlan, "routes"> & {
   routes: readonly ResolvedSearchPlanRoute[];
 };
 
-export type SearchGraphExpandDiagnostics = {
-  available: boolean;
-  unavailableReason?: string;
-  seeds: number;
-  neighborsAdded: number;
-};
-
 export type SearchPlanResult = {
   plan: ResolvedSearchPlan;
   hits: SearchHit[];
-  relationships: SearchGraphRelation[];
   trackedHit?: SearchHit;
-  graphExpand?: SearchGraphExpandDiagnostics;
   timings?: readonly TimingEntry[];
 };
 

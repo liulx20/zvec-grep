@@ -6,8 +6,6 @@ import {
 } from "../../errors.js";
 import type { EmbeddingModel } from "../../models/index.js";
 import type { WorkspaceIndexStorage } from "../../storage/index.js";
-import { exploreSubgraph } from "../../graph/explore.js";
-import type { GraphEdgeKind, GraphReader } from "../../graph/public-types.js";
 import type {
   WorkspaceIndexInfo,
   Entity,
@@ -21,7 +19,6 @@ import type {
   SearchHitEvidence,
   SearchHitTrace,
   SearchMatchedBy,
-  SearchGraphRelation,
   SearchPlan,
   SearchPlanResult,
   SearchRecallTrace,
@@ -49,7 +46,6 @@ type SearchContext = {
   workspaceIndex: WorkspaceIndexInfo;
   storage: WorkspaceIndexStorage;
   embeddingModel?: EmbeddingModel;
-  graph?: GraphReader;
 };
 
 type StorageSearchFilter = NonNullable<
@@ -57,10 +53,7 @@ type StorageSearchFilter = NonNullable<
 >;
 
 type StorageSearchHit = ReturnType<WorkspaceIndexStorage["searchFts"]>[number];
-type StoredEntity = ReturnType<
-  WorkspaceIndexStorage["listEntitiesByFile"]
->[number];
-type SearchSource = "fts" | "vector" | "graph";
+type SearchSource = "fts" | "vector";
 
 type Candidate = {
   id: string;
@@ -94,13 +87,6 @@ const RECALL_MAX_DEPTH = 2000;
 const RECALL_GROWTH_FACTOR = 2;
 const RECALL_TARGET_FACTOR = 5;
 const RECALL_MIN_TARGET_CANDIDATES = 50;
-const GRAPH_EXPAND_SEED_TOP_K = 5;
-const GRAPH_EXPAND_DEPTH = 2;
-const GRAPH_EXPAND_MAX_NODES = 80;
-const GRAPH_EXPAND_RANK_PENALTY = 50;
-const GRAPH_EXPAND_FILE_PER_SEED = 3;
-const GRAPH_EXPAND_ENTITIES_PER_FILE = 3;
-const GRAPH_EXPAND_IMPORT_RANK_PENALTY = 55;
 
 type RecallRoute = ResolvedSearchPlanRoute & {
   filter?: StorageSearchFilter;
@@ -138,12 +124,6 @@ export async function searchWorkspaceIndex(
     // query. Do not duplicate that text: exact-symbol detection must see
     // `CounterStore`, not `CounterStore CounterStore`.
     const rankingQuery = rankingTerms.join(" ");
-    const exactGraphCandidates = findExactGraphCandidates({
-      graph: ctx.graph,
-      query: rankingQuery,
-      filter,
-      limit,
-    });
     const vectorByRoute =
       hasSearchableFiles && planUsesVector(normalized)
         ? await timings.time("query_embedding", () =>
@@ -183,46 +163,10 @@ export async function searchWorkspaceIndex(
       );
     }
 
-    timings.timeSync("graph_exact_seed", () =>
-      injectExactGraphCandidates({
-        storage: ctx.storage,
-        candidates,
-        matches: exactGraphCandidates,
-      }),
-    );
-    let fused = timings.timeSync("fusion", () =>
+    const fused = timings.timeSync("fusion", () =>
       fuseCandidates(candidates, rankingQuery),
     );
-    const graphExpansion = timings.timeSync("graph_expand", () =>
-      expandGraphNeighbors({
-        graph: ctx.graph,
-        storage: ctx.storage,
-        candidates,
-        seeds: fused,
-        limit,
-        filter,
-      }),
-    );
-    if (graphExpansion.rerankNeeded) {
-      fused = timings.timeSync("fusion_graph", () =>
-        fuseCandidates(candidates, rankingQuery),
-      );
-    }
-
-    const visible = selectVisibleCandidates(
-      fused,
-      limit,
-      graphExpansion.relations,
-      graphExpansion.seedIds,
-      rankingQuery,
-    );
-    const relationships = selectGraphRelationships(
-      graphExpansion.relations,
-      visible,
-      graphExpansion.seedIds,
-      candidates,
-      rankingQuery,
-    );
+    const visible = selectVisibleCandidates(fused, limit, rankingQuery);
     const tracked = normalized.trackEntityId
       ? fused.find((candidate) => candidate.id === normalized.trackEntityId)
       : undefined;
@@ -241,14 +185,7 @@ export async function searchWorkspaceIndex(
     return {
       plan: normalized,
       hits,
-      relationships,
       trackedHit,
-      graphExpand: {
-        available: graphExpansion.available,
-        unavailableReason: graphExpansion.unavailableReason,
-        seeds: graphExpansion.seeds,
-        neighborsAdded: graphExpansion.neighborsAdded,
-      },
     };
   });
 
@@ -261,92 +198,11 @@ export async function searchWorkspaceIndex(
 export function selectVisibleCandidates(
   fused: readonly Candidate[],
   limit: number,
-  relations: readonly SearchGraphRelation[],
-  seedIds: readonly string[],
   query = "",
 ): Candidate[] {
-  const visible = selectDistinctSemanticCandidates(fused, limit, query);
-  if (limit < 2 || visible.length < limit || relations.length === 0)
-    return withVisibleRanks(visible);
-
-  const seeds = new Set(seedIds);
-  const protectedSeeds = new Set(seedIds.slice(0, 1));
-  const directNeighborIds = new Set<string>();
-  const directNeighborWeights = new Map<string, number>();
-  const seedPosition = new Map(seedIds.map((id, index) => [id, index]));
-  const relationWeight = (kind: SearchGraphRelation["kind"]): number =>
-    kind === "INHERITS"
-      ? 5
-      : kind === "CALLS" || kind === "INSTANTIATES"
-        ? 4
-        : kind === "REFS"
-          ? 3
-          : kind === "IMPORTS"
-            ? 2
-            : 1;
-  const recordNeighbor = (
-    neighborId: string,
-    seedId: string,
-    kind: SearchGraphRelation["kind"],
-  ) => {
-    directNeighborIds.add(neighborId);
-    const position = seedPosition.get(seedId) ?? seedIds.length;
-    // Preserve the retrieval ordering as the primary signal, then prefer
-    // structural/runtime relations over containment. A direct neighbor of the
-    // strongest semantic seed should not lose to a higher-fused neighbor of a
-    // weak lexical seed.
-    const weight = (seedIds.length - position) * 10 + relationWeight(kind);
-    directNeighborWeights.set(
-      neighborId,
-      Math.max(weight, directNeighborWeights.get(neighborId) ?? 0),
-    );
-  };
-  for (const relation of relations) {
-    if (relation.scope !== "symbol") continue;
-    if (seeds.has(relation.srcId))
-      recordNeighbor(relation.dstId, relation.srcId, relation.kind);
-    if (seeds.has(relation.dstId))
-      recordNeighbor(relation.srcId, relation.dstId, relation.kind);
-  }
-  if (directNeighborIds.size === 0) return withVisibleRanks(visible);
-
-  const visibleFiles = new Set(visible.map((candidate) => candidate.file.id));
-  const structural = fused
-    .filter(
-      (candidate) =>
-        !visible.some((item) => item.id === candidate.id) &&
-        directNeighborIds.has(candidate.id) &&
-        candidate.sources.has("graph") &&
-        !visibleFiles.has(candidate.file.id) &&
-        !isLowValuePath(candidate.file.relativePath),
-    )
-    .sort(
-      (left, right) =>
-        (directNeighborWeights.get(right.id) ?? 0) -
-          (directNeighborWeights.get(left.id) ?? 0) ||
-        left.rank - right.rank ||
-        left.id.localeCompare(right.id),
-    )[0];
-  if (!structural) return withVisibleRanks(visible);
-
-  const fileCounts = new Map<string, number>();
-  for (const candidate of visible)
-    fileCounts.set(
-      candidate.file.id,
-      (fileCounts.get(candidate.file.id) ?? 0) + 1,
-    );
-  for (let index = visible.length - 1; index >= 0; index--) {
-    const candidate = visible[index]!;
-    if (
-      protectedSeeds.has(candidate.id) ||
-      (fileCounts.get(candidate.file.id) ?? 0) < 2
-    )
-      continue;
-    const result = [...visible];
-    result[index] = { ...structural, forced: true };
-    return withVisibleRanks(result);
-  }
-  return withVisibleRanks(visible);
+  return withVisibleRanks(
+    selectDistinctSemanticCandidates(fused, limit, query),
+  );
 }
 
 function withVisibleRanks(candidates: readonly Candidate[]): Candidate[] {
@@ -1581,527 +1437,5 @@ function deriveMatchedBy(sources: Set<SearchSource>): SearchMatchedBy {
   if (sources.has("fts") && sources.has("vector")) {
     return "fts+vector";
   }
-  if (sources.has("fts")) {
-    return "fts";
-  }
-  if (sources.has("vector")) {
-    return "vector";
-  }
-  return "graph";
-}
-
-function findExactGraphCandidates(input: {
-  graph: GraphReader | undefined;
-  query: string;
-  filter?: StorageSearchFilter;
-  limit: number;
-}): StoredEntity[] {
-  if (!input.graph?.available) return [];
-  const trimmed = input.query.trim();
-  if (
-    !/^[A-Za-z_$~][A-Za-z0-9_$~]*(?:::[A-Za-z_$~][A-Za-z0-9_$~]*)*$/.test(
-      trimmed,
-    )
-  )
-    return [];
-
-  const leaf = trimmed.split("::").at(-1)!;
-  return input.graph
-    .findSymbolsByName(leaf, Math.min(8, Math.max(1, input.limit)))
-    .filter(
-      (match) =>
-        matchesGraphFilter(match, input.filter) &&
-        (!match.file.relativePath ||
-          searchPathValueFactor(match.file.relativePath, input.query) >= 1),
-    );
-}
-
-function injectExactGraphCandidates(input: {
-  storage: WorkspaceIndexStorage;
-  candidates: Map<string, Candidate>;
-  matches: readonly StoredEntity[];
-}): void {
-  let rank = 1;
-  for (const match of input.matches) {
-    mergeGraphCandidate({
-      storage: input.storage,
-      candidates: input.candidates,
-      entityId: match.entity.id,
-      routeId: "graph.exact",
-      syntheticRank: rank++,
-      score: 1,
-    });
-  }
-}
-
-function expandGraphNeighbors(input: {
-  graph: GraphReader | undefined;
-  storage: WorkspaceIndexStorage;
-  candidates: Map<string, Candidate>;
-  seeds: readonly Candidate[];
-  limit: number;
-  filter?: StorageSearchFilter;
-}): {
-  available: boolean;
-  unavailableReason?: string;
-  seeds: number;
-  neighborsAdded: number;
-  rerankNeeded: boolean;
-  seedIds: string[];
-  relations: SearchGraphRelation[];
-} {
-  if (!input.graph?.available) {
-    return {
-      available: false,
-      unavailableReason: input.graph?.unavailableReason,
-      seeds: 0,
-      neighborsAdded: 0,
-      rerankNeeded: false,
-      seedIds: [],
-      relations: [],
-    };
-  }
-
-  const seedTopK = Math.min(
-    GRAPH_EXPAND_SEED_TOP_K,
-    Math.max(1, input.limit),
-    input.seeds.length,
-  );
-  const seeds = input.seeds.slice(0, seedTopK);
-  if (seeds.length === 0) {
-    return {
-      available: true,
-      seeds: 0,
-      neighborsAdded: 0,
-      rerankNeeded: false,
-      seedIds: [],
-      relations: [],
-    };
-  }
-
-  const subgraph = exploreSubgraph(input.graph, {
-    seedIds: seeds.map((seed) => seed.id),
-    seedWeights: new Map(
-      seeds.map((seed) => [seed.id, 1 / (RRF_K + seed.rank)]),
-    ),
-    traversalDepth: GRAPH_EXPAND_DEPTH,
-    maxNodes: GRAPH_EXPAND_MAX_NODES,
-    includeCallPaths: false,
-  });
-  const connectedNodeIds = new Set(
-    subgraph.edges.flatMap((edge) => [edge.src, edge.dst]),
-  );
-  const ranked = subgraph.nodes
-    .filter(
-      (node) =>
-        connectedNodeIds.has(node.id) &&
-        node.entity &&
-        matchesGraphFilter(node.entity, input.filter),
-    )
-    .sort((a, b) => {
-      const scoreDiff =
-        (subgraph.nodeScores.get(b.id) ?? 0) -
-        (subgraph.nodeScores.get(a.id) ?? 0);
-      return scoreDiff || a.id.localeCompare(b.id);
-    });
-  const relations = subgraph.edges
-    .map((edge) => symbolSearchRelation(input.storage, edge, input.filter))
-    .filter((relation): relation is SearchGraphRelation => relation !== null);
-
-  let neighborsAdded = 0;
-  let rerankNeeded = false;
-  for (let index = 0; index < ranked.length; index++) {
-    const node = ranked[index]!;
-    const existed = input.candidates.has(node.id);
-    if (
-      mergeGraphCandidate({
-        storage: input.storage,
-        candidates: input.candidates,
-        entityId: node.id,
-        routeId: "graph.explore",
-        syntheticRank: GRAPH_EXPAND_RANK_PENALTY + index + 1,
-        score: subgraph.nodeScores.get(node.id) ?? 0,
-      })
-    ) {
-      rerankNeeded = true;
-      if (!existed) neighborsAdded += 1;
-    }
-  }
-  const importExpansion = injectImportFileNeighbors({
-    graph: input.graph,
-    storage: input.storage,
-    candidates: input.candidates,
-    seeds,
-    filter: input.filter,
-    relations,
-  });
-  neighborsAdded += importExpansion.added;
-  rerankNeeded = rerankNeeded || importExpansion.changed;
-
-  return {
-    available: true,
-    seeds: seeds.length,
-    neighborsAdded,
-    rerankNeeded,
-    seedIds: seeds.map((seed) => seed.id),
-    relations,
-  };
-}
-
-function injectImportFileNeighbors(input: {
-  graph: GraphReader;
-  storage: WorkspaceIndexStorage;
-  candidates: Map<string, Candidate>;
-  seeds: readonly Candidate[];
-  filter?: StorageSearchFilter;
-  relations: SearchGraphRelation[];
-}): { added: number; changed: boolean } {
-  const seedFileRank = new Map<string, number>();
-  for (const seed of input.seeds) {
-    const existing = seedFileRank.get(seed.file.id);
-    if (existing === undefined || seed.rank < existing) {
-      seedFileRank.set(seed.file.id, seed.rank);
-    }
-  }
-  const neighbors = input.graph.expandFileNeighbors(
-    [...seedFileRank.keys()],
-    GRAPH_EXPAND_FILE_PER_SEED,
-  );
-  const seenFiles = new Set<string>();
-  let added = 0;
-  let changed = false;
-  for (const neighbor of neighbors) {
-    if (seedFileRank.has(neighbor.id) || seenFiles.has(neighbor.id)) continue;
-    seenFiles.add(neighbor.id);
-    const entities = pickImportNeighborEntities(
-      input.storage.listEntitiesByFile(neighbor.id, {
-        limit: GRAPH_EXPAND_ENTITIES_PER_FILE * 4,
-      }),
-      GRAPH_EXPAND_ENTITIES_PER_FILE,
-    );
-    const seed = input.seeds.find((item) => item.file.id === neighbor.fid);
-    const neighborFile = entities[0]?.file;
-    if (seed && neighborFile) {
-      const source = neighbor.direction === "out" ? seed.file : neighborFile;
-      const destination =
-        neighbor.direction === "out" ? neighborFile : seed.file;
-      input.relations.push({
-        srcId: source.id,
-        dstId: destination.id,
-        srcLabel: source.relativePath,
-        dstLabel: destination.relativePath,
-        kind: "IMPORTS",
-        scope: "file",
-      });
-    }
-    for (const stored of entities) {
-      if (!matchesGraphFilter(stored, input.filter)) continue;
-      const existed = input.candidates.has(stored.entity.id);
-      if (
-        mergeGraphCandidate({
-          storage: input.storage,
-          candidates: input.candidates,
-          entityId: stored.entity.id,
-          routeId: "graph.explore.imports",
-          syntheticRank:
-            (seedFileRank.get(neighbor.fid) ?? input.seeds.length) +
-            GRAPH_EXPAND_IMPORT_RANK_PENALTY,
-          score: 1,
-        })
-      ) {
-        changed = true;
-        if (!existed) added += 1;
-      }
-    }
-  }
-  return { added, changed };
-}
-
-function pickImportNeighborEntities(
-  entities: readonly StoredEntity[],
-  limit: number,
-): StoredEntity[] {
-  const exported = entities.filter((item) => {
-    const metadata = item.entity.metadata;
-    return (
-      metadata?.kind === "code" &&
-      metadata.modifiers.includes("exported") &&
-      (metadata.symbolType === "function" ||
-        metadata.symbolType === "class" ||
-        metadata.symbolType === "interface")
-    );
-  });
-  const code = entities.filter((item) => item.entity.metadata?.kind === "code");
-  return (
-    exported.length > 0 ? exported : code.length > 0 ? code : entities
-  ).slice(0, limit);
-}
-
-function mergeGraphCandidate(input: {
-  storage: WorkspaceIndexStorage;
-  candidates: Map<string, Candidate>;
-  entityId: string;
-  routeId: string;
-  syntheticRank: number;
-  score: number;
-}): boolean {
-  const stored = input.storage.getEntity(input.entityId);
-  if (!stored) {
-    return false;
-  }
-
-  const fragment: EntityFragment = {
-    id: stored.entity.id,
-    fileId: stored.entity.fileId,
-    range: stored.entity.range,
-    content: stored.entity.content,
-    metadata: stored.entity.metadata,
-  };
-
-  const existing = input.candidates.get(input.entityId);
-  if (existing) {
-    existing.sources.add("graph");
-    existing.evidence.push({
-      fragment,
-      path: "graph",
-      routeId: input.routeId,
-      rank: input.syntheticRank,
-      score: input.score,
-    });
-    addOrUpdateRecall(existing, {
-      path: "graph",
-      routeId: input.routeId,
-      found: true,
-      rank: input.syntheticRank,
-      score: input.score,
-    });
-    return true;
-  }
-
-  input.candidates.set(input.entityId, {
-    id: input.entityId,
-    entity: stored.entity,
-    file: stored.file,
-    sources: new Set<SearchSource>(["graph"]),
-    recall: [
-      {
-        path: "graph",
-        routeId: input.routeId,
-        found: true,
-        rank: input.syntheticRank,
-        score: input.score,
-      },
-    ],
-    evidence: [
-      {
-        fragment,
-        path: "graph",
-        routeId: input.routeId,
-        rank: input.syntheticRank,
-        score: input.score,
-      },
-    ],
-    score: 0,
-    rank: 0,
-    forced: false,
-  });
-  return true;
-}
-
-function matchesGraphFilter(
-  stored: StoredEntity,
-  filter: StorageSearchFilter | undefined,
-): boolean {
-  if (!filter) return true;
-  if (filter.fileIds && !filter.fileIds.includes(stored.file.id)) return false;
-  if (filter.groupIds && !filter.groupIds.includes(stored.entity.id)) {
-    return false;
-  }
-  const metadata = stored.entity.metadata;
-  const symbolType =
-    metadata?.kind === "code" ? metadata.symbolType : undefined;
-  if (
-    filter.symbolTypes &&
-    (!symbolType || !filter.symbolTypes.includes(symbolType))
-  ) {
-    return false;
-  }
-  const symbolName =
-    metadata?.kind === "code" ? metadata.symbolName : undefined;
-  if (
-    filter.symbolNames &&
-    (!symbolName || !filter.symbolNames.includes(symbolName))
-  ) {
-    return false;
-  }
-  return true;
-}
-
-function symbolSearchRelation(
-  storage: WorkspaceIndexStorage,
-  edge: {
-    src: string;
-    dst: string;
-    kind: GraphEdgeKind;
-    rel: string;
-    count: number;
-    provenance: "static" | "heuristic";
-    confidence: number;
-    evidence?: string;
-  },
-  filter?: StorageSearchFilter,
-): SearchGraphRelation | null {
-  if (edge.kind === "IMPORTS" || edge.kind === "DEFINES") return null;
-  const src = storage.getEntity(edge.src);
-  const dst = storage.getEntity(edge.dst);
-  if (!src || !dst) return null;
-  if (!matchesGraphFilter(src, filter) || !matchesGraphFilter(dst, filter))
-    return null;
-  return {
-    srcId: edge.src,
-    dstId: edge.dst,
-    srcLabel: storedEntityLabel(src),
-    dstLabel: storedEntityLabel(dst),
-    kind: edge.kind,
-    scope: "symbol",
-    srcKind: storedEntityKind(src),
-    dstKind: storedEntityKind(dst),
-    srcFile: src.file.relativePath,
-    dstFile: dst.file.relativePath,
-    rel: edge.rel,
-    count: edge.count,
-    provenance: edge.provenance,
-    confidence: edge.confidence,
-    ...(edge.evidence ? { evidence: edge.evidence } : {}),
-  };
-}
-
-function storedEntityKind(stored: StoredEntity): string | undefined {
-  const metadata = stored.entity.metadata;
-  return metadata?.kind === "code" ? metadata.symbolType : metadata?.kind;
-}
-
-function storedEntityLabel(stored: StoredEntity): string {
-  const metadata = stored.entity.metadata;
-  return metadata?.kind === "code" && metadata.symbolName
-    ? metadata.symbolName
-    : stored.entity.id;
-}
-
-function selectGraphRelationships(
-  relations: readonly SearchGraphRelation[],
-  visible: readonly Candidate[],
-  seedIds: readonly string[],
-  candidates: ReadonlyMap<string, Candidate>,
-  query: string,
-): SearchGraphRelation[] {
-  const totalLimit = 20;
-  const visibleEntities = new Set(visible.map((candidate) => candidate.id));
-  const visibleFiles = new Set(visible.map((candidate) => candidate.file.id));
-  const anchorEntities = new Set([...visibleEntities, ...seedIds]);
-  const anchorFiles = new Set(visibleFiles);
-  for (const id of seedIds) {
-    const seed = candidates.get(id);
-    if (seed) anchorFiles.add(seed.file.id);
-  }
-  const seen = new Set<string>();
-  const priority: Record<SearchGraphRelation["kind"], number> = {
-    CALLS: 0,
-    INHERITS: 1,
-    CONTAINS: 2,
-    REFS: 3,
-    IMPORTS: 4,
-    COUNTERPART: 2,
-    INSTANTIATES: 2,
-  };
-  const eligible = relations
-    .filter((relation) => {
-      const anchors =
-        relation.scope === "symbol" ? anchorEntities : anchorFiles;
-      if (!anchors.has(relation.srcId) && !anchors.has(relation.dstId))
-        return false;
-      if (
-        relation.scope === "symbol" &&
-        relationIntroducesLowValueNode(
-          relation,
-          visibleEntities,
-          candidates,
-          query,
-        )
-      )
-        return false;
-      const key = `${relation.scope}\0${relation.srcId}\0${relation.dstId}\0${relation.kind}`;
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    })
-    .sort(
-      (a, b) =>
-        relationAnchorRank(a, visibleEntities, visibleFiles) -
-          relationAnchorRank(b, visibleEntities, visibleFiles) ||
-        priority[a.kind] - priority[b.kind] ||
-        a.srcId.localeCompare(b.srcId) ||
-        a.dstId.localeCompare(b.dstId),
-    );
-
-  // Preserve structural diversity. A hot callable can easily contribute more
-  // than twenty CALLS edges by itself; applying the global limit directly
-  // would hide inheritance, construction and module context completely.
-  const byKind = new Map<SearchGraphRelation["kind"], SearchGraphRelation[]>();
-  for (const relation of eligible) {
-    const group = byKind.get(relation.kind) ?? [];
-    group.push(relation);
-    byKind.set(relation.kind, group);
-  }
-  const selected: SearchGraphRelation[] = [];
-  let round = 0;
-  while (selected.length < totalLimit) {
-    let progressed = false;
-    for (const kind of [
-      "CALLS",
-      "INHERITS",
-      "INSTANTIATES",
-      "REFS",
-      "CONTAINS",
-      "IMPORTS",
-    ] as const) {
-      const relation = byKind.get(kind)?.[round];
-      if (!relation) continue;
-      selected.push(relation);
-      progressed = true;
-      if (selected.length >= totalLimit) break;
-    }
-    if (!progressed) break;
-    round += 1;
-  }
-  return selected;
-}
-
-function relationIntroducesLowValueNode(
-  relation: SearchGraphRelation,
-  visibleEntities: ReadonlySet<string>,
-  candidates: ReadonlyMap<string, Candidate>,
-  query: string,
-): boolean {
-  for (const id of [relation.srcId, relation.dstId]) {
-    if (visibleEntities.has(id)) continue;
-    const candidate = candidates.get(id);
-    if (
-      candidate &&
-      searchPathValueFactor(candidate.file.relativePath, query) < 1
-    )
-      return true;
-  }
-  return false;
-}
-
-function relationAnchorRank(
-  relation: SearchGraphRelation,
-  visibleEntities: ReadonlySet<string>,
-  visibleFiles: ReadonlySet<string>,
-): number {
-  const visible = relation.scope === "symbol" ? visibleEntities : visibleFiles;
-  const endpoints =
-    Number(visible.has(relation.srcId)) + Number(visible.has(relation.dstId));
-  return 2 - endpoints;
+  return sources.has("vector") ? "vector" : "fts";
 }

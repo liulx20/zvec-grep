@@ -219,16 +219,6 @@ function contextResult(overrides = {}) {
         },
       },
     ],
-    relationships: [
-      {
-        srcId: "compute-query",
-        dstId: "heading-1",
-        srcLabel: "computeQuery",
-        dstLabel: "Usage",
-        kind: "CALLS",
-        scope: "symbol",
-      },
-    ],
     diagnostics: {
       index: {
         hitsReturned: 2,
@@ -293,7 +283,6 @@ test("context formatters render indexed, lexical, metadata, preview, trace, and 
   assert.match(output.logs.join("\n"), /README\.md:1-8/);
   assert.match(output.logs.join("\n"), /computeQuery/);
   assert.match(output.logs.join("\n"), /query "query"/);
-  assert.match(agentText, /computeQuery --CALLS--> Usage/);
   assert.match(output.logs.join("\n"), /\x1b\[/);
   assert.deepEqual(contextWarningLines(result), [
     "warning: skipped missing paths: missing one, missing-two",

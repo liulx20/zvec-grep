@@ -36,7 +36,6 @@ export type {
   ZvecGrepGraphSeed,
   ZvecGrepGraphNeighbor,
   ZvecGrepExploreFileBundle,
-  ZvecGrepGraphRelationship,
   ZvecGrepContextRoute,
   ZvecGrepContextSource,
   ZvecGrepStructureEnrichmentDiagnostics,

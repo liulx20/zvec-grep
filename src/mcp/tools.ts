@@ -242,10 +242,10 @@ export interface ZvecGrepDaemonBackend {
 function searchRoutingRules(exactTool: string, focusedTools: string): string[] {
   return [
     `Use ${exactTool} first only when exact lookup alone is sufficient, such as locating one definition, literal, filename, configuration key, error message, regex match, or exhaustive occurrence list.`,
-    "Use zvec_grep_search first when wording or location is unknown, or when the answer requires architecture, lifecycle, call relationships, dependencies, data or control flow, design rationale, comparison, or synthesis across files or components.",
+    "Use zvec_grep_search first when wording or location is unknown, or when semantic retrieval across files is needed. Search itself uses lexical and vector evidence; use the graph tools for verified relationships.",
     "Use zvec_grep_explore when you already have a symbol/name and need a multi-file call/type-neighborhood context pack assembled from the graph.",
     "Use zvec_grep_callers, zvec_grep_callees, or zvec_grep_impact for focused graph neighborhood questions about one symbol.",
-    `When user-provided or verified exact symbols are present but the answer spans multiple files, components, stages, implementations, or relationships, treat the task as mixed: call zvec_grep_search with the semantic intent and those anchors, then use ${focusedTools} for focused verification.`,
+    `When user-provided or verified exact symbols are present but the answer spans multiple files or relationships, treat the task as mixed: call zvec_grep_search for semantic discovery, then use ${focusedTools} for focused verification.`,
     "For a semantic or mixed workspace task, start discovery with focused zvec_grep_search before broad file discovery.",
     "Preserve the question's concepts, relationships, and constraints from the user request and established context in semantic queries. Treat inferred names as supplemental hypotheses, not replacements for or constraints on the stated intent.",
     "`query` creates one primary hybrid FTS-plus-vector group; `queries` creates one or more primary hybrid groups; `fts` and `vector` add supplemental lexical-only or semantic-only route groups. These are retrieval routes, not hard constraints. Without `fuse`, the response is one deduplicated and reranked list with query-group metadata; set `fuse: true` to collapse every group into one ranked search plan.",

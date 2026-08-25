@@ -259,6 +259,22 @@ test("hybrid search filters, deduplicates, fuses, traces, prefers symbols, and t
   assert.ok(result.timings.some((entry) => entry.name === "search_total"));
 });
 
+test("indexed search does not access the code graph", async () => {
+  const fixture = createFixture();
+  Object.defineProperty(fixture.context, "graph", {
+    get() {
+      throw new Error("query accessed graph");
+    },
+  });
+
+  const result = await searchWorkspaceIndex(
+    { routes: [{ mode: "fts", query: "AlphaSymbol" }] },
+    fixture.context,
+  );
+
+  assert.ok(result.hits.length > 0);
+});
+
 test("search plans short-circuit empty path filters and force-track no-file reasons", async () => {
   const fixture = createFixture();
   const result = await searchWorkspaceIndex(

@@ -1259,8 +1259,8 @@ ${formatPromptRules(
 
 ${formatPromptRules("### Retrieval routing", [
   `When an exact word, phrase, name, date, identifier, filename, path, configuration key, error message, source fragment, literal, or regex is known and locating its occurrences is sufficient, use ${exactLookupRoute}.`,
-  `Use \`${searchTool}\` when wording or location is unknown, or when the answer requires semantic, conceptual, fuzzy, or paraphrase discovery; relationships, chronology, causality, architecture, or data or control flow; or comparison or synthesis across files, sections, or documents.`,
-  `For a mixed task with exact anchors that still requires relationships or cross-file synthesis, call \`${searchTool}\` with the concept and anchors, then use ${exactLookupRoute} for focused follow-up.`,
+  `Use \`${searchTool}\` when wording or location is unknown, or when semantic, conceptual, fuzzy, paraphrase, comparison, or cross-file discovery is required. Search uses lexical and vector evidence only.`,
+  `For a mixed task with exact anchors that still requires relationships or cross-file synthesis, call \`${searchTool}\` for discovery, then use ${exactLookupRoute} or a graph command for focused follow-up.`,
   `When no sufficient exact anchor is available and the user asks whether conceptually related material exists locally, make at most one focused \`${searchTool}\` probe using the question plus distinctive names, dates, or terms. This probe does not apply to exact quotations, configuration keys, filenames, regexes, or exhaustive occurrence requests. Continue only when results are relevant; otherwise stop and report that the indexed workspace did not establish the answer.`,
   "Before broad file reads or delegating workspace discovery, use the appropriate search route. Do not delegate solely to locate material, and stop when the evidence is sufficient.",
 ])}

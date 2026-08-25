@@ -121,7 +121,6 @@ export class WorkspaceIndex {
       workspaceIndex: this.info,
       embeddingModel: this.embeddingModel,
       storage: this.storage,
-      graph: this.graphStorage,
     });
   }
 

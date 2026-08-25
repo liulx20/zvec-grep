@@ -373,31 +373,6 @@ export type ZvecGrepContextWorkspaceIndex = {
   path: string;
 };
 
-export type ZvecGrepGraphRelationship = {
-  srcId: string;
-  dstId: string;
-  srcLabel: string;
-  dstLabel: string;
-  kind:
-    | "CALLS"
-    | "REFS"
-    | "INHERITS"
-    | "CONTAINS"
-    | "IMPORTS"
-    | "COUNTERPART"
-    | "INSTANTIATES";
-  scope: "symbol" | "file";
-  srcKind?: string;
-  dstKind?: string;
-  srcFile?: string;
-  dstFile?: string;
-  rel?: string;
-  count?: number;
-  provenance?: "static" | "heuristic";
-  confidence?: number;
-  evidence?: string;
-};
-
 export type ZvecGrepRgDiagnostics = {
   backend: "bundled-rg" | "rg";
   command: string;
@@ -432,12 +407,6 @@ export type ZvecGrepIndexDiagnostics = {
     mode: "fts" | "vector";
     query: string;
   }[];
-  graphExpand?: {
-    available: boolean;
-    unavailableReason?: string;
-    seeds: number;
-    neighborsAdded: number;
-  };
 };
 
 export type ZvecGrepContextDiagnostics = {
@@ -457,7 +426,6 @@ export type ZvecGrepContextResult = {
   items: ZvecGrepContextItem[];
   /** Per-query-group recall lists before cross-group deduplication and reranking. */
   groupResults?: ZvecGrepContextGroupResult[];
-  relationships?: ZvecGrepGraphRelationship[];
   diagnostics: ZvecGrepContextDiagnostics;
 };
 

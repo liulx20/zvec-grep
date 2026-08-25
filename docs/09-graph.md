@@ -319,94 +319,16 @@ DDL 与 Node SQLite 加载。`sqlite.ts` 只保留组合这些单元的 `GraphSt
 
 ### 5.1 普通 query/search
 
-query 严格按照下面四个阶段执行：
+普通 query 保持为纯检索接口：只执行 FTS、vector recall、RRF 融合和结果裁剪。它不读取代码图，
+不会因图不可用而改变结果，也不返回图关系或图扩展诊断。
 
-1. **初始搜索。** 使用用户输入的 query 分别执行 FTS 和 vector 搜索，再做第一次 RRF，得到一份
-   按相关性排序的初始代码候选。
+需要结构关系时使用独立命令：
 
-2. **图补召回。** 取初始列表中排名最高的 5 个候选作为图种子，查找调用、引用、继承、容器关系
-   和相邻 import 文件。RWR 对找到的符号排序，形成一份额外的图相关代码候选。
+- `explore`：围绕符号组装多文件图上下文。
+- `callers` / `callees`：查询定向调用关系。
+- `impact`：查询反向依赖和修改影响。
 
-3. **最终排序。** 把初始候选和图相关候选放在一起做第二次 RRF，然后按照 query limit 截断，
-   得到最终的 `SearchHit[]`。
-
-4. **组装输出。** 返回最终代码结果，同时从内部关系子图中挑选与这些结果有关的少量关系，形成
-   `relationships` 摘要。
-
-换成一个具体例子：
-
-```text
-用户搜索：login authentication
-
-阶段 1 找到：
-  login、AuthService、loginController
-
-阶段 2 根据代码关系额外找到：
-  validateToken、LoginRequest
-
-阶段 3 统一排序后得到：
-  login、AuthService、validateToken、loginController、LoginRequest
-
-阶段 4 返回上述代码，并补充关系说明：
-  loginController --CALLS--> login
-  login --CALLS--> validateToken
-  login --REFS--> LoginRequest
-```
-
-图的边参与扩展、RWR 排序和关系摘要生成；最终主体仍是 `SearchHit` 代码列表，不会把完整的
-80 节点局部子图直接返回。
-
-普通 query 的图扩展是浅层辅助召回：
-
-- 最多取初次融合后的前 5 个种子。
-- 调用与完整 explore 共用的 `exploreSubgraph()`，使用深度 2、最多 80 个节点的小预算。
-- seed 的 restart 权重来自首轮 RRF rank，排名靠前的 seed 权重更高。
-- 子图覆盖层级以及 `CALLS`、`REFS`、`INHERITS`、`COUNTERPART`、`CONTAINS`，并通过带权 RWR 对节点排序。
-- RWR 当前边权为 `CALLS=1.0`、`INHERITS=0.9`、`COUNTERPART=0.7`、`REFS=0.5`、`CONTAINS=0.15`；
-  排名图仍按双向关系传播。
-- 文件级 `IMPORTS` 不属于符号子图，仍作为补充路径从相邻文件挑选少量实体。
-- 图 rank 会作为 graph recall evidence 合并到已有候选，也会创建新的图候选，再以惩罚后的
-  synthetic rank 进入第二次融合。
-- seed 只有实际参与至少一条保留关系边时才会获得 graph recall evidence；没有任何图关系的
-  初始候选不会因为图后端处于可用状态而被重复加分。
-- 新增与已有图候选都会重新应用普通 query 的 file/path/type 等 storage filter，图扩展不会绕过
-  用户给定的检索范围。
-- 它不会调用完整的 `exploreGraph()`，不会组装源码 context pack，也不会计算调用路径和
-  blast radius；它复用的是拆分后的子图扩展与 RWR 节点评分层。
-
-普通 query 的主体输出仍是代码 `SearchHit`，但会附带一个紧凑的 `relationships` 摘要，帮助调用方
-理解这些结果为什么在图上相关：
-
-- 只保留至少一端属于最终结果或 seed 的关系；另一端可以不占用正文 hit 配额，因此小 `limit` 仍能
-  说明调用、继承和容器结构。
-- 两个关系端点都必须通过原 query filter，不会借关系泄露被排除实体。
-- 支持 `CALLS`、`INHERITS`、`CONTAINS`、`REFS` 和文件级 `IMPORTS`。
-- 按上述关系类型优先级排序、去重，全局最多输出 20 条。
-- CLI/MCP 紧凑文本在源码结果后输出，例如
-  `login (function, src/auth/login.ts) --CALLS--> validateToken (function, src/auth/token.ts)`；structured
-  result 同时提供端点 ID、label、kind、scope、文件、符号类型、`rel/count` 和
-  `provenance/confidence/evidence`。
-
-普通 query 不返回完整局部子图，而是输出经过图增强的扁平代码结果，并在末尾追加关系摘要：
-
-```text
-src/auth/login.ts:20-38
-matchedBy: fts
-source:
-export async function login(...) { ... }
-
-src/auth/token.ts:45-61
-matchedBy: graph
-source:
-export function validateToken(...) { ... }
-
-relationships:
-- loginController --CALLS--> login
-- login --CALLS--> validateToken
-```
-
-其中源码项来自 `SearchHit[]`；`relationships` 只解释最终结果附近的关键关系，最多 20 条。
-
+这样 query 的排序、延迟和输出契约只由文本/向量索引决定；图能力仍由显式图接口提供。
 
 ### 5.2 callers / callees / impact
 
@@ -745,15 +667,10 @@ occurrence 仍依赖提取遍历顺序，尚未使用 column 或稳定 source ra
 
 ### 6.5 查询与排序
 
-- 普通 query 使用固定小预算的 explore 子图扩展，边权、预算和 synthetic rank penalty 尚不可配置
-  或学习。
-- 普通 query 会在尾部结果中为“与 seed 直接相连且来自新文件”的图命中保留有限位置；被提升的命中
-  通过 `forced` 和 `matchedBy=graph` 暴露来源。它不会替换 seed 或唯一文件，也不会把任意多跳邻居
-  强行塞进结果。Vue 组件引用 Pinia store 这类跨文件结构关系因此可以进入正文结果，而不只出现在
-  relationship 摘要中。
+- 普通 query 不读取图，仅按 FTS/vector evidence 排序；关系召回和源码组装由显式图命令负责。
 - CLI 冷启动 query 的总耗时还包含 Node 进程、配置、embedding model acquire 和 query embedding；
-  它不能直接当作 SQLite 图查询耗时。性能回归应同时记录 service 内部的 `query_embedding`、
-  `recall`、`graph_expand` 和 `search_total`，并区分冷启动与常驻 daemon/session。真实 Go 查询中，
+  它不能直接当作检索耗时。性能回归应同时记录 service 内部的 `query_embedding`、
+  `recall` 和 `search_total`，并区分冷启动与常驻 daemon/session。真实 Go 查询中，
   复用 service 后的后续请求约为 22–25ms；CLI 冷启动仍约为 700–900ms，两者不能混用一个指标。
 - Explore 的种子质量依赖主索引精确名称/文本检索；自然语言短语可能选到噪声种子。
 - 声明/实现配对在索引阶段投影为持久化的 `COUNTERPART` edge。投影器要求符号 identity、
@@ -813,7 +730,7 @@ occurrence 仍依赖提取遍历顺序，尚未使用 column 或稳定 source ra
 ## 8. 当前结论
 
 当前图模块已经形成可运行的闭环：代码提取、关系建模、跨文件 pending resolve、SQLite
-持久化、普通搜索的浅图扩展，以及独立的 neighborhood/explore 查询都已接通。它适合辅助代码发现、
+持久化，以及独立的 neighborhood/explore 查询都已接通。它适合辅助代码发现、
 调用关系浏览和多文件上下文组装。
 
 现阶段的主要风险不在“链路是否存在”，而在语义解析精度、高出度局部遍历，以及主索引与图索引之间的
@@ -824,9 +741,8 @@ occurrence 仍依赖提取遍历顺序，尚未使用 column 或稳定 source ra
 
 #### 是否把 Explore 融入 query
 
-当前采用的是“共享底层能力、保持两种输出”的部分融合，而不是让每次 query 都完整调用
-`exploreGraph()`：query 复用 `exploreSubgraph()` 和 RWR 做轻量扩展，并返回紧凑关系摘要；只有显式
-Explore 才继续计算调用路径、blast radius、change surface，并组装多文件 context pack。
+当前保持两种独立输出：query 只做 FTS/vector 检索；Explore 才读取代码图、计算调用路径、blast
+radius、change surface，并组装多文件 context pack。
 
 如果把完整 Explore 直接融入每次 query，收益是一次请求就能同时获得相关代码、调用关系和修改影响，
 Agent 不必先 query 再决定是否 explore；对“理解一条业务链路”或“修改这个接口会影响哪里”这类问题，
@@ -840,11 +756,9 @@ Agent 不必先 query 再决定是否 explore；对“理解一条业务链路�
   相关性排序。
 - 首轮检索选错 seed 时，完整 Explore 会围绕噪声 seed 扩展更多内容，比当前小预算扩展更容易放大误召回。
 
-如果完全不融合，query 会更快、输出更稳定，但只能依据文本和向量找到“看起来相关”的代码，容易漏掉
+这种边界让 query 更快、输出更稳定，但它只能依据文本和向量找到“看起来相关”的代码，可能漏掉
 名称不同的调用者、被调用者、接口类型和相邻实现；调用方还必须额外执行 Explore 才能拿到完整关系，
 并自行处理两次请求之间的 seed 传递与消歧。
 
-因此当前更合理的边界是保留部分融合：普通 query 用小预算子图改善召回，并输出足够解释结果的真实边；
-Explore 保持为显式的深度理解接口。后续如果需要“一次请求返回完整上下文”，更适合增加明确的
-`query` 模式或选项（例如 `graphMode: "off" | "rank" | "explore"`），而不是无条件让所有 query 执行
-完整 Explore。这样默认延迟和返回结构保持稳定，调用方也能按任务主动支付更高的图分析成本。
+因此关系型任务应显式调用 Explore/callers/callees/impact，而不是让普通 query 隐式支付图分析成本。
+如果未来需要“一次请求返回完整上下文”，应增加独立的组合接口，而不是重新改变 query 的默认语义。

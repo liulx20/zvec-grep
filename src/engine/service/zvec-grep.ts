@@ -1374,11 +1374,6 @@ async function contextFromOpenWorkspaceIndex(input: {
     groups.filter((group) => group.role === "primary").map((group) => group.id),
   );
 
-  const graphExpand = mergeGraphExpandDiagnostics(
-    searches.map((search) => search.graphExpand),
-  );
-  const relationships = mergeSearchRelationships(searches);
-
   return {
     query: input.request.displayQuery,
     root: input.root,
@@ -1396,7 +1391,6 @@ async function contextFromOpenWorkspaceIndex(input: {
       role: group.role,
       items: groupItems[index] ?? [],
     })),
-    ...(relationships.length > 0 ? { relationships } : {}),
     diagnostics: {
       emptyReason: items.length === 0 ? "no_matches" : undefined,
       index: {
@@ -1407,66 +1401,8 @@ async function contextFromOpenWorkspaceIndex(input: {
           role: group.role,
         })),
         routes: searches.flatMap((search) => search.plan.routes),
-        ...(graphExpand ? { graphExpand } : {}),
       },
     },
-  };
-}
-
-function mergeSearchRelationships(
-  searches: readonly SearchPlanResult[],
-): SearchPlanResult["relationships"] {
-  const seen = new Set<string>();
-  const merged: SearchPlanResult["relationships"] = [];
-  for (const relationship of searches.flatMap(
-    (search) => search.relationships,
-  )) {
-    const key = `${relationship.scope}\0${relationship.srcId}\0${relationship.dstId}\0${relationship.kind}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    merged.push(relationship);
-    if (merged.length >= 20) break;
-  }
-  return merged;
-}
-
-function mergeGraphExpandDiagnostics(
-  parts: readonly (
-    | {
-        available: boolean;
-        unavailableReason?: string;
-        seeds: number;
-        neighborsAdded: number;
-      }
-    | undefined
-  )[],
-):
-  | {
-      available: boolean;
-      unavailableReason?: string;
-      seeds: number;
-      neighborsAdded: number;
-    }
-  | undefined {
-  const present = parts.filter(
-    (
-      part,
-    ): part is {
-      available: boolean;
-      unavailableReason?: string;
-      seeds: number;
-      neighborsAdded: number;
-    } => part !== undefined,
-  );
-  if (present.length === 0) {
-    return undefined;
-  }
-  return {
-    available: present.some((part) => part.available),
-    unavailableReason: present.find((part) => part.unavailableReason)
-      ?.unavailableReason,
-    seeds: present.reduce((sum, part) => sum + part.seeds, 0),
-    neighborsAdded: present.reduce((sum, part) => sum + part.neighborsAdded, 0),
   };
 }
 

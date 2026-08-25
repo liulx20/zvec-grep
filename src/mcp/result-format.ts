@@ -48,32 +48,6 @@ export function contextText(result: ZvecGrepContextResult): string {
     lines.push(item.content);
   }
 
-  if (result.relationships && result.relationships.length > 0) {
-    lines.push("", "relationships:");
-    for (const relation of result.relationships) {
-      const srcDetails = [relation.srcKind, relation.srcFile]
-        .filter(Boolean)
-        .join(", ");
-      const dstDetails = [relation.dstKind, relation.dstFile]
-        .filter(Boolean)
-        .join(", ");
-      const evidence = [
-        relation.rel && relation.rel.toUpperCase() !== relation.kind
-          ? `rel=${relation.rel}`
-          : undefined,
-        relation.count && relation.count > 1
-          ? `count=${relation.count}`
-          : undefined,
-        relation.provenance === "heuristic"
-          ? `heuristic confidence=${relation.confidence ?? "?"}`
-          : undefined,
-      ].filter(Boolean);
-      lines.push(
-        `- ${relation.srcLabel}${srcDetails ? ` (${srcDetails})` : ""} --${relation.kind}--> ${relation.dstLabel}${dstDetails ? ` (${dstDetails})` : ""}${evidence.length > 0 ? ` [${evidence.join(", ")}]` : ""}`,
-      );
-    }
-  }
-
   return lines.join("\n");
 }
 
@@ -87,7 +61,6 @@ export function simplifyContextResult(
     coverage: result.coverage,
     workspaceIndex: result.workspaceIndex,
     diagnostics: result.diagnostics,
-    relationships: result.relationships,
     items: result.items.map((item) => ({
       kind: item.kind,
       rank: item.rank,

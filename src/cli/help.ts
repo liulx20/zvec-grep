@@ -124,8 +124,8 @@ Search routes:
   --fuse                            Fuse all query groups into one ranked list
   --rg                              Run exhaustive managed ripgrep
 
-Indexed query also expands call-graph neighbors of top hits when a code graph
-is available (built during zg index). Neighbors appear as matchedBy=graph.
+Indexed query ranks only FTS and vector results. Use explore, callers, callees,
+or impact when the task requires code-graph traversal.
 
 Result options:
   --limit <n>                       Maximum results per group (default: 7)
