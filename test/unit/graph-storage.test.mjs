@@ -83,46 +83,52 @@ test("counterpart edges are projected and invalidated at index time", async () =
     kind: "code",
     format: "cpp",
   });
-  const header = file("header", "include/pkg/widget.h");
-  const source = file("source", "src/pkg/widget.cc");
-  graph.upsertFileGraph(
-    header.id,
-    [
-      {
-        id: "decl",
-        kind: "function",
-        is_exported: true,
-        name: "open",
-        qualifiedName: "Widget::open",
-        arity: 0,
-      },
-    ],
-    [],
-    [],
-    header,
-  );
+  const symbol = (id) => ({
+    id,
+    kind: "function",
+    is_exported: true,
+    name: "open",
+    qualifiedName: "Widget::open",
+    arity: 0,
+  });
+  const header = file("header", "include/project/api/public.h");
+  const source = file("source", "src/impl/service.cc");
+  const vendored = file("vendored", "vendor/impl/service.cpp");
+  graph.upsertFileGraph(header.id, [symbol("decl")], [], [], header);
   graph.upsertFileGraph(
     source.id,
+    [symbol("def")],
+    [],
     [
-      {
-        id: "def",
-        kind: "function",
-        is_exported: true,
-        name: "open",
-        qualifiedName: "Widget::open",
-        arity: 0,
-      },
+      rawRef({
+        type: "import",
+        owner: source.id,
+        refName: "../../include/project/api/public.h",
+        sourceLanguage: "cpp",
+        line: 1,
+      }),
     ],
-    [],
-    [],
     source,
   );
-  await graph.resolvePending();
+  graph.upsertFileGraph(
+    vendored.id,
+    [symbol("vendored-def")],
+    [],
+    [],
+    vendored,
+  );
+  await graph.resolvePending({ files: [header, source, vendored] });
   assert.equal(
     graph
       .outgoingEdges(["decl"], ["COUNTERPART"], 10)
       .some((edge) => edge.dst === "def" && edge.rel === "counterpart"),
     true,
+  );
+  assert.equal(
+    graph
+      .outgoingEdges(["decl"], ["COUNTERPART"], 10)
+      .some((edge) => edge.dst === "vendored-def"),
+    false,
   );
 
   graph.upsertFileGraph(

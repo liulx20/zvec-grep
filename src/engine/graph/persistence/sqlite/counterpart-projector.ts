@@ -1,9 +1,8 @@
 import {
-  fileStem,
-  isHeaderPath,
-  isSourcePath,
-  semanticPathAffinity,
+  counterpartPathDomainsCompatible,
+  counterpartPathsRelated,
 } from "../../counterpart-policy.js";
+import { isHeaderPath, isSourcePath } from "../../path-policy.js";
 import type { SqliteGraphDatabase } from "./database.js";
 
 type CounterpartCandidate = {
@@ -15,6 +14,12 @@ type CounterpartCandidate = {
   right_file_id: string;
   right_path: string;
   right_qualified_name: string | null;
+  directly_imported: number;
+};
+
+type CounterpartMatch = {
+  confidence: number;
+  evidence: "declaration_definition" | "direct_import";
 };
 
 /** Projects query-independent declaration/definition identity into graph edges. */
@@ -51,7 +56,17 @@ export class SqliteCounterpartProjector {
                 right_symbol.id AS right_id,
                 right_symbol.file_id AS right_file_id,
                 right_file.relative_path AS right_path,
-                right_symbol.qualified_name AS right_qualified_name
+                right_symbol.qualified_name AS right_qualified_name,
+                EXISTS(
+                  SELECT 1 FROM edges import_edge
+                   WHERE import_edge.kind='IMPORTS'
+                     AND import_edge.src_is_file=1
+                     AND import_edge.dst_is_file=1
+                     AND ((import_edge.src_id=left_symbol.file_id
+                           AND import_edge.dst_id=right_symbol.file_id)
+                       OR (import_edge.src_id=right_symbol.file_id
+                           AND import_edge.dst_id=left_symbol.file_id))
+                ) AS directly_imported
            FROM symbols left_symbol
            JOIN files left_file ON left_file.id=left_symbol.file_id
            JOIN symbols right_symbol
@@ -78,32 +93,42 @@ export class SqliteCounterpartProjector {
            id,src_id,dst_id,src_is_file,dst_is_file,kind,rel,count,first_line,
            ref_name,provenance,confidence,evidence
          ) VALUES(?,?,?,0,0,'COUNTERPART','counterpart',1,0,'counterpart',
-                  'heuristic',0.95,'declaration_definition')`,
+                  'heuristic',?,?)`,
       );
       for (const candidate of candidates) {
-        if (!isCounterpart(candidate)) continue;
+        const match = counterpartMatch(candidate);
+        if (!match) continue;
         insert.run(
           `counterpart:${candidate.left_id}:${candidate.right_id}`,
           candidate.left_id,
           candidate.right_id,
+          match.confidence,
+          match.evidence,
         );
       }
     });
   }
 }
 
-function isCounterpart(candidate: CounterpartCandidate): boolean {
+function counterpartMatch(
+  candidate: CounterpartCandidate,
+): CounterpartMatch | undefined {
   const [headerPath, sourcePath] = isHeaderPath(candidate.left_path)
     ? [candidate.left_path, candidate.right_path]
     : [candidate.right_path, candidate.left_path];
-  if (!isHeaderPath(headerPath) || !isSourcePath(sourcePath)) return false;
-  const sameStem =
-    fileStem(headerPath).toLowerCase() === fileStem(sourcePath).toLowerCase();
+  if (!isHeaderPath(headerPath) || !isSourcePath(sourcePath)) return undefined;
   const sameIdentity =
     candidate.left_qualified_name !== null &&
     candidate.left_qualified_name === candidate.right_qualified_name;
-  return (
-    (sameStem || sameIdentity) &&
-    (sameStem || semanticPathAffinity(headerPath, sourcePath) > 0)
-  );
+  if (!sameIdentity) return undefined;
+  if (!counterpartPathDomainsCompatible(headerPath, sourcePath))
+    return undefined;
+  if (sameIdentity && candidate.directly_imported === 1)
+    return { confidence: 0.98, evidence: "direct_import" };
+  const pathRelated = counterpartPathsRelated(headerPath, sourcePath);
+  if (!pathRelated) return undefined;
+  return {
+    confidence: 0.95,
+    evidence: "declaration_definition",
+  };
 }

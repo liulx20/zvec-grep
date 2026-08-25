@@ -159,9 +159,6 @@ export class SqlitePendingRefResolver {
       this.database.endBulkLoad(),
     );
     resetImportResolutionCaches();
-    this.timed(options, "graph_counterpart_projection", () =>
-      this.counterparts.refresh(rebuildCounterparts),
-    );
     const retryFailed = options.retryFailed ?? true;
     const resolvable =
       this.one<{ count: number }>(
@@ -169,7 +166,12 @@ export class SqlitePendingRefResolver {
          WHERE status='pending' OR (?=1 AND status='failed')`,
         retryFailed ? 1 : 0,
       )?.count ?? 0;
-    if (resolvable === 0) return;
+    if (resolvable === 0) {
+      this.timed(options, "graph_counterpart_projection", () =>
+        this.counterparts.refresh(rebuildCounterparts),
+      );
+      return;
+    }
     const invocation = this.timed(options, "graph_resolve_prepare", () =>
       this.prepareInvocation(options, retryFailed),
     );
@@ -183,6 +185,11 @@ export class SqlitePendingRefResolver {
       this.retireResolvedRustImportAlternatives(invocation.attempt);
       return count;
     });
+    // Import edges are strong declaration/definition evidence. Project after
+    // imports so a fresh build can use them instead of relying on path shape.
+    this.timed(options, "graph_counterpart_projection", () =>
+      this.counterparts.refresh(rebuildCounterparts),
+    );
     this.timed(options, "graph_resolve_context", () => {
       this.prepareResolutionContext();
       this.loadDefaultExportCandidates(invocation.names, invocation.filePaths);

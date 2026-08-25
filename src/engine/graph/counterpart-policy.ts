@@ -1,12 +1,4 @@
-import type { StoredEntity } from "../storage/index.js";
-import {
-  isHeaderPath,
-  isSourcePath,
-  platformPathSegment,
-} from "./path-policy.js";
-import { isCallableSymbolKind } from "./symbol-kinds.js";
-
-export { isHeaderPath, isSourcePath } from "./path-policy.js";
+import { isLowValuePath } from "./path-policy.js";
 
 const NON_SEMANTIC_PATH_SEGMENTS: ReadonlySet<string> = new Set([
   "include",
@@ -16,54 +8,49 @@ const NON_SEMANTIC_PATH_SEGMENTS: ReadonlySet<string> = new Set([
   "main",
 ]);
 
-export function platformDeclarationCounterparts(
-  declaration: StoredEntity,
-  candidates: readonly StoredEntity[],
-): StoredEntity[] {
-  const declarationPath = declaration.file.relativePath;
-  const platform = platformPathSegment(declarationPath);
-  const metadata = declaration.entity.metadata;
-  if (
-    !platform ||
-    !isHeaderPath(declarationPath) ||
-    metadata?.kind !== "code" ||
-    !isCallableSymbolKind(metadata.symbolType)
-  )
-    return [];
-  return candidates.filter((candidate) => {
-    const candidateMetadata = candidate.entity.metadata;
-    return (
-      candidate.entity.id !== declaration.entity.id &&
-      /\.(?:c|cc|cpp|cxx|m|mm)$/i.test(candidate.file.relativePath) &&
-      platformPathSegment(candidate.file.relativePath) === platform &&
-      candidateMetadata?.kind === "code" &&
-      candidateMetadata.symbolType === metadata.symbolType &&
-      candidateMetadata.symbolName === metadata.symbolName &&
-      (metadata.arity == null ||
-        candidateMetadata.arity == null ||
-        candidateMetadata.arity === metadata.arity)
-    );
-  });
-}
+const COUNTERPART_LAYOUT_SEGMENTS: ReadonlySet<string> = new Set([
+  "include",
+  "src",
+  "source",
+  "lib",
+]);
 
-export function fileStem(path: string): string {
+/**
+ * Match declaration/definition layouts without treating a shared basename as
+ * sufficient evidence. Layout markers are ignored, while the remaining module
+ * suffix must agree. One leading project namespace is allowed for layouts such
+ * as `include/project/api/x.h` paired with `src/api/x.cc`.
+ */
+export function counterpartPathsRelated(left: string, right: string): boolean {
+  if (!counterpartPathDomainsCompatible(left, right)) return false;
+  const leftDirectory = counterpartDirectory(left);
+  const rightDirectory = counterpartDirectory(right);
+  const [longer, shorter] =
+    leftDirectory.length >= rightDirectory.length
+      ? [leftDirectory, rightDirectory]
+      : [rightDirectory, leftDirectory];
+  const offset = longer.length - shorter.length;
   return (
-    path
-      .replaceAll("\\", "/")
-      .split("/")
-      .at(-1)
-      ?.replace(/\.[^.]+$/, "") ?? ""
+    offset <= 1 &&
+    shorter.every((part, index) => part === longer[index + offset])
   );
 }
 
-export function isCounterpartSourcePath(
-  declaration: string,
-  candidate: string,
+/** Keep production and low-value/vendor declarations in separate domains. */
+export function counterpartPathDomainsCompatible(
+  left: string,
+  right: string,
 ): boolean {
-  if (!isSourcePath(candidate)) return false;
-  if (fileStem(declaration).toLowerCase() !== fileStem(candidate).toLowerCase())
-    return false;
-  return semanticPathAffinity(declaration, candidate) > 0;
+  return isLowValuePath(left) === isLowValuePath(right);
+}
+
+function counterpartDirectory(path: string): string[] {
+  return path
+    .toLowerCase()
+    .replaceAll("\\", "/")
+    .split("/")
+    .slice(0, -1)
+    .filter((part) => part && !COUNTERPART_LAYOUT_SEGMENTS.has(part));
 }
 
 /** Count meaningful directory segments shared by two source paths. */

@@ -512,7 +512,7 @@ function includePersistedCounterparts(
     const entity = graph.getEntity(counterpartId);
     if (!entity) continue;
     pool.addFileEvidence(entity.file.id, "counterpart");
-    if (srcInRootScope || dstInRootScope)
+    if ((srcInRootScope || dstInRootScope) && edge.confidence >= 0.9)
       pool.addFileEvidence(entity.file.id, "root_counterpart");
     const sourceScore = Math.max(
       nodeScores.get(edge.src) ?? 0,
