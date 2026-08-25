@@ -14,9 +14,14 @@ import {
   extractCallResolutionFacts,
   type CallResolutionFact,
 } from "./call-resolution-facts.js";
+import {
+  resolutionSemantics,
+  type LanguageResolutionSemantics,
+} from "./resolution-semantics.js";
 
 export type LanguageAdapter = {
   format: string;
+  resolution?: LanguageResolutionSemantics;
   entityTypes: ReadonlySet<string>;
   scopeTypes: ReadonlySet<string>;
   extractName(node: TSNode): string | undefined;
@@ -63,6 +68,7 @@ const ADAPTERS = {
 function withCallableShape(adapter: LanguageAdapter): LanguageAdapter {
   return {
     ...adapter,
+    resolution: resolutionSemantics(adapter.format),
     extractArity: (node) => extractCallableArity(node, adapter.format),
     extractCallResolutionFacts: (node, context) =>
       extractCallResolutionFacts(node, adapter, context),

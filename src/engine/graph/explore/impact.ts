@@ -100,8 +100,8 @@ export function includeBlastRadiusNodes(
   nodes: readonly ExploreNode[],
   blastRadius: readonly ExploreBlastRadius[],
   limit: number,
-): { nodes: ExploreNode[]; fileHits: ReadonlyMap<string, number> } {
-  if (limit <= 0) return { nodes: [...nodes], fileHits: new Map() };
+): ExploreNode[] {
+  if (limit <= 0) return [...nodes];
   const existingIds = new Set(nodes.map((node) => node.id));
   const existingFileIds = new Set(
     nodes
@@ -126,7 +126,6 @@ export function includeBlastRadiusNodes(
     }
   }
   const result = [...nodes];
-  const fileHits = new Map<string, number>();
   // If traversal already selected an integration file through a passive
   // reference, enrich that file with its direct caller at no additional file
   // cost. This preserves the executable entrypoint without increasing the
@@ -138,7 +137,6 @@ export function includeBlastRadiusNodes(
     const caller = entry.refs.find((ref) => !existingIds.has(ref.id));
     if (!caller?.entity) continue;
     existingIds.add(caller.id);
-    fileHits.set(fileId, entry.roots.size);
     result.push({
       id: caller.id,
       kind:
@@ -174,8 +172,7 @@ export function includeBlastRadiusNodes(
         ),
     )
     .slice(0, limit);
-  for (const [fileId, entry] of selected) {
-    fileHits.set(fileId, entry.roots.size);
+  for (const [, entry] of selected) {
     // A file can reach the same root through both a CALLS occurrence and a
     // passive REFS occurrence. Prefer the executable integration point; it is
     // the stronger explanation of how the root is used and avoids spending
@@ -195,7 +192,7 @@ export function includeBlastRadiusNodes(
       entity: representative.entity,
     });
   }
-  return { nodes: result, fileHits };
+  return result;
 }
 
 function novelRefCount(

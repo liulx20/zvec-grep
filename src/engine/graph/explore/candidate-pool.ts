@@ -44,6 +44,12 @@ export class ExploreCandidatePool {
     return this.candidates.has(id);
   }
 
+  fileIds(kind: ExploreFileEvidenceKind): string[] {
+    return [...this.evidence]
+      .filter(([, values]) => values.has(kind))
+      .map(([fileId]) => fileId);
+  }
+
   add(entity: StoredEntity, score: number): boolean {
     if (this.candidates.has(entity.entity.id)) return false;
     this.candidates.set(entity.entity.id, {

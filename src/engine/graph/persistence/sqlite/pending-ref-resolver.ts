@@ -27,6 +27,8 @@ import { DirectSemanticCandidateIndex } from "./direct-candidate-index.js";
 import { bareName, isExternalReceiverType } from "../../builtins.js";
 import { CppReceiverTypeInference } from "../../cpp-receiver-inference.js";
 import { SqliteCounterpartProjector } from "./counterpart-projector.js";
+import { SqliteProjectionBuffer } from "./projection-buffer.js";
+import { resolutionSemantics } from "../../../extraction/index.js";
 
 const PER_NAME_CEILING = 500;
 // Keep enough rows in one transaction to avoid repeatedly sorting the
@@ -56,55 +58,25 @@ type OwnerContext = {
   container_name: string | null;
 };
 
+type ResolutionInvocation = {
+  names: NameIndex;
+  paths: FilePathIndex;
+  filePaths: ReadonlyMap<string, string>;
+  attempt: number;
+  retryFailed: boolean;
+};
+
 type ImportBinding = {
   imported_name: string;
   dst_file_id: string;
   local_name: string;
 };
 
-type BufferedEdge = {
-  id: string;
-  src_id: string;
-  dst_id: string;
-  src_is_file: number;
-  dst_is_file: number;
-  kind: string;
-  rel: string;
-  count: number;
-  first_line: number;
-  ref_name: string;
-  source_language: string | null;
-  imported_name: string | null;
-  local_name: string | null;
-  receiver_kind: string | null;
-  receiver_name: string | null;
-  member_name: string | null;
-  resolution_hints: string | null;
-  provenance: string;
-  confidence: number;
-  evidence: string | null;
-};
-
-type BufferedDynamicRef = {
-  id: string;
-  reason: string;
-  member_name: string;
-  receiver_kind: string | null;
-  receiver_name: string | null;
-  resolution_hints: string | null;
-};
-
-type BufferedCandidate = {
-  edge_id: string;
-  target_id: string;
-  reason: string;
-  confidence: number;
-};
-
 /** Converts pending call/ref/import sites into persisted graph edges. */
 export class SqlitePendingRefResolver {
   private readonly candidates: SemanticCandidateRepository;
   private readonly counterparts: SqliteCounterpartProjector;
+  private readonly projections: SqliteProjectionBuffer;
   private directCandidates?: DirectSemanticCandidateIndex;
   private cppReceivers = new CppReceiverTypeInference();
   private readonly semanticCandidateCache = new Map<
@@ -129,11 +101,6 @@ export class SqlitePendingRefResolver {
     { target: string; fileId: string }[]
   >();
   private readonly failedRefIds = new Set<string>();
-  private readonly bufferedEdges: BufferedEdge[] = [];
-  private readonly bufferedDynamicRefs: BufferedDynamicRef[] = [];
-  private readonly bufferedCandidates: BufferedCandidate[] = [];
-  private readonly bufferedExternalRefIds = new Set<string>();
-  private readonly bufferedResolvedRefIds = new Set<string>();
   private readonly fileDirectories = new Map<string, string>();
   private readonly filesByDirectory = new Map<string, string[]>();
   private semanticCandidateQueries = 0;
@@ -148,6 +115,7 @@ export class SqlitePendingRefResolver {
   constructor(private readonly database: SqliteGraphDatabase) {
     this.candidates = new SemanticCandidateRepository(database);
     this.counterparts = new SqliteCounterpartProjector(database);
+    this.projections = new SqliteProjectionBuffer(database);
   }
 
   private assertWritable(): void {
@@ -202,23 +170,48 @@ export class SqlitePendingRefResolver {
         retryFailed ? 1 : 0,
       )?.count ?? 0;
     if (resolvable === 0) return;
-    const prepareStartedAt = performance.now();
+    const invocation = this.timed(options, "graph_resolve_prepare", () =>
+      this.prepareInvocation(options, retryFailed),
+    );
+    this.timed(options, "graph_resolve_imports", () => {
+      const count = this.drainPhase(
+        "imports",
+        invocation.attempt,
+        invocation.retryFailed,
+        (ref) => this.resolveImport(ref, invocation.paths, invocation.attempt),
+      );
+      this.retireResolvedRustImportAlternatives(invocation.attempt);
+      return count;
+    });
+    this.timed(options, "graph_resolve_context", () => {
+      this.prepareResolutionContext();
+      this.loadDefaultExportCandidates(invocation.names, invocation.filePaths);
+    });
+    this.resolvePhase(options, "inheritance", invocation);
+    this.resolvePhase(options, "function_registrations", invocation);
+    this.resolvePhase(options, "instantiations", invocation);
+    this.semanticCandidateCache.clear();
+    this.timed(options, "graph_resolve_direct_index", () => {
+      this.directCandidates = new DirectSemanticCandidateIndex(this.database);
+    });
+    // Build/cache hierarchy lookups only after every inheritance batch has
+    // completed, so calls never observe a partial inheritance graph.
+    const hierarchyCache = new Map<string, readonly string[]>();
+    this.resolvePhase(options, "symbols", invocation, hierarchyCache);
+    this.reportResolutionMetrics(options);
+    this.database.markResolvedProjections();
+  }
+
+  private prepareInvocation(
+    options: ResolvePendingOptions,
+    retryFailed: boolean,
+  ): ResolutionInvocation {
+    const files = options.files ?? [];
+    this.resetInvocationState(files);
     const names = new NameIndex();
-    this.fileDirectories.clear();
-    this.filesByDirectory.clear();
-    for (const file of options.files ?? []) {
-      // Absolute directory identity keeps same-named packages in different
-      // workspace roots independent. Relative directory keys accidentally
-      // merged multi-root Java packages and Go modules.
-      const directory = dirname(file.absolutePath);
-      this.fileDirectories.set(file.id, directory);
-      const files = this.filesByDirectory.get(directory) ?? [];
-      files.push(file.id);
-      this.filesByDirectory.set(directory, files);
-    }
     const lookupNames = this.pendingSymbolNames();
     const filePaths = new Map(
-      (options.files ?? []).map((file) => [file.id, file.relativePath]),
+      files.map((file) => [file.id, file.relativePath]),
     );
     names.load(
       this.all<
@@ -252,100 +245,94 @@ export class SqlitePendingRefResolver {
         containerId: row.container_id ?? undefined,
       })),
     );
-    const paths = new FilePathIndex(options.files ?? []);
-    this.cppReceivers = new CppReceiverTypeInference(options.files ?? []);
-    this.semanticCandidateCache.clear();
+    return {
+      names,
+      paths: new FilePathIndex(files),
+      filePaths,
+      attempt: this.nextAttempt(),
+      retryFailed,
+    };
+  }
+
+  private resetInvocationState(files: ResolvePendingOptions["files"]): void {
+    this.fileDirectories.clear();
+    this.filesByDirectory.clear();
+    for (const file of files ?? []) {
+      // Absolute directory identity keeps same-named packages in different
+      // workspace roots independent. Relative keys merge unrelated packages.
+      const directory = dirname(file.absolutePath);
+      this.fileDirectories.set(file.id, directory);
+      this.filesByDirectory.set(directory, [
+        ...(this.filesByDirectory.get(directory) ?? []),
+        file.id,
+      ]);
+    }
+    this.cppReceivers = new CppReceiverTypeInference(files ?? []);
+    for (const cache of [
+      this.semanticCandidateCache,
+      this.semanticCandidateStatsByLanguage,
+      this.functionPointerCandidateCache,
+      this.callableReturnCache,
+      this.functionPointerSlots,
+    ])
+      cache.clear();
     this.semanticCandidateQueries = 0;
     this.semanticCandidateCacheHits = 0;
     this.semanticCandidateDurationMs = 0;
-    this.semanticCandidateStatsByLanguage.clear();
     this.directCandidateHits = 0;
     this.directCandidates = undefined;
-    this.functionPointerCandidateCache.clear();
-    this.callableReturnCache.clear();
     for (const [name, candidates] of this.candidates.loadCallableReturns())
       this.callableReturnCache.set(name, candidates);
-    this.functionPointerSlots.clear();
-    const attempt = this.nextAttempt();
-    options.onTiming?.(
-      "graph_resolve_prepare",
-      performance.now() - prepareStartedAt,
-    );
-    this.timed(options, "graph_resolve_imports", () => {
-      const count = this.drainPhase("imports", attempt, retryFailed, (ref) =>
-        this.resolveImport(ref, paths, attempt),
-      );
-      this.retireResolvedRustImportAlternatives(attempt);
-      return count;
-    });
-    this.timed(options, "graph_resolve_context", () => {
-      this.prepareResolutionContext();
-      this.loadDefaultExportCandidates(names, filePaths);
-    });
-    this.timed(options, "graph_resolve_inheritance", () =>
-      this.drainPhase("inheritance", attempt, retryFailed, (ref) =>
-        this.resolveSymbol(ref, names, attempt, new Map()),
-      ),
-    );
-    this.semanticCandidateCache.clear();
-    this.timed(options, "graph_resolve_function_registrations", () => {
-      const count = this.drainPhase(
-        "function_registrations",
-        attempt,
-        retryFailed,
-        (ref) => this.resolveSymbol(ref, names, attempt, new Map()),
-      );
-      this.loadFunctionPointerSlots();
-      return count;
-    });
-    this.semanticCandidateCache.clear();
-    this.timed(options, "graph_resolve_instantiations", () =>
-      this.drainPhase("instantiations", attempt, retryFailed, (ref) =>
-        this.resolveSymbol(ref, names, attempt, new Map()),
-      ),
-    );
-    this.semanticCandidateCache.clear();
-    this.timed(options, "graph_resolve_direct_index", () => {
-      this.directCandidates = new DirectSemanticCandidateIndex(this.database);
-    });
-    // Build/cache hierarchy lookups only after every inheritance batch has
-    // completed, so calls never observe a partial inheritance graph.
-    const hierarchyCache = new Map<string, readonly string[]>();
-    this.timed(options, "graph_resolve_symbols", () =>
-      this.drainPhase("symbols", attempt, retryFailed, (ref) =>
-        this.resolveSymbol(ref, names, attempt, hierarchyCache),
-      ),
-    );
-    options.onTiming?.(
-      "graph_resolve_semantic_queries",
-      0,
-      this.semanticCandidateQueries,
-    );
-    options.onTiming?.(
+  }
+
+  private reportResolutionMetrics(options: ResolvePendingOptions): void {
+    const report = (name: string, durationMs: number, count: number) =>
+      options.onTiming?.(name, durationMs, count);
+    report("graph_resolve_semantic_queries", 0, this.semanticCandidateQueries);
+    report(
       "graph_resolve_semantic_cache_hits",
       0,
       this.semanticCandidateCacheHits,
     );
-    options.onTiming?.(
-      "graph_resolve_direct_hits",
-      0,
-      this.directCandidateHits,
-    );
-    options.onTiming?.(
+    report("graph_resolve_direct_hits", 0, this.directCandidateHits);
+    report(
       "graph_resolve_semantic_sql",
       this.semanticCandidateDurationMs,
       this.semanticCandidateQueries,
     );
     for (const [language, stats] of [
       ...this.semanticCandidateStatsByLanguage.entries(),
-    ].sort(([left], [right]) => left.localeCompare(right))) {
-      options.onTiming?.(
+    ].sort(([left], [right]) => left.localeCompare(right)))
+      report(
         `graph_resolve_semantic_sql_${timingLanguage(language)}`,
         stats.durationMs,
         stats.count,
       );
-    }
-    this.database.markResolvedProjections();
+  }
+
+  private resolvePhase(
+    options: ResolvePendingOptions,
+    phase: Exclude<ResolvePhase, "imports">,
+    invocation: ResolutionInvocation,
+    hierarchyCache: Map<string, readonly string[]> = new Map(),
+  ): void {
+    this.semanticCandidateCache.clear();
+    this.timed(options, `graph_resolve_${phase}`, () => {
+      const count = this.drainPhase(
+        phase,
+        invocation.attempt,
+        invocation.retryFailed,
+        (ref) =>
+          this.resolveSymbol(
+            ref,
+            invocation.names,
+            invocation.attempt,
+            hierarchyCache,
+          ),
+      );
+      if (phase === "function_registrations") this.loadFunctionPointerSlots();
+      return count;
+    });
   }
 
   private loadDefaultExportCandidates(
@@ -435,10 +422,10 @@ export class SqlitePendingRefResolver {
       if (refs.length === 0) break;
       processed += refs.length;
       this.transaction(() => {
-        this.clearProjectionBuffers();
+        this.projections.begin();
         this.failedRefIds.clear();
         for (const ref of refs) resolve(ref);
-        this.flushProjectionBuffers();
+        this.projections.flush();
         this.flushFailedRefs(attempt);
       });
     }
@@ -623,7 +610,7 @@ export class SqlitePendingRefResolver {
       return;
     }
     const goPackageTarget =
-      ref.source_language === "go" &&
+      resolutionSemantics(ref.source_language).packageQualifiedCalls &&
       binding?.imported_name === "*" &&
       binding.local_name === receiver &&
       ref.member_name
@@ -665,7 +652,7 @@ export class SqlitePendingRefResolver {
         referenceResolutionPolicy.isExternal(reference) ||
         referenceResolutionPolicy.isExternalReceiver(reference)
       )
-        this.bufferedExternalRefIds.add(ref.id);
+        this.projections.markExternal(ref.id);
       else this.failRef(ref.id, attempt);
       return;
     }
@@ -718,7 +705,7 @@ export class SqlitePendingRefResolver {
       (referenceResolutionPolicy.isExternalReceiver(reference) ||
         targetHasExternalReceiver)
     ) {
-      this.bufferedExternalRefIds.add(ref.id);
+      this.projections.markExternal(ref.id);
       return;
     }
     // Source-text inference is deliberately an uncertainty signal. It cannot
@@ -801,7 +788,7 @@ export class SqlitePendingRefResolver {
       reference,
     );
     if (result.status === "external") {
-      this.bufferedExternalRefIds.add(ref.id);
+      this.projections.markExternal(ref.id);
       return;
     }
     if (result.status !== "resolved") {
@@ -810,7 +797,7 @@ export class SqlitePendingRefResolver {
         binding &&
         this.bindingResolvesOnlyToNonCallables(ref, binding, names)
       ) {
-        this.bufferedExternalRefIds.add(ref.id);
+        this.projections.markExternal(ref.id);
         return;
       }
       const heuristic = binding
@@ -896,7 +883,7 @@ export class SqlitePendingRefResolver {
   } {
     if (
       target.hints?.receiverType ||
-      ref.source_language !== "cpp" ||
+      !resolutionSemantics(ref.source_language).sourceReceiverInference ||
       !target.receiver?.name
     )
       return { target };
@@ -931,8 +918,9 @@ export class SqlitePendingRefResolver {
   ): SemanticCandidateResolution {
     const sourceFile = this.owners.get(ref.owner_id)?.file_id ?? ref.owner_id;
     const sourceDirectory = this.fileDirectories.get(sourceFile);
+    const semantics = resolutionSemantics(ref.source_language);
     const packageFiles =
-      (ref.source_language === "go" || ref.source_language === "java") &&
+      semantics.packageVisibility === "directory" &&
       sourceDirectory !== undefined
         ? (this.filesByDirectory.get(sourceDirectory) ?? [])
         : [];
@@ -943,7 +931,7 @@ export class SqlitePendingRefResolver {
     // Without this expansion, resolution depended on which sibling happened
     // to be selected as the representative (for example chain.go vs chi.go).
     const importedPackageFiles =
-      ref.source_language === "go" || ref.source_language === "java"
+      semantics.packageVisibility === "directory"
         ? importedFiles.flatMap((fileId) => {
             const directory = this.fileDirectories.get(fileId);
             return directory === undefined
@@ -1115,7 +1103,8 @@ export class SqlitePendingRefResolver {
     language?: string,
   ): readonly string[] {
     const preferred = this.preferredFiles.get(sourceFileId) ?? [];
-    if (language !== "java") return preferred;
+    if (!resolutionSemantics(language).transitivePreferredFiles)
+      return preferred;
     return [
       ...new Set(
         preferred.flatMap((fileId) => {
@@ -1167,7 +1156,7 @@ export class SqlitePendingRefResolver {
       "hierarchy" | "generic_bound" | "method_set" | "function_pointer",
     candidateConfidence = 0.65,
   ): void {
-    this.bufferedDynamicRefs.push({
+    this.projections.addDynamicRef({
       id: ref.id,
       reason,
       member_name: target.member,
@@ -1179,7 +1168,7 @@ export class SqlitePendingRefResolver {
       explicitCandidateReason ??
       (target.hints?.genericBounds?.length ? "generic_bound" : "hierarchy");
     for (const candidate of candidates)
-      this.bufferedCandidates.push({
+      this.projections.addCandidate({
         edge_id: ref.id,
         target_id: candidate,
         reason: candidateReason,
@@ -1198,7 +1187,7 @@ export class SqlitePendingRefResolver {
     } = { provenance: "static", confidence: 1 },
   ): void {
     if (ref.ref_kind === "new") {
-      this.bufferedEdges.push({
+      this.projections.addEdge({
         id: `${ref.id}:instantiates`,
         src_id: ref.owner_id,
         dst_id: dst,
@@ -1221,7 +1210,7 @@ export class SqlitePendingRefResolver {
         evidence: null,
       });
     }
-    this.bufferedEdges.push({
+    this.projections.addEdge({
       id: ref.id,
       src_id: ref.owner_id,
       dst_id: dst,
@@ -1243,7 +1232,7 @@ export class SqlitePendingRefResolver {
       confidence: metadata.confidence,
       evidence: metadata.evidence ?? null,
     });
-    this.bufferedResolvedRefIds.add(ref.id);
+    this.projections.markResolved(ref.id);
   }
 
   private resolveImport(
@@ -1256,16 +1245,17 @@ export class SqlitePendingRefResolver {
     const rustInlineModuleDepth = parseRustInlineModuleDepth(
       ref.resolution_hints,
     );
+    const importMode = resolutionSemantics(from.format).relativeImportMode;
     let importedName = ref.imported_name;
     let result =
-      from.format === "rust" &&
+      importMode === "rust" &&
       rustImportStaysInCurrentFile(ref.ref_name, rustInlineModuleDepth)
         ? {
             status: "resolved" as const,
             fileId: from.id,
             absolutePath: from.absolutePath,
           }
-        : from.format === "python" &&
+        : importMode === "python" &&
             importedName !== null &&
             /^\.+$/.test(ref.ref_name)
           ? resolveImportPath(
@@ -1286,11 +1276,11 @@ export class SqlitePendingRefResolver {
         { rustInlineModuleDepth },
       );
     if (result.status === "external") {
-      this.bufferedExternalRefIds.add(ref.id);
+      this.projections.markExternal(ref.id);
       return;
     }
     if (result.status !== "resolved") return this.failRef(ref.id, attempt);
-    this.bufferedEdges.push({
+    this.projections.addEdge({
       id: ref.id,
       src_id: ref.owner_id,
       dst_id: result.fileId,
@@ -1312,7 +1302,7 @@ export class SqlitePendingRefResolver {
       confidence: 1,
       evidence: null,
     });
-    this.bufferedResolvedRefIds.add(ref.id);
+    this.projections.markResolved(ref.id);
   }
 
   /**
@@ -1416,7 +1406,8 @@ export class SqlitePendingRefResolver {
     ref: RefRow,
     target: ReturnType<typeof referenceTargetFromRaw>,
   ): string[] {
-    if (ref.source_language !== "c" && ref.source_language !== "cpp") return [];
+    if (!resolutionSemantics(ref.source_language).functionPointerDispatch)
+      return [];
     const arrayName =
       target.hints?.dynamicDispatch?.form === "computed_member" &&
       target.receiver?.name &&
@@ -1444,7 +1435,7 @@ export class SqlitePendingRefResolver {
     // boundary, so workspace visibility is safe after the key gate above.
     const candidates = this.candidates.findFunctionPointerTargets({
       sourceId: ref.owner_id,
-      sourceLanguage: ref.source_language,
+      sourceLanguage: ref.source_language ?? undefined,
       typeNames,
       memberName,
       workspaceVisible: !arrayName,
@@ -1530,8 +1521,7 @@ export class SqlitePendingRefResolver {
         ...target.hints,
         receiverType,
         candidateTypes: [receiverType],
-        ...(ref.source_language &&
-        ["java", "cpp", "typescript", "tsx"].includes(ref.source_language)
+        ...(resolutionSemantics(ref.source_language).virtualReturnDispatch
           ? { dispatch: "virtual" as const }
           : {}),
       },
@@ -1549,90 +1539,6 @@ export class SqlitePendingRefResolver {
     const containers = this.inheritanceContainers(containerId, includeOwner);
     cache.set(key, containers);
     return containers;
-  }
-
-  private clearProjectionBuffers(): void {
-    this.bufferedEdges.length = 0;
-    this.bufferedDynamicRefs.length = 0;
-    this.bufferedCandidates.length = 0;
-    this.bufferedExternalRefIds.clear();
-    this.bufferedResolvedRefIds.clear();
-  }
-
-  private flushProjectionBuffers(): void {
-    if (this.bufferedEdges.length > 0) {
-      this.database
-        .prepare(
-          `INSERT OR REPLACE INTO edges(
-             id,src_id,dst_id,src_is_file,dst_is_file,kind,rel,count,first_line,
-             ref_name,source_language,imported_name,local_name,receiver_kind,
-             receiver_name,member_name,resolution_hints,provenance,confidence,evidence
-           )
-           SELECT json_extract(value,'$.id'),json_extract(value,'$.src_id'),
-                  json_extract(value,'$.dst_id'),json_extract(value,'$.src_is_file'),
-                  json_extract(value,'$.dst_is_file'),json_extract(value,'$.kind'),
-                  json_extract(value,'$.rel'),json_extract(value,'$.count'),
-                  json_extract(value,'$.first_line'),json_extract(value,'$.ref_name'),
-                  json_extract(value,'$.source_language'),json_extract(value,'$.imported_name'),
-                  json_extract(value,'$.local_name'),json_extract(value,'$.receiver_kind'),
-                  json_extract(value,'$.receiver_name'),json_extract(value,'$.member_name'),
-                  json_extract(value,'$.resolution_hints'),json_extract(value,'$.provenance'),
-                  json_extract(value,'$.confidence'),json_extract(value,'$.evidence')
-           FROM json_each(?)`,
-        )
-        .run(JSON.stringify(this.bufferedEdges));
-    }
-    if (this.bufferedDynamicRefs.length > 0) {
-      const dynamicJson = JSON.stringify(this.bufferedDynamicRefs);
-      this.database
-        .prepare(
-          `UPDATE unresolved_refs AS unresolved
-           SET status='dynamic',
-               dynamic_reason=json_extract(item.value,'$.reason'),
-               member_name=json_extract(item.value,'$.member_name'),
-               receiver_kind=json_extract(item.value,'$.receiver_kind'),
-               receiver_name=json_extract(item.value,'$.receiver_name'),
-               resolution_hints=json_extract(item.value,'$.resolution_hints')
-           FROM json_each(?) AS item
-           WHERE unresolved.id=json_extract(item.value,'$.id')`,
-        )
-        .run(dynamicJson);
-      this.database
-        .prepare(
-          `DELETE FROM edge_candidates
-           WHERE edge_id IN (
-             SELECT json_extract(value,'$.id') FROM json_each(?)
-           )`,
-        )
-        .run(dynamicJson);
-    }
-    if (this.bufferedCandidates.length > 0) {
-      this.database
-        .prepare(
-          `INSERT INTO edge_candidates(edge_id,target_id,reason,confidence)
-           SELECT json_extract(value,'$.edge_id'),json_extract(value,'$.target_id'),
-                  json_extract(value,'$.reason'),json_extract(value,'$.confidence')
-           FROM json_each(?)`,
-        )
-        .run(JSON.stringify(this.bufferedCandidates));
-    }
-    if (this.bufferedExternalRefIds.size > 0) {
-      this.database
-        .prepare(
-          `UPDATE unresolved_refs SET status='external'
-           WHERE id IN (SELECT value FROM json_each(?))`,
-        )
-        .run(JSON.stringify([...this.bufferedExternalRefIds]));
-    }
-    if (this.bufferedResolvedRefIds.size > 0) {
-      this.database
-        .prepare(
-          `DELETE FROM unresolved_refs
-           WHERE id IN (SELECT value FROM json_each(?))`,
-        )
-        .run(JSON.stringify([...this.bufferedResolvedRefIds]));
-    }
-    this.clearProjectionBuffers();
   }
 
   private failRef(id: string, _attempt: number): void {

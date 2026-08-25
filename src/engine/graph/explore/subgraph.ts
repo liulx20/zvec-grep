@@ -147,14 +147,8 @@ export function exploreGraph(
   const { callPaths } = subgraph;
   const nodeScores = new Map(subgraph.nodeScores);
   const candidates = new ExploreCandidatePool(subgraph.nodes, nodeScores);
-  const moduleEntrypoints = collectModuleEntrypointNodes(
-    candidates,
-    graph,
-    rootIds,
-    query,
-    16,
-  );
-  const collaborators = collectDirectCallCollaborators(
+  collectModuleEntrypointNodes(candidates, graph, rootIds, query, 16);
+  collectDirectCallCollaborators(
     candidates,
     subgraph.nodes,
     graph,
@@ -163,10 +157,6 @@ export function exploreGraph(
     query,
     8,
   );
-  for (const fileId of moduleEntrypoints.fileIds)
-    candidates.addFileEvidence(fileId, "counterpart");
-  for (const fileId of collaborators.fileIds)
-    candidates.addFileEvidence(fileId, "collaborator");
   const nodes = candidates.nodes;
   const counterpartEdges =
     nodes.length === subgraph.nodes.length
@@ -208,7 +198,7 @@ export function exploreGraph(
   const dynamicBoundariesTruncated =
     dynamicBoundaryRows.length > dynamicBoundaries.length;
   const blastRadius = collectBlastRadius(graph, rootIds, DEFAULT_BLAST_LIMIT);
-  const impactAssembly = includeBlastRadiusNodes(
+  const impactNodes = includeBlastRadiusNodes(
     nodes,
     blastRadius,
     exactGroups?.[0]
@@ -216,7 +206,7 @@ export function exploreGraph(
       : Math.min(2, Math.max(1, maxFiles - 1)),
   );
   const impactCandidates = new ExploreCandidatePool(
-    impactAssembly.nodes,
+    impactNodes,
     nodeScores,
     candidates.fileEvidence,
   );
@@ -252,7 +242,7 @@ export function exploreGraph(
     edgesTruncated = impactEdges.truncated;
   }
   const fileScores = rankExploreFiles(contextNodes, rootIds, query, nodeScores);
-  for (const fileId of collaborators.fileIds) {
+  for (const fileId of candidates.fileIds("collaborator")) {
     if (fileScores.has(fileId)) continue;
     const score = contextNodes
       .filter((node) => node.entity?.file.id === fileId)
@@ -262,15 +252,14 @@ export function exploreGraph(
       );
     fileScores.set(fileId, Math.max(0.02, score));
   }
-  const dynamicBoundaryFileIds = relevantDynamicBoundaryFileIds(
+  addDynamicBoundaryEvidence(
+    impactCandidates,
     dynamicBoundaries,
     nodes,
     nodeScores,
     edges,
     rootIds,
   );
-  for (const fileId of dynamicBoundaryFileIds)
-    impactCandidates.addFileEvidence(fileId, "dynamic_boundary");
   const changeSurface = collectChangeSurface({
     graph,
     rootIds,
@@ -366,9 +355,8 @@ function collectModuleEntrypointNodes(
   rootIds: readonly string[],
   query: string,
   limit: number,
-): { fileIds: ReadonlySet<string> } {
-  if (!/(?:\.|::|->|#)/.test(query) || limit <= 0)
-    return { fileIds: new Set() };
+): void {
+  if (!/(?:\.|::|->|#)/.test(query) || limit <= 0) return;
   const rootFiles = new Set(
     rootIds
       .map((id) => graph.getEntity(id)?.file.id)
@@ -393,9 +381,11 @@ function collectModuleEntrypointNodes(
       fileAdded = true;
       if (added >= limit) break;
     }
-    if (fileAdded) fileIds.add(fileId);
+    if (fileAdded) {
+      fileIds.add(fileId);
+      pool.addFileEvidence(fileId, "counterpart");
+    }
   }
-  return { fileIds };
 }
 
 /**
@@ -492,9 +482,9 @@ function collectDirectCallCollaborators(
   rootIds: readonly string[],
   query: string,
   limit: number,
-): { fileIds: Set<string> } {
+): void {
   const terms = queryTerms(query);
-  if (limit <= 0 || terms.length === 0) return { fileIds: new Set() };
+  if (limit <= 0 || terms.length === 0) return;
   const rootFileIds = fileIdsForRoots(sourceNodes, rootIds);
   const sources = sourceNodes
     .filter((node) => {
@@ -520,7 +510,7 @@ function collectDirectCallCollaborators(
         left.id.localeCompare(right.id),
     )
     .slice(0, 32);
-  if (sources.length === 0) return { fileIds: new Set() };
+  if (sources.length === 0) return;
 
   const existingIds = new Set(pool.nodes.map((node) => node.id));
   const initialSize = pool.size;
@@ -565,10 +555,10 @@ function collectDirectCallCollaborators(
     if (fileIds.size >= 2 && !fileIds.has(entity.file.id)) continue;
     existingIds.add(edge.dst);
     fileIds.add(entity.file.id);
+    pool.addFileEvidence(entity.file.id, "collaborator");
     pool.add(entity, Math.max(0.02, (nodeScores.get(edge.src) ?? 0) * 0.65));
     if (pool.size - initialSize >= limit) break;
   }
-  return { fileIds };
 }
 
 function includePersistedCounterparts(
@@ -691,14 +681,15 @@ function selectDynamicBoundaries(
  * arbitrary peripheral file protected integration status and displace direct
  * callers, paths, or implementations from a bounded context pack.
  */
-function relevantDynamicBoundaryFileIds(
+function addDynamicBoundaryEvidence(
+  pool: ExploreCandidatePool,
   boundaries: readonly DynamicBoundary[],
   nodes: readonly ExploreNode[],
   nodeScores: ReadonlyMap<string, number>,
   edges: readonly ExploreEdge[],
   rootIds: readonly string[],
-): Set<string> {
-  if (boundaries.length === 0) return new Set();
+): void {
+  if (boundaries.length === 0) return;
   const strongest = Math.max(...nodeScores.values(), 0);
   const roots = new Set(rootIds);
   const rootNeighborhood = new Set(rootIds);
@@ -764,11 +755,8 @@ function relevantDynamicBoundaryFileIds(
       (left, right) =>
         right.score - left.score || left.fileId.localeCompare(right.fileId),
     );
-  return new Set(
-    ranked
-      .slice(0, DYNAMIC_BOUNDARY_FILE_POLICY.maximum)
-      .map((item) => item.fileId),
-  );
+  for (const item of ranked.slice(0, DYNAMIC_BOUNDARY_FILE_POLICY.maximum))
+    pool.addFileEvidence(item.fileId, "dynamic_boundary", item.score || 1);
 }
 
 /**

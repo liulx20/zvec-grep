@@ -6,6 +6,7 @@ import {
 } from "./dynamic-call-target.js";
 import { isDeferredCallable } from "./callable-shape.js";
 import { findIdentifierLeaf, type TSNode } from "./tree-sitter/nodes.js";
+import { resolutionSemantics } from "./resolution-semantics.js";
 
 export type CallResolutionFact = {
   receiverTypes: ReadonlyMap<string, string>;
@@ -173,7 +174,10 @@ export function extractCallResolutionFacts(
  * guard to skip the entire body.
  */
 function callableResolutionRoot(node: TSNode, language: string): TSNode {
-  if (language !== "python" || node.type !== "decorated_definition")
+  if (
+    !resolutionSemantics(language).decoratedDefinitions ||
+    node.type !== "decorated_definition"
+  )
     return node;
   return (
     node.namedChildren.find((child) => child.type === "function_definition") ??
@@ -314,7 +318,8 @@ function collectDynamicReceivers(
   adapter: LanguageAdapter,
 ): Map<string, readonly string[]> {
   const receivers = new Map<string, readonly string[]>();
-  if (adapter.format !== "rust") return receivers;
+  if (!resolutionSemantics(adapter.format).dynamicTraitObjects)
+    return receivers;
   const parameters =
     node.childForFieldName("parameters") ??
     node.namedChildren.find((child) => /parameters/.test(child.type));
@@ -369,8 +374,10 @@ function collectOwnerFields(
   let parent = node.parent;
   for (let depth = 0; parent && depth < 5; depth++, parent = parent.parent) {
     if (!isOwnerContainer(parent.type)) continue;
-    if (language === "python") collectPythonConstructorFields(parent, bindings);
-    if (["javascript", "jsx", "typescript", "tsx"].includes(language))
+    const fieldInference = resolutionSemantics(language).ownerFieldInference;
+    if (fieldInference === "python")
+      collectPythonConstructorFields(parent, bindings);
+    if (fieldInference === "javascript")
       collectJavaScriptConstructorFields(parent, bindings);
     const visit = (current: TSNode): void => {
       // Owner fields live outside every executable body, including the
@@ -585,7 +592,7 @@ function flattenBoundScopes(
 }
 
 function opensLexicalScope(type: string, language: string): boolean {
-  if (language === "python") return false;
+  if (!resolutionSemantics(language).lexicalBlocks) return false;
   return new Set([
     "statement_block",
     "compound_statement",
@@ -622,7 +629,8 @@ function declarationBindings(
     if (elementType)
       results.push({ name: `${cFamily[2]!}.$element`, type: elementType });
   }
-  if (language === "java") {
+  const declarationStyle = resolutionSemantics(language).declarationStyle;
+  if (declarationStyle === "java") {
     const javaField = text.match(
       /^\s*(?:(?:public|protected|private|static|final|volatile|transient)\s+)*([A-Za-z_][\w.<>, ?[\]]*)\s+([A-Za-z_]\w*)\s*(?:[=;])?/,
     );
@@ -646,7 +654,7 @@ function declarationBindings(
       name: `${mapConstructor[1]!}.$value`,
       type: normalizeType(mapConstructor[2]!),
     });
-  if (language === "go") {
+  if (declarationStyle === "go") {
     const go = text.match(/^\s*var\s+([A-Za-z_]\w*)\s+([A-Za-z_][\w.]*)/);
     if (go) results.push({ name: go[1]!, type: normalizeType(go[2]!) });
   }
@@ -678,7 +686,8 @@ function constructedBinding(
   // lower-case factories out of this path: their return annotations are
   // handled by `callableReturnTypes`, and guessing their type from the
   // callable name creates false receiver hints.
-  if (language === "python") {
+  const inference = resolutionSemantics(language).constructorInference;
+  if (inference === "python") {
     const pythonConstructor = text.match(
       /([A-Za-z_]\w*)\s*=\s*(?:await\s+)?((?:[A-Za-z_]\w*\.)*[A-Z][A-Za-z0-9_]*)\s*\(/,
     );
@@ -689,7 +698,7 @@ function constructedBinding(
       };
   }
 
-  if (language !== "go") return undefined;
+  if (inference !== "go") return undefined;
   const goFactory = text.match(
     /([A-Za-z_]\w*)\s*(?::=|=)\s*(?:[A-Za-z_]\w*\.)*New([A-Z][A-Za-z0-9_]*)\s*\(/,
   );
@@ -834,14 +843,15 @@ function rawParameterBinding(
   const type = node.childForFieldName("type")?.text;
   if (name && type) return { name, type };
   const text = node.text.trim().replace(/^\(|\)$/g, "");
+  const style = resolutionSemantics(language).parameterStyle;
   const match =
-    language === "go"
+    style === "go"
       ? text.match(/^([A-Za-z_]\w*)\s+\*?([A-Za-z_]\w*(?:\[[^\]]+\])?)$/)
-      : language === "rust"
+      : style === "rust"
         ? text.match(/^(?:mut\s+)?([A-Za-z_]\w*)\s*:\s*&?(?:mut\s+)?([^=]+)$/)
         : text.match(/(?:^|\s)([A-Za-z_]\w*)\s*$/);
   if (!match) return undefined;
-  if (language === "go" || language === "rust")
+  if (style === "go" || style === "rust")
     return { name: match[1]!, type: match[2]! };
   const inferredType = text.slice(0, text.lastIndexOf(match[1]!)).trim();
   return inferredType ? { name: match[1]!, type: inferredType } : undefined;
@@ -857,10 +867,11 @@ function parameterBindingName(
     node.namedChildren.find((child) => child.type === "identifier");
   if (direct && /^[A-Za-z_$][\w$]*$/.test(direct.text)) return direct.text;
   const text = node.text.trim().replace(/^\(|\)$/g, "");
+  const style = resolutionSemantics(language).parameterStyle;
   const match =
-    language === "go"
+    style === "go"
       ? text.match(/^([A-Za-z_]\w*)\s+/)
-      : language === "rust"
+      : style === "rust"
         ? text.match(/^(?:mut\s+)?([A-Za-z_]\w*)\s*:/)
         : text.match(/^([A-Za-z_$][\w$]*)\s*(?::|=|$)/);
   return match?.[1];
@@ -885,7 +896,8 @@ function collectGenericBounds(
     owner = owner.parent;
   }
   const text = genericNode?.text ?? "";
-  const separator = language === "java" ? /\s+extends\s+/ : /\s*:\s*/;
+  const style = resolutionSemantics(language).genericBoundsStyle;
+  const separator = style === "java" ? /\s+extends\s+/ : /\s*:\s*/;
   const inner =
     (text.startsWith("<") && text.endsWith(">")) ||
     (text.startsWith("[") && text.endsWith("]"))
@@ -894,18 +906,18 @@ function collectGenericBounds(
   for (const part of inner.split(",")) {
     const trimmed = part.trim();
     const constrained =
-      language === "go"
+      style === "go"
         ? trimmed.match(/^([A-Za-z_]\w*)\s+(.+)$/)
-        : language === "cpp"
+        : style === "cpp"
           ? trimmed.match(/^([A-Za-z_]\w*)\s+([A-Za-z_]\w*)$/)
           : null;
-    if (constrained && language === "go") {
+    if (constrained && style === "go") {
       result.set(constrained[1]!, [normalizeType(constrained[2]!)]);
       continue;
     }
     if (
       constrained &&
-      language === "cpp" &&
+      style === "cpp" &&
       constrained[1] !== "typename" &&
       constrained[1] !== "class"
     ) {

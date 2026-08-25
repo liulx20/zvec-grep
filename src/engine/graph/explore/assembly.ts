@@ -16,10 +16,7 @@ import {
 } from "./policy.js";
 import { polymorphicSiblingSkeletonNodeIds } from "./adaptive-sizing.js";
 import type { ExploreCandidatePool } from "./candidate-pool.js";
-import {
-  selectExploreFiles,
-  type ExploreFileEvidenceKind,
-} from "./file-selection.js";
+import { selectExploreFiles } from "./file-selection.js";
 
 export function assembleExploreFiles(input: {
   query: string;
@@ -112,11 +109,8 @@ export function assembleExploreFiles(input: {
   );
   for (const fileId of hierarchyFileIds)
     input.pool.addFileEvidence(fileId, "hierarchy");
-  const counterpartFileIds = fileIdsWithEvidence(fileEvidence, "counterpart");
-  const changeSurfaceFileIds = fileIdsWithEvidence(
-    fileEvidence,
-    "change_surface",
-  );
+  const counterpartFileIds = new Set(input.pool.fileIds("counterpart"));
+  const changeSurfaceFileIds = new Set(input.pool.fileIds("change_surface"));
   const alignedChangeSurfaceFileIds = queryAlignedFileIds(
     byFile,
     changeSurfaceFileIds,
@@ -244,17 +238,6 @@ export function assembleExploreFiles(input: {
     });
   }
   return bundles;
-}
-
-function fileIdsWithEvidence(
-  evidence: ReadonlyMap<string, ReadonlyMap<ExploreFileEvidenceKind, number>>,
-  kind: ExploreFileEvidenceKind,
-): Set<string> {
-  return new Set(
-    [...evidence]
-      .filter(([, values]) => values.has(kind))
-      .map(([fileId]) => fileId),
-  );
 }
 
 function queryAlignedFileIds(
