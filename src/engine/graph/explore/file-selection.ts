@@ -14,6 +14,7 @@ export type ExploreFileRoleEvidenceKind =
   | "change_surface"
   | "integration"
   | "dynamic_boundary"
+  | "impact_summary"
   | "low_value_path"
   | "call_path";
 
@@ -51,6 +52,7 @@ const EXACT_WEIGHTS: Readonly<Record<ExploreFileRoleEvidenceKind, number>> = {
   change_surface: 0.4,
   integration: 0.8,
   dynamic_boundary: 0.6,
+  impact_summary: 0,
   low_value_path: -2.5,
   call_path: 1.1,
 };
@@ -66,6 +68,7 @@ const CONCEPT_WEIGHTS: Readonly<Record<ExploreFileRoleEvidenceKind, number>> = {
   hierarchy: 0.8,
   query_alignment: 1.3,
   integration: 1,
+  impact_summary: 0,
   low_value_path: -3,
   call_path: 0.65,
 };
@@ -73,7 +76,6 @@ const CONCEPT_WEIGHTS: Readonly<Record<ExploreFileRoleEvidenceKind, number>> = {
 const SCALED_EVIDENCE = new Set<ExploreFileEvidenceKind>([
   "aligned_change_surface",
   "integration",
-  "query_alignment",
 ]);
 
 const NOVELTY_EVIDENCE = new Set<ExploreFileRoleEvidenceKind>([
@@ -108,7 +110,8 @@ export function selectExploreFiles(
       );
     return { fileId, baseScore, score, evidence };
   });
-  candidates.sort(compareCandidates);
+  const eligible = candidates.filter(isEligibleSourceCandidate);
+  eligible.sort(compareCandidates);
 
   const selected: ExploreFileCandidate[] = [];
   const selectedIds = new Set<string>();
@@ -119,25 +122,39 @@ export function selectExploreFiles(
     selectedIds.add(candidate.fileId);
   };
 
-  for (const candidate of candidates.filter((item) =>
-    item.evidence.has("root"),
-  ))
+  for (const candidate of eligible.filter((item) => item.evidence.has("root")))
     take(candidate);
   take(
-    candidates.find(
+    eligible.find(
       (candidate) =>
         candidate.evidence.has("root_counterpart") &&
         !selectedIds.has(candidate.fileId),
     ),
   );
   while (selected.length < input.maxFiles) {
-    const next = candidates
+    const next = eligible
       .filter((candidate) => !selectedIds.has(candidate.fileId))
       .sort((left, right) => compareMarginal(left, right, selected))[0];
     if (!next || marginalGain(next, selected) <= 0) break;
     take(next);
   }
   return selected;
+}
+
+function isEligibleSourceCandidate(candidate: ExploreFileCandidate): boolean {
+  return (
+    !candidate.evidence.has("impact_summary") ||
+    (
+      [
+        "integration",
+        "collaborator",
+        "counterpart",
+        "root_counterpart",
+        "hierarchy",
+      ] as const
+    ).some((kind) => candidate.evidence.has(kind)) ||
+    (candidate.evidence.get("query_alignment") ?? 0) >= 1
+  );
 }
 
 function evidenceWeights(

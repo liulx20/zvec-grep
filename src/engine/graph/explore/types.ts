@@ -16,6 +16,7 @@ export type ExploreSubgraphOptions = {
   seedIds: readonly string[];
   seedWeights?: ReadonlyMap<string, number>;
   traversalDepth?: number;
+  traversalDirection?: "outgoing" | "both";
   maxNodes?: number;
   includeCallPaths?: boolean;
 };
@@ -113,6 +114,8 @@ export type ExploreSubgraphResult = {
   available: boolean;
   rootIds: string[];
   nodes: ExploreNode[];
+  /** Files represented only by reverse impact expansion. */
+  impactExpansionFileIds: string[];
   edges: ExploreEdge[];
   edgesTruncated: boolean;
   callPaths: ExploreCallPath[];

@@ -38,6 +38,34 @@ test("file selection uses symbol overlap rather than role labels for redundancy"
   );
 });
 
+test("impact-only files need source-upgrade evidence", () => {
+  const evidence = (...entries) => new Map(entries);
+  const impact = (...entries) => evidence(["impact_summary", 1], ...entries);
+  const selected = selectExploreFiles({
+    ordered: [
+      ["root", 10],
+      ["passive", 9],
+      ["direct", 8],
+      ["aligned", 7],
+      ["partial", 6],
+    ],
+    maxFiles: 5,
+    intent: "exact_symbol",
+    evidence: new Map([
+      ["root", evidence(["root", 1])],
+      ["passive", impact()],
+      ["direct", impact(["integration", 1])],
+      ["aligned", impact(["query_alignment", 1])],
+      ["partial", impact(["query_alignment", 0.5])],
+    ]),
+  });
+
+  assert.deepEqual(
+    new Set(selected.map(({ fileId }) => fileId)),
+    new Set(["root", "direct", "aligned"]),
+  );
+});
+
 test("exploreSubgraph expands and RWR-scores multiple seeds without context assembly", () => {
   const graph = new SqliteGraphStorage("", { inMemory: true });
   graph.upsertFileGraph(

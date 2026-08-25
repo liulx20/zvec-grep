@@ -145,12 +145,15 @@ export function exploreGraph(
   const subgraph = exploreSubgraph(graph, {
     seedIds: rootIds,
     traversalDepth,
+    traversalDirection: intent === "exact_symbol" ? "outgoing" : "both",
     maxNodes,
     includeCallPaths: true,
   });
   const { callPaths } = subgraph;
   const nodeScores = new Map(subgraph.nodeScores);
   const candidates = new ExploreCandidatePool(subgraph.nodes, nodeScores);
+  for (const fileId of subgraph.impactExpansionFileIds)
+    candidates.addFileEvidence(fileId, "impact_summary");
   collectDirectCallCollaborators(
     candidates,
     subgraph.nodes,
@@ -349,6 +352,21 @@ export function exploreGraph(
     dynamicBoundariesTruncated: visibleDynamicBoundariesTruncated,
     files,
   };
+}
+
+function exclusiveFileIds(
+  nodes: readonly ExploreNode[],
+  selectedNodeIds: readonly string[],
+): string[] {
+  const selectedIds = new Set(selectedNodeIds);
+  const selectedFiles = new Set<string>();
+  const otherFiles = new Set<string>();
+  for (const node of nodes) {
+    const fileId = node.entity?.file.id;
+    if (!fileId) continue;
+    (selectedIds.has(node.id) ? selectedFiles : otherFiles).add(fileId);
+  }
+  return [...selectedFiles].filter((fileId) => !otherFiles.has(fileId));
 }
 
 /**
@@ -727,13 +745,11 @@ export function exploreSubgraph(
             (!representativeSelectionEnabled || kind !== "CONTAINS"),
         )
       : TRAVERSE_EDGE_KINDS;
-    // Preserve structural distance for pruning. GraphReader.traverse returns a
-    // flat list, so first materialize depth-1 neighbors explicitly; otherwise
-    // deep traversal nodes and direct callers all receive the same priority and
-    // the maxNodes cutoff degenerates to ID ordering.
+    // Exact queries get reverse dependencies from dedicated impact collectors;
+    // concept queries may traverse both directions to connect multiple seeds.
     const direct = graph.traverse(rootId, {
       edgeKinds: traversalKinds,
-      direction: "both",
+      direction: options.traversalDirection ?? "both",
       maxDepth: 1,
       limit: perRootBudget,
       includeStart: true,
@@ -743,11 +759,9 @@ export function exploreSubgraph(
     }
     const walked = graph.traverse(rootId, {
       edgeKinds: traversalKinds,
-      // For a precise callable root, two-way deep traversal creates a noisy
-      // co-caller fan-out: root -> shared helper <- every unrelated caller.
-      // Direct callers are already retained above and by glueCallNeighbors;
-      // deeper context should follow the callable's own execution flow.
-      direction: isCallableSymbolKind(rootKind) ? "outgoing" : "both",
+      direction:
+        options.traversalDirection ??
+        (isCallableSymbolKind(rootKind) ? "outgoing" : "both"),
       maxDepth: traversalDepth,
       limit: perRootBudget,
       includeStart: true,
@@ -821,6 +835,7 @@ export function exploreSubgraph(
     available: true,
     rootIds,
     nodes,
+    impactExpansionFileIds: exclusiveFileIds(nodes, impactGlueIds),
     edges,
     edgesTruncated: induced.truncated,
     callPaths: retainedCallPaths,
@@ -1071,6 +1086,7 @@ function emptySubgraph(available: boolean): ExploreSubgraphResult {
     available,
     rootIds: [],
     nodes: [],
+    impactExpansionFileIds: [],
     edges: [],
     edgesTruncated: false,
     callPaths: [],

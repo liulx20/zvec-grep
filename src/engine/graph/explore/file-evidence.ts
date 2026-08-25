@@ -64,7 +64,11 @@ export function collectExploreFileEvidence(input: {
       input.pool.addFileEvidence(fileId, "low_value_path");
     const coveredTerms = fileSemanticTerms(fileNodes, terms);
     if (coveredTerms.size <= 0) continue;
-    input.pool.addFileEvidence(fileId, "query_alignment", coveredTerms.size);
+    input.pool.addFileEvidence(
+      fileId,
+      "query_alignment",
+      coveredTerms.size / terms.length,
+    );
     for (const term of coveredTerms)
       input.pool.addFileEvidence(fileId, `concept:${term}`);
     if (changeSurface.has(fileId) && coveredTerms.size >= 2)
@@ -169,7 +173,7 @@ function directIntegrationFiles(
   const rootsByFile = new Map<string, Set<string>>();
   const entrypoints = new Set<string>();
   for (const edge of edges) {
-    if (!["CALLS", "REFS", "INSTANTIATES"].includes(edge.kind)) continue;
+    if (edge.kind !== "CALLS" && edge.kind !== "INSTANTIATES") continue;
     const rootOwner = scopeOwners.get(edge.dst);
     if (!rootOwner || scopeOwners.has(edge.src)) continue;
     const fileId = nodeFiles.get(edge.src);
