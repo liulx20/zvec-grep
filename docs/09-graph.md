@@ -756,9 +756,9 @@ occurrence 仍依赖提取遍历顺序，尚未使用 column 或稳定 source ra
   `recall`、`graph_expand` 和 `search_total`，并区分冷启动与常驻 daemon/session。真实 Go 查询中，
   复用 service 后的后续请求约为 22–25ms；CLI 冷启动仍约为 700–900ms，两者不能混用一个指标。
 - Explore 的种子质量依赖主索引精确名称/文本检索；自然语言短语可能选到噪声种子。
-- Explore 的声明/实现配对先按候选文件 stem 批量读取符号，再由统一 counterpart policy 校验路径；
-  不再为每个头文件分别扫描整个 symbols 表。NeuG `NeugDB` 的相同 `8 files / 152 nodes`
-  结果在本地热测中由约 366–373ms 降至 327–335ms。
+- 声明/实现配对在索引阶段投影为持久化的 `COUNTERPART` edge。投影器要求符号 identity、
+  header/source 类型和路径 domain 相容，并使用直接 import 或路径关联作为置信证据；Explore 查询时只
+  读取这些边，不再按 file stem 批量读取 symbols 或重新猜测 counterpart。
 - Change surface 依赖已经成功解析的直接 `type`/`return` 边；未解析 alias、泛型绑定或动态类型
   不会被救回。
 - Explore 直接通过 SQLite source/target/kind 索引读取类型化边，同一对节点并存的 `CALLS`、
@@ -816,9 +816,10 @@ occurrence 仍依赖提取遍历顺序，尚未使用 column 或稳定 source ra
 持久化、普通搜索的浅图扩展，以及独立的 neighborhood/explore 查询都已接通。它适合辅助代码发现、
 调用关系浏览和多文件上下文组装。
 
-现阶段的主要风险不在“链路是否存在”，而在“语义解析精度”和“全量内存/全量快照”的扩展性。
-在把它定位为启发式代码导航层时已经可用；如果要作为编译器级依赖分析或大规模精确关系图，
-仍需要优先补齐引用绑定、一致性与可观测性。
+现阶段的主要风险不在“链路是否存在”，而在语义解析精度、高出度局部遍历，以及主索引与图索引之间的
+一致性。SQLite backend 不会在打开时加载全图或在 checkpoint 时重写全量快照；查询期只构建受预算
+约束的局部内存子图。将它定位为启发式代码导航层时已经可用；如果要作为编译器级依赖分析或大规模
+精确关系图，仍需要优先补齐引用绑定、一致性、可观测性和高出度查询控制。
 
 
 #### 是否把 Explore 融入 query
