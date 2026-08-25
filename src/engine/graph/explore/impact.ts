@@ -12,13 +12,12 @@ import { isTypeishKind, symbolName } from "./policy.js";
 
 export function collectBlastRadius(
   graph: GraphReader,
-  storage: GraphReader,
   rootIds: readonly string[],
   limit: number,
 ): ExploreBlastRadius[] {
   const groups = new Map<string, string[]>();
   for (const rootId of rootIds) {
-    const entity = storage.getEntity(rootId);
+    const entity = graph.getEntity(rootId);
     const key = entity ? `${entity.file.id}\0${symbolName(entity)}` : rootId;
     const ids = groups.get(key) ?? [];
     ids.push(rootId);
@@ -26,7 +25,7 @@ export function collectBlastRadius(
   }
   return [...groups.values()].map((groupRootIds) => {
     const rootId = groupRootIds[0]!;
-    const rootEntity = storage.getEntity(rootId);
+    const rootEntity = graph.getEntity(rootId);
     const rootKind =
       rootEntity?.entity.metadata?.kind === "code"
         ? rootEntity.entity.metadata.symbolType
@@ -41,7 +40,7 @@ export function collectBlastRadius(
     ]);
     const ownedFileIds = new Set(
       [...ownedIds]
-        .map((id) => storage.getEntity(id)?.file.id)
+        .map((id) => graph.getEntity(id)?.file.id)
         .filter((id): id is string => Boolean(id)),
     );
     // Direct callers/constructors are the strongest impact evidence. Put them
@@ -52,8 +51,8 @@ export function collectBlastRadius(
       .incomingEdges(groupRootIds, ["CALLS", "INSTANTIATES"], limit * 3)
       .map((edge) => ({ id: edge.src }))
       .sort((left, right) => {
-        const leftPath = storage.getEntity(left.id)?.file.relativePath ?? "";
-        const rightPath = storage.getEntity(right.id)?.file.relativePath ?? "";
+        const leftPath = graph.getEntity(left.id)?.file.relativePath ?? "";
+        const rightPath = graph.getEntity(right.id)?.file.relativePath ?? "";
         return (
           Number(isLowValuePath(leftPath)) -
             Number(isLowValuePath(rightPath)) ||
@@ -77,7 +76,7 @@ export function collectBlastRadius(
       seen.add(ref.id);
       const item = {
         id: ref.id,
-        entity: storage.getEntity(ref.id),
+        entity: graph.getEntity(ref.id),
         directCall: directCallerSet.has(ref.id) || undefined,
       };
       if (item.entity && ownedFileIds.has(item.entity.file.id)) continue;
@@ -218,7 +217,6 @@ function pathDepth(path: string): number {
 
 export function collectChangeSurface(input: {
   graph: GraphReader;
-  storage: GraphReader;
   rootIds: readonly string[];
   nodes: readonly ExploreNode[];
   nodeScores: ReadonlyMap<string, number>;
@@ -227,7 +225,7 @@ export function collectChangeSurface(input: {
 }): ExploreChangeSurfaceRef[] {
   const rootIds = new Set(input.rootIds);
   const callableRoots = input.rootIds.filter((id) => {
-    const entity = input.storage.getEntity(id);
+    const entity = input.graph.getEntity(id);
     const kind =
       entity?.entity.metadata?.kind === "code"
         ? entity.entity.metadata.symbolType
@@ -238,10 +236,10 @@ export function collectChangeSurface(input: {
   const candidates: Omit<ExploreChangeSurfaceRef, "rescued">[] = [];
   const seen = new Set<string>();
   for (const rootId of callableRoots.slice(0, 5)) {
-    const rootPath = input.storage.getEntity(rootId)?.file.relativePath ?? "";
+    const rootPath = input.graph.getEntity(rootId)?.file.relativePath ?? "";
     for (const ref of input.graph.context(rootId).outgoing) {
       if (ref.rel !== "type" && ref.rel !== "return") continue;
-      const entity = input.storage.getEntity(ref.id);
+      const entity = input.graph.getEntity(ref.id);
       const kind =
         entity?.entity.metadata?.kind === "code"
           ? entity.entity.metadata.symbolType
@@ -268,7 +266,7 @@ export function collectChangeSurface(input: {
   // context query per member. These are presentation candidates only; ordinary
   // graph traversal and impact semantics remain unchanged.
   const typeRoots = input.rootIds.filter((id) => {
-    const entity = input.storage.getEntity(id);
+    const entity = input.graph.getEntity(id);
     const kind =
       entity?.entity.metadata?.kind === "code"
         ? entity.entity.metadata.symbolType
@@ -276,12 +274,12 @@ export function collectChangeSurface(input: {
     return isTypeishKind(kind);
   });
   const hasConcreteTypeRoot = typeRoots.some((id) => {
-    const path = input.storage.getEntity(id)?.file.relativePath ?? "";
+    const path = input.graph.getEntity(id)?.file.relativePath ?? "";
     return !isStubDeclarationPath(path);
   });
   const semanticTypeRootGroups = new Map<string, string[]>();
   for (const id of typeRoots) {
-    const entity = input.storage.getEntity(id);
+    const entity = input.graph.getEntity(id);
     const metadata = entity?.entity.metadata;
     const name = metadata?.kind === "code" ? (metadata.symbolName ?? id) : id;
     const key = `${entity?.file.id ?? ""}\0${eraseTypeArguments(name).toLowerCase()}`;
@@ -291,7 +289,7 @@ export function collectChangeSurface(input: {
   }
   for (const rootGroup of [...semanticTypeRootGroups.values()].slice(0, 5)) {
     const rootId = rootGroup[0]!;
-    const rootPath = input.storage.getEntity(rootId)?.file.relativePath ?? "";
+    const rootPath = input.graph.getEntity(rootId)?.file.relativePath ?? "";
     const ownerIds = [
       ...rootGroup,
       ...rootGroup.flatMap((id) =>
@@ -315,7 +313,7 @@ export function collectChangeSurface(input: {
           )
           .map((ref) => ref.dst)
           .filter((id) => {
-            const entity = input.storage.getEntity(id);
+            const entity = input.graph.getEntity(id);
             const metadata = entity?.entity.metadata;
             return (
               entity?.file.relativePath === rootPath &&
@@ -353,7 +351,7 @@ export function collectChangeSurface(input: {
       // candidate here. This also covers duplicate member occurrences whose
       // resolved target is one of the selected declaration/definition roots.
       if (rootIds.has(ref.dst)) continue;
-      const entity = input.storage.getEntity(ref.dst);
+      const entity = input.graph.getEntity(ref.dst);
       const kind =
         entity?.entity.metadata?.kind === "code"
           ? entity.entity.metadata.symbolType
@@ -477,7 +475,6 @@ export function includeChangeSurfaceNodes(
   nodes: readonly ExploreNode[],
   changeSurface: readonly ExploreChangeSurfaceRef[],
   graph: GraphReader,
-  storage: GraphReader,
 ): ExploreNode[] {
   const out = [...nodes];
   const seen = new Set(nodes.map((node) => node.id));
@@ -503,17 +500,17 @@ export function includeChangeSurfaceNodes(
     const metadata = item.entity.entity.metadata;
     const name = metadata?.kind === "code" ? (metadata.symbolName ?? "") : "";
     const family =
-      name && storage.findSymbolsByQuery
+      name && graph.findSymbolsByQuery
         ? includeSameFileGenericTypeFragments(
             [item.entity],
-            storage.findSymbolsByQuery(name, 128),
+            graph.findSymbolsByQuery(name, 128),
             name,
           )
         : [item.entity];
     for (const entity of family) {
       addEntity(entity);
       for (const member of graph.members(entity.entity.id).slice(0, 24)) {
-        const memberEntity = storage.getEntity(member.id);
+        const memberEntity = graph.getEntity(member.id);
         if (memberEntity) addEntity(memberEntity);
       }
     }

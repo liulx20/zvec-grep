@@ -71,7 +71,6 @@ export function queryGraphNeighborhood(
   graph: GraphReader,
   options: GraphNeighborhoodOptions,
 ): GraphNeighborhoodResult {
-  const storage = graph;
   const defaultDepth =
     options.direction === "impact" ? DEFAULT_IMPACT_DEPTH : DEFAULT_DEPTH;
   const depth = clampInt(options.depth ?? defaultDepth, 1, 10);
@@ -95,7 +94,7 @@ export function queryGraphNeighborhood(
   }
 
   const resolvedSeeds = resolveSeeds(
-    storage,
+    graph,
     query,
     options.seedId,
     options.definitionFile,
@@ -127,7 +126,7 @@ export function queryGraphNeighborhood(
       seeds,
       ambiguous: true,
       groups: selectedGroups.map((group) =>
-        queryNeighborhoodGroup(graph, storage, options.direction, group, {
+        queryNeighborhoodGroup(graph, options.direction, group, {
           depth,
           limit,
         }),
@@ -141,7 +140,6 @@ export function queryGraphNeighborhood(
 
   const group = queryNeighborhoodGroup(
     graph,
-    storage,
     options.direction,
     resolvedSeeds.groups[0]!,
     { depth, limit },
@@ -168,7 +166,6 @@ type ResolvedSeedGroup = {
 
 function queryNeighborhoodGroup(
   graph: GraphReader,
-  storage: GraphReader,
   direction: GraphQueryDirection,
   group: ResolvedSeedGroup,
   budget: { depth: number; limit: number },
@@ -198,7 +195,7 @@ function queryNeighborhoodGroup(
       : []),
   ]);
   const truncated = refs.length > budget.limit;
-  const neighbors = rankNeighborhoodRefs(enrichSymRefs(storage, refs));
+  const neighbors = rankNeighborhoodRefs(enrichSymRefs(graph, refs));
 
   return {
     seed: group.seed,

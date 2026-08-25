@@ -76,7 +76,6 @@ export function exploreGraph(
   graph: GraphReader,
   options: ExploreOptions,
 ): ExploreResult {
-  const storage = graph;
   const query = options.query.trim();
   const searchLimit = clampInt(
     options.searchLimit ?? DEFAULT_SEARCH_LIMIT,
@@ -105,7 +104,7 @@ export function exploreGraph(
 
   const exactGroups = options.seedId
     ? null
-    : resolveExactExploreSeedGroups(storage, query, searchLimit);
+    : resolveExactExploreSeedGroups(graph, query, searchLimit);
   if (exactGroups && exactGroups.length > 1) {
     return {
       ...emptyResult(query, "no_context"),
@@ -124,7 +123,7 @@ export function exploreGraph(
   }
   const rootIds =
     exactGroups?.[0]?.ids ??
-    resolveExploreSeeds(storage, query, options.seedId, searchLimit);
+    resolveExploreSeeds(graph, query, options.seedId, searchLimit);
   if (rootIds.length === 0) {
     return emptyResult(query, "no_seeds");
   }
@@ -151,7 +150,6 @@ export function exploreGraph(
   const moduleEntrypoints = collectModuleEntrypointNodes(
     candidates,
     graph,
-    storage,
     rootIds,
     query,
     16,
@@ -160,7 +158,6 @@ export function exploreGraph(
     candidates,
     subgraph.nodes,
     graph,
-    storage,
     nodeScores,
     rootIds,
     query,
@@ -210,12 +207,7 @@ export function exploreGraph(
   );
   const dynamicBoundariesTruncated =
     dynamicBoundaryRows.length > dynamicBoundaries.length;
-  const blastRadius = collectBlastRadius(
-    graph,
-    storage,
-    rootIds,
-    DEFAULT_BLAST_LIMIT,
-  );
+  const blastRadius = collectBlastRadius(graph, rootIds, DEFAULT_BLAST_LIMIT);
   const impactAssembly = includeBlastRadiusNodes(
     nodes,
     blastRadius,
@@ -281,7 +273,6 @@ export function exploreGraph(
     impactCandidates.addFileEvidence(fileId, "dynamic_boundary");
   const changeSurface = collectChangeSurface({
     graph,
-    storage,
     rootIds,
     nodes,
     nodeScores,
@@ -292,7 +283,6 @@ export function exploreGraph(
     contextNodes,
     changeSurface,
     graph,
-    storage,
   );
   for (const node of assemblyNodes) impactCandidates.addNode(node);
   const assemblyRootFileIds = exactGroups?.[0]
@@ -310,7 +300,7 @@ export function exploreGraph(
   }
   const files = assembleExploreFiles({
     query,
-    storage,
+    storage: graph,
     pool: impactCandidates,
     edges,
     callPaths,
@@ -373,7 +363,6 @@ export function exploreGraph(
 function collectModuleEntrypointNodes(
   pool: ExploreCandidatePool,
   graph: GraphReader,
-  storage: GraphReader,
   rootIds: readonly string[],
   query: string,
   limit: number,
@@ -382,7 +371,7 @@ function collectModuleEntrypointNodes(
     return { fileIds: new Set() };
   const rootFiles = new Set(
     rootIds
-      .map((id) => storage.getEntity(id)?.file.id)
+      .map((id) => graph.getEntity(id)?.file.id)
       .filter((id): id is string => Boolean(id)),
   );
   const importerFiles = graph
@@ -395,7 +384,7 @@ function collectModuleEntrypointNodes(
     if (added >= limit || fileIds.size >= 2) break;
     let fileAdded = false;
     for (const edge of graph.outgoingEdges([fileId], ["DEFINES"], 32)) {
-      const entity = storage.getEntity(edge.dst);
+      const entity = graph.getEntity(edge.dst);
       const metadata = entity?.entity.metadata;
       if (!entity || metadata?.kind !== "code" || pool.has(edge.dst)) continue;
       if (isLowValuePath(entity.file.relativePath)) continue;
@@ -499,7 +488,6 @@ function collectDirectCallCollaborators(
   pool: ExploreCandidatePool,
   sourceNodes: readonly ExploreNode[],
   graph: GraphReader,
-  storage: GraphReader,
   nodeScores: Map<string, number>,
   rootIds: readonly string[],
   query: string,
@@ -543,7 +531,7 @@ function collectDirectCallCollaborators(
       Math.min(512, Math.max(64, sources.length * 8)),
     )
     .filter((edge) => !existingIds.has(edge.dst) && edge.confidence >= 0.5)
-    .map((edge) => ({ edge, entity: storage.getEntity(edge.dst) }))
+    .map((edge) => ({ edge, entity: graph.getEntity(edge.dst) }))
     .filter(({ entity }) => {
       const metadata = entity?.entity.metadata;
       if (
@@ -792,7 +780,6 @@ export function exploreSubgraph(
   graph: GraphReader,
   options: ExploreSubgraphOptions,
 ): ExploreSubgraphResult {
-  const storage = graph;
   if (!graph.available) {
     return emptySubgraph(false);
   }
@@ -803,7 +790,7 @@ export function exploreSubgraph(
   );
   const maxNodes = clampInt(options.maxNodes ?? DEFAULT_MAX_NODES, 16, 2_000);
   const rootIds = [...new Set(options.seedIds)]
-    .filter((id) => Boolean(storage.getEntity(id)))
+    .filter((id) => Boolean(graph.getEntity(id)))
     .slice(0, maxNodes);
   if (rootIds.length === 0) {
     return emptySubgraph(true);
@@ -825,7 +812,6 @@ export function exploreSubgraph(
   );
   const hierarchyGlueIds = expandHierarchy(
     graph,
-    storage,
     selected,
     rootIds,
     hierarchyBudget,
@@ -843,13 +829,12 @@ export function exploreSubgraph(
   // Select a bounded, structurally representative member set first, then let
   // the ordinary traversal expand from the type without CONTAINS edges.
   const representativeSelectionEnabled = shouldSelectRepresentativeMembers(
-    storage,
+    graph,
     rootIds,
   );
   const representativeMemberIds = representativeSelectionEnabled
     ? glueRepresentativeMembers(
         graph,
-        storage,
         selected,
         rootIds,
         Math.max(8, Math.min(32, Math.floor(maxNodes * 0.3))),
@@ -857,14 +842,12 @@ export function exploreSubgraph(
     : [];
   const representativeDependencies = glueRepresentativeMemberDependencies(
     graph,
-    storage,
     selected,
     representativeMemberIds,
     Math.max(8, Math.min(24, Math.floor(maxNodes * 0.12))),
   );
   const componentImports = collectComponentImportEvidence(
     graph,
-    storage,
     rootIds,
     Math.max(4, Math.min(24, Math.floor(maxNodes * 0.2))),
     COMPONENT_IMPORT_POLICY.rankingWeight,
@@ -878,7 +861,7 @@ export function exploreSubgraph(
   for (const rootId of [...selected.keys()].filter(
     (id) => selected.get(id)?.isRoot,
   )) {
-    const rootMetadata = storage.getEntity(rootId)?.entity.metadata;
+    const rootMetadata = graph.getEntity(rootId)?.entity.metadata;
     const rootKind =
       rootMetadata?.kind === "code" ? rootMetadata.symbolType : undefined;
     // Hierarchy has its own file-diverse budget above. Feeding INHERITS into
@@ -921,10 +904,9 @@ export function exploreSubgraph(
     }
   }
 
-  glueCallNeighbors(graph, storage, selected, rootIds, DEFAULT_GLUE_LIMIT);
+  glueCallNeighbors(graph, selected, rootIds, DEFAULT_GLUE_LIMIT);
   const impactGlueIds = glueImpactNeighbors(
     graph,
-    storage,
     selected,
     rootIds,
     DEFAULT_GLUE_LIMIT,
@@ -962,7 +944,7 @@ export function exploreSubgraph(
 
   const nodes: ExploreNode[] = [];
   for (const scored of selected.values()) {
-    const entity = storage.getEntity(scored.id);
+    const entity = graph.getEntity(scored.id);
     const metaKind =
       entity?.entity.metadata?.kind === "code"
         ? entity.entity.metadata.symbolType
@@ -1024,14 +1006,13 @@ function shouldSelectRepresentativeMembers(
 
 function glueRepresentativeMembers(
   graph: GraphReader,
-  storage: GraphReader,
   selected: Map<string, ScoredNode>,
   rootIds: readonly string[],
   limit: number,
 ): string[] {
   const addedIds: string[] = [];
   const typeRoots = rootIds.filter((id) => {
-    const metadata = storage.getEntity(id)?.entity.metadata;
+    const metadata = graph.getEntity(id)?.entity.metadata;
     return (
       metadata?.kind === "code" && isTypeishKind(metadata.symbolType ?? "")
     );
@@ -1046,7 +1027,7 @@ function glueRepresentativeMembers(
     const edgeLimit = Math.min(4_096, Math.max(128, members.length * 8));
     const scores = new Map(
       members.map((member) => {
-        const range = storage.getEntity(member.id)?.entity.range;
+        const range = graph.getEntity(member.id)?.entity.range;
         const lines =
           range?.kind === "text"
             ? Math.max(1, range.endLine - range.startLine + 1)
@@ -1096,7 +1077,7 @@ function glueRepresentativeMembers(
     const representative: typeof ranked = [];
     const memberNames = new Set<string>();
     for (const member of ranked) {
-      const name = symbolName(storage, member.id) ?? member.id;
+      const name = symbolName(graph, member.id) ?? member.id;
       if (memberNames.has(name)) continue;
       memberNames.add(name);
       representative.push(member);
@@ -1120,7 +1101,6 @@ function glueRepresentativeMembers(
 
 function glueRepresentativeMemberDependencies(
   graph: GraphReader,
-  storage: GraphReader,
   selected: Map<string, ScoredNode>,
   memberIds: readonly string[],
   limit: number,
@@ -1138,8 +1118,8 @@ function glueRepresentativeMemberDependencies(
     )
     .filter((edge) => !memberSet.has(edge.dst))
     .sort((left, right) => {
-      const leftPath = storage.getEntity(left.dst)?.file.relativePath ?? "";
-      const rightPath = storage.getEntity(right.dst)?.file.relativePath ?? "";
+      const leftPath = graph.getEntity(left.dst)?.file.relativePath ?? "";
+      const rightPath = graph.getEntity(right.dst)?.file.relativePath ?? "";
       const edgePriority = (kind: GraphEdgeKind): number =>
         kind === "INSTANTIATES" ? 0 : kind === "CALLS" ? 1 : 2;
       return (
@@ -1163,7 +1143,6 @@ function glueRepresentativeMemberDependencies(
 
 function glueImpactNeighbors(
   graph: GraphReader,
-  storage: GraphReader,
   selected: Map<string, ScoredNode>,
   rootIds: readonly string[],
   limit: number,
@@ -1172,7 +1151,7 @@ function glueImpactNeighbors(
   const addedIds: string[] = [];
   for (const rootId of rootIds) {
     if (added >= limit) break;
-    const metadata = storage.getEntity(rootId)?.entity.metadata;
+    const metadata = graph.getEntity(rootId)?.entity.metadata;
     const kind = metadata?.kind === "code" ? metadata.symbolType : undefined;
     if (isTypeishKind(kind ?? "")) {
       // The hierarchy stage already owns INHERITS fan-in. Type roots still
@@ -1186,10 +1165,10 @@ function glueImpactNeighbors(
         ["CALLS", "REFS", "INSTANTIATES"],
         Math.min(256, remaining * 8),
       );
-      const rootPath = storage.getEntity(rootId)?.file.relativePath ?? "";
+      const rootPath = graph.getEntity(rootId)?.file.relativePath ?? "";
       const sources = rankDirectImpactSources(
         edges.map((edge) => ({ id: edge.src })),
-        storage,
+        graph,
         rootPath,
       );
       for (const source of sources) {
@@ -1248,7 +1227,6 @@ function emptySubgraph(available: boolean): ExploreSubgraphResult {
 
 function expandHierarchy(
   graph: GraphReader,
-  storage: GraphReader,
   selected: Map<string, ScoredNode>,
   rootIds: readonly string[],
   budget: number,
@@ -1271,13 +1249,7 @@ function expandHierarchy(
       }
     }
     const derivedLimit = Math.min(10, remaining);
-    const derived = hierarchySample(
-      graph,
-      storage,
-      rootId,
-      "derived",
-      derivedLimit,
-    );
+    const derived = hierarchySample(graph, rootId, "derived", derivedLimit);
     for (const ref of derived) {
       if (absorb(selected, ref, false, 1)) {
         remaining -= 1;
@@ -1300,7 +1272,6 @@ function expandHierarchy(
     }
     const siblings = hierarchySample(
       graph,
-      storage,
       baseId,
       "derived",
       Math.min(12, remaining),
@@ -1320,7 +1291,6 @@ function expandHierarchy(
 
 function hierarchySample(
   graph: ExploreHierarchyReader,
-  storage: GraphReader,
   id: string,
   direction: "bases" | "derived",
   limit: number,
@@ -1333,12 +1303,12 @@ function hierarchySample(
       Math.min(512, Math.max(64, limit * 16)),
     );
     const production = wider.filter((ref) => {
-      const path = storage.getEntity(ref.id)?.file.relativePath;
+      const path = graph.getEntity(ref.id)?.file.relativePath;
       return path ? !isLowValuePath(path) : true;
     });
     return diverseRefsByFile(
       production.length > 0 ? production : wider,
-      storage,
+      graph,
       limit,
     );
   }
@@ -1346,7 +1316,7 @@ function hierarchySample(
   // bounded wider window, then round-robin by file in the application layer.
   return diverseRefsByFile(
     graph.hierarchy(id, direction, Math.min(512, limit * 32)),
-    storage,
+    graph,
     limit,
   );
 }
@@ -1390,7 +1360,6 @@ function diverseRefsByFile(
 
 function glueCallNeighbors(
   graph: GraphReader,
-  storage: GraphReader,
   selected: Map<string, ScoredNode>,
   rootIds: readonly string[],
   limit: number,
@@ -1416,7 +1385,7 @@ function glueCallNeighbors(
     // itself. Preserve those two-hop callers as candidates so RWR can decide
     // whether they belong in the final context. This does not force the caller
     // file into the rendered result.
-    const entity = storage.getEntity(rootId);
+    const entity = graph.getEntity(rootId);
     const kind =
       entity?.entity.metadata?.kind === "code"
         ? entity.entity.metadata.symbolType
@@ -1440,25 +1409,25 @@ function glueCallNeighbors(
     // contract, so surface those sources as ordinary RWR candidates.
     const contractNames = new Set(
       members
-        .map((member) => symbolName(storage, member.id))
+        .map((member) => symbolName(graph, member.id))
         .filter((name): name is string => Boolean(name)),
     );
     const dispatchTargetIds = new Set(memberIds);
     const derivedTypes = diverseRefsByFile(
       graph.hierarchy(rootId, "derived", 96),
-      storage,
+      graph,
       32,
     );
     for (const derived of derivedTypes) {
       for (const member of graph.members(derived.id)) {
-        if (contractNames.has(symbolName(storage, member.id) ?? ""))
+        if (contractNames.has(symbolName(graph, member.id) ?? ""))
           dispatchTargetIds.add(member.id);
       }
     }
     const rootPath = entity?.file.relativePath ?? "";
     const dynamicSources = selectRelevantDynamicSources(
       graph.dynamicBoundarySources([...dispatchTargetIds], 256),
-      storage,
+      graph,
       rootPath,
       Math.min(8, Math.max(1, limit - added)),
       2,

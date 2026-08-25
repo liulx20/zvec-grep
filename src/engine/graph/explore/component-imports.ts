@@ -18,7 +18,6 @@ export type ComponentImportEvidence = {
  */
 export function collectComponentImportEvidence(
   graph: GraphReader,
-  storage: GraphReader,
   rootIds: readonly string[],
   limit: number,
   weight: number,
@@ -26,7 +25,7 @@ export function collectComponentImportEvidence(
   if (!graph.importedSymbols || limit <= 0)
     return { nodeIds: [], rankingLinks: [] };
   const componentRoots = rootIds.filter((id) => {
-    const metadata = storage.getEntity(id)?.entity.metadata;
+    const metadata = graph.getEntity(id)?.entity.metadata;
     return metadata?.kind === "code" && metadata.symbolType === "component";
   });
   if (componentRoots.length === 0) return { nodeIds: [], rankingLinks: [] };
@@ -35,10 +34,10 @@ export function collectComponentImportEvidence(
   const rankingLinks: ExploreRankingLink[] = [];
   const perRootLimit = Math.max(2, Math.ceil(limit / componentRoots.length));
   for (const rootId of componentRoots) {
-    const fileId = storage.getEntity(rootId)?.file.id;
+    const fileId = graph.getEntity(rootId)?.file.id;
     if (!fileId) continue;
     for (const dependency of graph.importedSymbols([fileId], perRootLimit)) {
-      if (!storage.getEntity(dependency.id)) continue;
+      if (!graph.getEntity(dependency.id)) continue;
       nodeIds.push(dependency.id);
       rankingLinks.push({ src: rootId, dst: dependency.id, weight });
       if (rankingLinks.length >= limit) return { nodeIds, rankingLinks };
