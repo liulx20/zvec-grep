@@ -17,7 +17,6 @@ import {
   collectBlastRadius,
   collectChangeSurface,
   fileIdsForRoots,
-  includeBlastRadiusNodes,
   includeChangeSurfaceNodes,
 } from "./impact.js";
 import {
@@ -202,15 +201,8 @@ export function exploreGraph(
   const dynamicBoundariesTruncated =
     dynamicBoundaryRows.length > dynamicBoundaries.length;
   const blastRadius = collectBlastRadius(graph, rootIds, DEFAULT_BLAST_LIMIT);
-  const impactNodes = includeBlastRadiusNodes(
-    nodes,
-    blastRadius,
-    exactGroups?.[0]
-      ? Math.min(2, Math.max(0, maxFiles - 1))
-      : Math.min(2, Math.max(1, maxFiles - 1)),
-  );
   const impactCandidates = new ExploreCandidatePool(
-    impactNodes,
+    nodes,
     nodeScores,
     candidates.fileEvidence,
   );
