@@ -210,7 +210,13 @@ export function exploreGraph(
     nodeScores,
     candidates.fileEvidence,
   );
-  includePersistedCounterparts(impactCandidates, graph, nodeScores, 32);
+  includePersistedCounterparts(
+    impactCandidates,
+    graph,
+    nodeScores,
+    rootIds,
+    32,
+  );
   const contextNodes = impactCandidates.nodes;
   if (contextNodes.length !== nodes.length) {
     const impactEdges = graph.edges(
@@ -565,17 +571,40 @@ function includePersistedCounterparts(
   pool: ExploreCandidatePool,
   graph: GraphReader,
   nodeScores: ReadonlyMap<string, number>,
+  rootIds: readonly string[],
   limit: number,
 ): void {
   if (limit <= 0) return;
-  const ids = pool.nodes.map((node) => node.id);
-  const edges = [
+  // Resolve the declaration/implementation unit for the requested root before
+  // considering counterparts of peripheral traversal nodes. A large type can
+  // expose hundreds of members, so querying the entire pool first allowed
+  // unrelated declaration groups to consume the bounded edge window.
+  const rootScopeIds = new Set(rootIds);
+  for (const edge of graph.outgoingEdges(
+    rootIds,
+    ["CONTAINS"],
+    Math.max(64, limit * 8),
+  )) {
+    rootScopeIds.add(edge.dst);
+  }
+  const poolIds = pool.nodes.map((node) => node.id);
+  const queryCounterparts = (ids: readonly string[]) => [
     ...graph.outgoingEdges(ids, ["COUNTERPART"], limit * 4),
     ...graph.incomingEdges(ids, ["COUNTERPART"], limit * 4),
+  ];
+  const rootEdges = queryCounterparts([...rootScopeIds]);
+  const seen = new Set(rootEdges.map((edge) => `${edge.src}\0${edge.dst}`));
+  const edges = [
+    ...rootEdges,
+    ...queryCounterparts(poolIds).filter(
+      (edge) => !seen.has(`${edge.src}\0${edge.dst}`),
+    ),
   ]
     .filter((edge) => edge.rel === "counterpart")
     .sort(
       (left, right) =>
+        Number(rootScopeIds.has(right.src) || rootScopeIds.has(right.dst)) -
+          Number(rootScopeIds.has(left.src) || rootScopeIds.has(left.dst)) ||
         Math.max(
           nodeScores.get(right.src) ?? 0,
           nodeScores.get(right.dst) ?? 0,
@@ -589,10 +618,21 @@ function includePersistedCounterparts(
     );
   let added = 0;
   for (const edge of edges) {
-    const counterpartId = pool.has(edge.src) ? edge.dst : edge.src;
+    const srcInRootScope = rootScopeIds.has(edge.src);
+    const dstInRootScope = rootScopeIds.has(edge.dst);
+    const counterpartId =
+      srcInRootScope && !dstInRootScope
+        ? edge.dst
+        : dstInRootScope && !srcInRootScope
+          ? edge.src
+          : pool.has(edge.src)
+            ? edge.dst
+            : edge.src;
     const entity = graph.getEntity(counterpartId);
     if (!entity) continue;
     pool.addFileEvidence(entity.file.id, "counterpart");
+    if (srcInRootScope || dstInRootScope)
+      pool.addFileEvidence(entity.file.id, "root_counterpart");
     const sourceScore = Math.max(
       nodeScores.get(edge.src) ?? 0,
       nodeScores.get(edge.dst) ?? 0,

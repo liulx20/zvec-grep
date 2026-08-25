@@ -110,6 +110,9 @@ export function assembleExploreFiles(input: {
   for (const fileId of hierarchyFileIds)
     input.pool.addFileEvidence(fileId, "hierarchy");
   const counterpartFileIds = new Set(input.pool.fileIds("counterpart"));
+  const rootCounterpartFileIds = new Set(
+    input.pool.fileIds("root_counterpart"),
+  );
   const changeSurfaceFileIds = new Set(input.pool.fileIds("change_surface"));
   const alignedChangeSurfaceFileIds = queryAlignedFileIds(
     byFile,
@@ -154,9 +157,15 @@ export function assembleExploreFiles(input: {
     if (input.rootFileIds.has(fileId)) central.add(fileId);
   }
   const coCentral =
-    rankedFileIds.find((fileId) => counterpartFileIds.has(fileId)) ??
-    rankedFileIds.find((fileId) =>
-      fileEvidence.get(fileId)?.has("integration"),
+    rankedFileIds.find(
+      (fileId) => !central.has(fileId) && rootCounterpartFileIds.has(fileId),
+    ) ??
+    rankedFileIds.find(
+      (fileId) => !central.has(fileId) && counterpartFileIds.has(fileId),
+    ) ??
+    rankedFileIds.find(
+      (fileId) =>
+        !central.has(fileId) && fileEvidence.get(fileId)?.has("integration"),
     );
   if (coCentral && central.size < 2) central.add(coCentral);
 
@@ -711,7 +720,7 @@ function renderFileText(
     // chosen cluster may still be truncated, so later relevant methods can use
     // the remaining budget instead of being silently skipped.
     const fairShare =
-      ranked.length === 1
+      cluster.maxImportance >= 10 || ranked.length === 1
         ? remaining
         : Math.min(remaining, Math.max(700, Math.floor(budget * 0.38)));
     const block = renderCluster(cluster, fairShare, true, sourceLines);

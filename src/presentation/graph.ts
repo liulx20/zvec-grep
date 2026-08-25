@@ -17,6 +17,7 @@ const DISPLAY_RELATIONSHIP_KINDS = [
 ] as const;
 const MAX_RELATIONSHIPS_PER_KIND = 6;
 const MAX_RELATIONSHIP_CALL_DEPTH = 6;
+const MAX_DYNAMIC_BOUNDARIES = 8;
 const MAX_DYNAMIC_CANDIDATES = 5;
 
 export function printExploreResult(result: ExploreOutput): void {
@@ -90,11 +91,17 @@ function exploreLines(result: ExploreOutput): string[] {
   }
 
   if ((result.dynamicBoundaries?.length ?? 0) > 0) {
+    const displayedBoundaries = result.dynamicBoundaries.slice(
+      0,
+      MAX_DYNAMIC_BOUNDARIES,
+    );
+    const hiddenBoundaries =
+      result.dynamicBoundaries.length - displayedBoundaries.length;
     lines.push(
       "",
-      `dynamic boundaries:${result.dynamicBoundariesTruncated ? " (truncated)" : ""}`,
+      `dynamic boundaries:${result.dynamicBoundariesTruncated || hiddenBoundaries > 0 ? " (truncated)" : ""}`,
     );
-    for (const boundary of result.dynamicBoundaries ?? []) {
+    for (const boundary of displayedBoundaries) {
       const occurrences = boundary.occurrenceCount ?? 1;
       const details = boundary.candidateDetails ?? [];
       lines.push(
@@ -124,6 +131,9 @@ function exploreLines(result: ExploreOutput): string[] {
           `  - ... ${hidden > 0 ? `${hidden} more` : "more"}${boundary.candidatesTruncated ? " (truncated)" : ""}`,
         );
       }
+    }
+    if (hiddenBoundaries > 0) {
+      lines.push(`- ... ${hiddenBoundaries} more dynamic boundaries`);
     }
   }
 

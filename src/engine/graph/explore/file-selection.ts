@@ -1,5 +1,6 @@
 export type ExploreFileEvidenceKind =
   | "root"
+  | "root_counterpart"
   | "counterpart"
   | "collaborator"
   | "aligned_change_surface"
@@ -27,6 +28,7 @@ export type ExploreFileSelectionInput = {
 
 const EVIDENCE_WEIGHTS: Readonly<Record<ExploreFileEvidenceKind, number>> = {
   root: 4,
+  root_counterpart: 2,
   counterpart: 1.5,
   collaborator: 1.35,
   aligned_change_surface: 1.25,
@@ -86,7 +88,8 @@ export function selectExploreFiles(
   take(
     candidates.find(
       (candidate) =>
-        candidate.evidence.has("counterpart") &&
+        (candidate.evidence.has("root_counterpart") ||
+          candidate.evidence.has("counterpart")) &&
         !selectedIds.has(candidate.fileId),
     ),
   );
