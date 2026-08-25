@@ -7,11 +7,9 @@ import type { SqliteGraphDatabase } from "./database.js";
 
 type CounterpartCandidate = {
   left_id: string;
-  left_file_id: string;
   left_path: string;
   left_qualified_name: string | null;
   right_id: string;
-  right_file_id: string;
   right_path: string;
   right_qualified_name: string | null;
   directly_imported: number;
@@ -21,6 +19,8 @@ type CounterpartMatch = {
   confidence: number;
   evidence: "declaration_definition" | "direct_import";
 };
+
+type CounterpartFile = { id: string; relative_path: string };
 
 /** Projects query-independent declaration/definition identity into graph edges. */
 export class SqliteCounterpartProjector {
@@ -49,42 +49,79 @@ export class SqliteCounterpartProjector {
           .run(dirtyJson, dirtyJson);
       }
 
+      const fileStems = this.database
+        .all<CounterpartFile>(
+          `SELECT id,relative_path FROM files
+           WHERE format IN ('c','cpp') AND relative_path IS NOT NULL`,
+        )
+        .map((file) => ({
+          id: file.id,
+          stem: fileStem(file.relative_path),
+          role: isHeaderPath(file.relative_path)
+            ? "header"
+            : isSourcePath(file.relative_path)
+              ? "source"
+              : null,
+        }));
       const candidates = this.database.all<CounterpartCandidate>(
-        `SELECT left_symbol.id AS left_id,
-                left_symbol.file_id AS left_file_id,
+        `WITH counterpart_files AS MATERIALIZED (
+           SELECT json_extract(value,'$.id') AS file_id,
+                  json_extract(value,'$.stem') AS stem,
+                  json_extract(value,'$.role') AS role
+             FROM json_each(?)
+            WHERE json_extract(value,'$.role') IS NOT NULL
+         ), raw_pairs AS (
+           SELECT left_file.file_id AS left_file_id,
+                  right_file.file_id AS right_file_id,
+                  0 AS directly_imported
+             FROM counterpart_files left_file
+             JOIN counterpart_files right_file
+               ON right_file.file_id>left_file.file_id
+              AND right_file.stem=left_file.stem
+              AND right_file.role<>left_file.role
+            WHERE ?=1 OR left_file.file_id IN (SELECT value FROM json_each(?))
+                      OR right_file.file_id IN (SELECT value FROM json_each(?))
+           UNION ALL
+           SELECT import_edge.src_id,import_edge.dst_id,1
+             FROM edges import_edge
+            WHERE import_edge.kind='IMPORTS'
+              AND import_edge.src_is_file=1
+              AND import_edge.dst_is_file=1
+              AND import_edge.src_id IN (SELECT file_id FROM counterpart_files)
+              AND import_edge.dst_id IN (SELECT file_id FROM counterpart_files)
+              AND (?=1 OR import_edge.src_id IN (SELECT value FROM json_each(?))
+                       OR import_edge.dst_id IN (SELECT value FROM json_each(?)))
+         ), file_pairs AS (
+           SELECT min(left_file_id,right_file_id) AS left_file_id,
+                  max(left_file_id,right_file_id) AS right_file_id,
+                  max(directly_imported) AS directly_imported
+             FROM raw_pairs
+            GROUP BY min(left_file_id,right_file_id),
+                     max(left_file_id,right_file_id)
+         )
+         SELECT min(left_symbol.id,right_symbol.id) AS left_id,
                 left_file.relative_path AS left_path,
                 left_symbol.qualified_name AS left_qualified_name,
-                right_symbol.id AS right_id,
-                right_symbol.file_id AS right_file_id,
+                max(left_symbol.id,right_symbol.id) AS right_id,
                 right_file.relative_path AS right_path,
                 right_symbol.qualified_name AS right_qualified_name,
-                EXISTS(
-                  SELECT 1 FROM edges import_edge
-                   WHERE import_edge.kind='IMPORTS'
-                     AND import_edge.src_is_file=1
-                     AND import_edge.dst_is_file=1
-                     AND ((import_edge.src_id=left_symbol.file_id
-                           AND import_edge.dst_id=right_symbol.file_id)
-                       OR (import_edge.src_id=right_symbol.file_id
-                           AND import_edge.dst_id=left_symbol.file_id))
-                ) AS directly_imported
-           FROM symbols left_symbol
+                file_pairs.directly_imported
+           FROM file_pairs
+           JOIN symbols left_symbol ON left_symbol.file_id=file_pairs.left_file_id
            JOIN files left_file ON left_file.id=left_symbol.file_id
            JOIN symbols right_symbol
-             ON right_symbol.id>left_symbol.id
-            AND right_symbol.file_id<>left_symbol.file_id
+             ON right_symbol.file_id=file_pairs.right_file_id
             AND right_symbol.name=left_symbol.name
             AND right_symbol.kind=left_symbol.kind
+            AND right_symbol.qualified_name=left_symbol.qualified_name
             AND (left_symbol.arity IS NULL OR right_symbol.arity IS NULL
                  OR left_symbol.arity=right_symbol.arity)
            JOIN files right_file ON right_file.id=right_symbol.file_id
-          WHERE left_symbol.name IS NOT NULL
-            AND left_file.relative_path IS NOT NULL
-            AND right_file.relative_path IS NOT NULL
-            AND left_file.format IN ('c','cpp')
-            AND right_file.format IN ('c','cpp')
-            AND (?=1 OR left_symbol.file_id IN (SELECT value FROM json_each(?))
-                     OR right_symbol.file_id IN (SELECT value FROM json_each(?)))`,
+          WHERE left_symbol.qualified_name IS NOT NULL`,
+        JSON.stringify(fileStems),
+        rebuildAll ? 1 : 0,
+        dirtyJson,
+        dirtyJson,
         rebuildAll ? 1 : 0,
         dirtyJson,
         dirtyJson,
@@ -97,10 +134,11 @@ export class SqliteCounterpartProjector {
                   'heuristic',?,?)`,
       );
       for (const candidate of candidates) {
+        const key = `${candidate.left_id}:${candidate.right_id}`;
         const match = counterpartMatch(candidate);
         if (!match) continue;
         insert.run(
-          `counterpart:${candidate.left_id}:${candidate.right_id}`,
+          `counterpart:${key}`,
           candidate.left_id,
           candidate.right_id,
           match.confidence,
