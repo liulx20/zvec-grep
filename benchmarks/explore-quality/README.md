@@ -21,9 +21,10 @@ TypeScript, TSX, Python, Java, Go, Rust, Vue, and Svelte. It covers local and
 cross-file calls, imports and aliases, inheritance, receiver resolution,
 dynamic boundaries, negative precision, and component wrappers.
 
-The six Explore fixtures separately check root recall, call-path recall, file
-precision, and selected-source coverage. Together, the two suites contain 531
-cases and run in the normal unit-test job.
+The six Explore fixtures separately report root and call-path recall, relevant
+file recall and precision, query-concept and function-body coverage, duplicate
+source ratio, output characters, and latency. Together, the two suites contain
+531 cases and run in the normal unit-test job.
 
 These are regression floors, not claims of compiler-complete static analysis.
 When changing extraction or ranking policy, add or update a language-neutral

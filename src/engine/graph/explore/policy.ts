@@ -65,7 +65,6 @@ export const EXPLORE_POLICY = {
   edgeBudget: { minimum: 128, maximum: 20_000, perNode: 8 },
   dynamicBoundaryBudget: { maximum: 16, fetchMaximum: 256, fetchRatio: 8 },
   componentImport: { protectedNodes: 8, rankingWeight: 0.25 },
-  dynamicBoundaryFiles: { maximum: 2, relevanceFloor: 0.6 },
   traverseEdgeKinds: [
     "CALLS",
     "REFS",

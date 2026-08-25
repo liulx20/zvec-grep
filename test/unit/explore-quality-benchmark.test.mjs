@@ -8,8 +8,12 @@ test("cross-language Explore quality benchmark stays green", () => {
   assert.equal(report.summary.cases, 6);
   assert.equal(report.summary.rootRecall, 1);
   assert.equal(report.summary.pathRecall, 1);
+  assert.equal(report.summary.fileRecall, 1);
   assert.equal(report.summary.filePrecision, 1);
+  assert.equal(report.summary.conceptCoverage, 1);
+  assert.equal(report.summary.bodyCoverage, 1);
   assert.equal(report.summary.sourceCoverage, 1);
+  assert.equal(report.summary.redundancy, 0);
 });
 
 test("every supported language and component wrapper meets its quality floor", async () => {

@@ -1,5 +1,8 @@
-export type ExploreFileEvidenceKind =
+import type { ExploreIntent } from "./intent.js";
+
+export type ExploreFileRoleEvidenceKind =
   | "root"
+  | "semantic_seed"
   | "root_counterpart"
   | "counterpart"
   | "collaborator"
@@ -11,7 +14,11 @@ export type ExploreFileEvidenceKind =
   | "change_surface"
   | "integration"
   | "dynamic_boundary"
+  | "low_value_path"
   | "call_path";
+
+export type ExploreFileEvidenceKind =
+  ExploreFileRoleEvidenceKind | `concept:${string}`;
 
 export type ExploreFileCandidate = {
   fileId: string;
@@ -23,28 +30,47 @@ export type ExploreFileCandidate = {
 export type ExploreFileSelectionInput = {
   ordered: readonly [string, number][];
   maxFiles: number;
+  intent: ExploreIntent;
   evidence: ReadonlyMap<string, ReadonlyMap<ExploreFileEvidenceKind, number>>;
 };
 
-const EVIDENCE_WEIGHTS: Readonly<Record<ExploreFileEvidenceKind, number>> = {
+const EXACT_WEIGHTS: Readonly<Record<ExploreFileRoleEvidenceKind, number>> = {
   root: 4,
-  root_counterpart: 2,
-  counterpart: 1.5,
-  collaborator: 1.35,
+  semantic_seed: 0.5,
+  root_counterpart: 2.2,
+  counterpart: 1.4,
+  collaborator: 0.8,
+  aligned_change_surface: 0.8,
+  entrypoint: 0.7,
+  hierarchy: 0.65,
+  query_alignment: 0.8,
+  structural_change_surface: 0.55,
+  change_surface: 0.4,
+  integration: 0.8,
+  dynamic_boundary: 0.6,
+  low_value_path: -2.5,
+  call_path: 1.1,
+};
+
+const CONCEPT_WEIGHTS: Readonly<Record<ExploreFileRoleEvidenceKind, number>> = {
+  ...EXACT_WEIGHTS,
+  root: 2,
+  semantic_seed: 1.8,
+  root_counterpart: 1.4,
+  collaborator: 1.25,
   aligned_change_surface: 1.25,
-  entrypoint: 1.2,
-  hierarchy: 0.9,
-  query_alignment: 0.85,
-  structural_change_surface: 0.8,
-  change_surface: 0.65,
-  integration: 0.75,
-  dynamic_boundary: 0.75,
-  call_path: 0.45,
+  entrypoint: 1.1,
+  hierarchy: 0.8,
+  query_alignment: 1.3,
+  integration: 1,
+  low_value_path: -3,
+  call_path: 0.65,
 };
 
 const SCALED_EVIDENCE = new Set<ExploreFileEvidenceKind>([
   "aligned_change_surface",
   "integration",
+  "query_alignment",
 ]);
 
 /**
@@ -57,6 +83,7 @@ export function selectExploreFiles(
 ): ExploreFileCandidate[] {
   if (input.maxFiles <= 0 || input.ordered.length === 0) return [];
   const strongestBase = Math.max(...input.ordered.map(([, score]) => score), 0);
+  const weights = evidenceWeights(input.intent);
   const maxima = evidenceMaxima(input.evidence);
   const candidates = input.ordered.map(([fileId, rawBaseScore]) => {
     const evidence = normalizedEvidence(input.evidence.get(fileId), maxima);
@@ -65,7 +92,8 @@ export function selectExploreFiles(
     const score =
       baseScore +
       [...evidence].reduce(
-        (total, [kind, strength]) => total + EVIDENCE_WEIGHTS[kind] * strength,
+        (total, [kind, strength]) =>
+          total + evidenceWeight(weights, kind, input.intent) * strength,
         0,
       );
     return { fileId, baseScore, score, evidence };
@@ -88,13 +116,75 @@ export function selectExploreFiles(
   take(
     candidates.find(
       (candidate) =>
-        (candidate.evidence.has("root_counterpart") ||
-          candidate.evidence.has("counterpart")) &&
+        candidate.evidence.has("root_counterpart") &&
         !selectedIds.has(candidate.fileId),
     ),
   );
-  for (const candidate of candidates) take(candidate);
+  while (selected.length < input.maxFiles) {
+    const next = candidates
+      .filter((candidate) => !selectedIds.has(candidate.fileId))
+      .sort((left, right) => compareMarginal(left, right, selected))[0];
+    if (!next || marginalGain(next, selected) <= 0) break;
+    take(next);
+  }
   return selected;
+}
+
+function evidenceWeights(
+  intent: ExploreIntent,
+): Readonly<Record<ExploreFileRoleEvidenceKind, number>> {
+  if (intent === "concept") return CONCEPT_WEIGHTS;
+  return EXACT_WEIGHTS;
+}
+
+function evidenceWeight(
+  weights: Readonly<Record<ExploreFileRoleEvidenceKind, number>>,
+  kind: ExploreFileEvidenceKind,
+  intent: ExploreIntent,
+): number {
+  if (kind.startsWith("concept:")) return intent === "concept" ? 0.35 : 0.2;
+  return weights[kind as ExploreFileRoleEvidenceKind];
+}
+
+function compareMarginal(
+  left: ExploreFileCandidate,
+  right: ExploreFileCandidate,
+  selected: readonly ExploreFileCandidate[],
+): number {
+  return (
+    marginalGain(right, selected) - marginalGain(left, selected) ||
+    compareCandidates(left, right)
+  );
+}
+
+function marginalGain(
+  candidate: ExploreFileCandidate,
+  selected: readonly ExploreFileCandidate[],
+): number {
+  if (selected.length === 0) return candidate.score;
+  const covered = new Set(
+    selected.flatMap((item) => [...item.evidence.keys()]),
+  );
+  const roles = [...candidate.evidence.keys()];
+  const novelty = roles.filter((role) => !covered.has(role)).length;
+  const redundancy = Math.max(
+    ...selected.map((item) =>
+      evidenceOverlap(candidate.evidence, item.evidence),
+    ),
+    0,
+  );
+  return candidate.score + novelty * 0.18 - redundancy * 0.2;
+}
+
+function evidenceOverlap(
+  left: ReadonlyMap<ExploreFileEvidenceKind, number>,
+  right: ReadonlyMap<ExploreFileEvidenceKind, number>,
+): number {
+  const union = new Set([...left.keys(), ...right.keys()]);
+  if (union.size === 0) return 0;
+  let intersection = 0;
+  for (const role of left.keys()) if (right.has(role)) intersection += 1;
+  return intersection / union.size;
 }
 
 function evidenceMaxima(

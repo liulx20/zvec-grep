@@ -111,10 +111,25 @@ export function runExploreQualityBenchmark() {
     (sum, report) => ({
       roots: sum.roots + report.rootRecall,
       paths: sum.paths + report.pathRecall,
-      files: sum.files + report.filePrecision,
-      source: sum.source + report.sourceCoverage,
+      fileRecall: sum.fileRecall + report.fileRecall,
+      filePrecision: sum.filePrecision + report.filePrecision,
+      concepts: sum.concepts + report.conceptCoverage,
+      body: sum.body + report.bodyCoverage,
+      redundancy: sum.redundancy + report.redundancy,
+      chars: sum.chars + report.chars,
+      elapsedMs: sum.elapsedMs + report.elapsedMs,
     }),
-    { roots: 0, paths: 0, files: 0, source: 0 },
+    {
+      roots: 0,
+      paths: 0,
+      fileRecall: 0,
+      filePrecision: 0,
+      concepts: 0,
+      body: 0,
+      redundancy: 0,
+      chars: 0,
+      elapsedMs: 0,
+    },
   );
   const divisor = Math.max(1, reports.length);
   return {
@@ -122,8 +137,14 @@ export function runExploreQualityBenchmark() {
       cases: reports.length,
       rootRecall: totals.roots / divisor,
       pathRecall: totals.paths / divisor,
-      filePrecision: totals.files / divisor,
-      sourceCoverage: totals.source / divisor,
+      fileRecall: totals.fileRecall / divisor,
+      filePrecision: totals.filePrecision / divisor,
+      conceptCoverage: totals.concepts / divisor,
+      bodyCoverage: totals.body / divisor,
+      sourceCoverage: totals.body / divisor,
+      redundancy: totals.redundancy / divisor,
+      averageChars: totals.chars / divisor,
+      averageElapsedMs: totals.elapsedMs / divisor,
     },
     cases: reports,
   };
@@ -140,11 +161,11 @@ if (
     console.log("Explore quality benchmark");
     for (const item of report.cases) {
       console.log(
-        `${item.language.padEnd(10)} roots=${percent(item.rootRecall)} paths=${percent(item.pathRecall)} files=${percent(item.filePrecision)} source=${percent(item.sourceCoverage)}`,
+        `${item.language.padEnd(10)} roots=${percent(item.rootRecall)} paths=${percent(item.pathRecall)} files=${percent(item.fileRecall)}/${percent(item.filePrecision)} concepts=${percent(item.conceptCoverage)} body=${percent(item.bodyCoverage)} duplicate=${percent(item.redundancy)} chars=${item.chars} time=${item.elapsedMs.toFixed(1)}ms`,
       );
     }
     console.log(
-      `overall    roots=${percent(report.summary.rootRecall)} paths=${percent(report.summary.pathRecall)} files=${percent(report.summary.filePrecision)} source=${percent(report.summary.sourceCoverage)}`,
+      `overall    roots=${percent(report.summary.rootRecall)} paths=${percent(report.summary.pathRecall)} files=${percent(report.summary.fileRecall)}/${percent(report.summary.filePrecision)} concepts=${percent(report.summary.conceptCoverage)} body=${percent(report.summary.bodyCoverage)} duplicate=${percent(report.summary.redundancy)} chars=${report.summary.averageChars.toFixed(0)} time=${report.summary.averageElapsedMs.toFixed(1)}ms`,
     );
   }
 
@@ -166,6 +187,7 @@ function runCase(spec) {
     }
     const storage = fixtureStorage(spec.files);
     Object.assign(graph, storage);
+    const started = performance.now();
     const result = exploreGraph(graph, {
       query: spec.query,
       searchLimit: 8,
@@ -174,6 +196,7 @@ function runCase(spec) {
       maxFiles: 4,
       maxChars: 8_000,
     });
+    const elapsedMs = performance.now() - started;
     const roots = new Set(result.roots.map((root) => root.id));
     const paths = result.callPaths.map((path) => path.nodes.join(" -> "));
     const files = new Set(result.files.map((file) => file.file.relativePath));
@@ -189,6 +212,23 @@ function runCase(spec) {
       (text) => !source.includes(text),
     );
     const forbiddenHits = spec.forbiddenFiles.filter((path) => files.has(path));
+    const expectedFiles = new Set(spec.expectedFiles);
+    const relevantFileHits = [...files].filter((path) =>
+      expectedFiles.has(path),
+    ).length;
+    const concepts = queryConcepts(spec.query);
+    const conceptText = [
+      source,
+      ...result.roots.map((root) => symbolName(root.entity)),
+      ...result.files.flatMap((file) =>
+        file.symbols.map((symbol) => symbol.name ?? ""),
+      ),
+    ]
+      .join(" ")
+      .toLowerCase();
+    const conceptHits = concepts.filter((term) =>
+      conceptText.includes(term),
+    ).length;
     const failures = [];
     if (rootHits !== spec.expectedRoots.length)
       failures.push(`roots=${[...roots].join(",")}`);
@@ -203,8 +243,14 @@ function runCase(spec) {
       query: spec.query,
       rootRecall: ratio(rootHits, spec.expectedRoots.length),
       pathRecall: ratio(pathHits, spec.expectedPaths.length),
-      filePrecision: forbiddenHits.length === 0 ? 1 : 0,
+      fileRecall: ratio(relevantFileHits, expectedFiles.size),
+      filePrecision: precision(relevantFileHits, files.size),
+      conceptCoverage: ratio(conceptHits, concepts.length),
+      bodyCoverage: ratio(sourceHits, spec.expectedSource.length),
       sourceCoverage: ratio(sourceHits, spec.expectedSource.length),
+      redundancy: duplicateLineRatio(result.files.map((file) => file.text)),
+      chars: source.length,
+      elapsedMs,
       ...(process.argv.includes("--debug") ? { source } : {}),
       failures,
     };
@@ -265,6 +311,7 @@ function flowCase(language, path, options) {
             ],
           ]
         : [],
+    expectedFiles: [path],
     forbiddenFiles,
     expectedSource: pathNames.map((name) => sourceNeedle(language, name)),
   };
@@ -494,6 +541,40 @@ function sourceNeedle(language, name) {
 
 function ratio(value, total) {
   return total === 0 ? 1 : value / total;
+}
+
+function precision(value, total) {
+  return total === 0 ? 0 : value / total;
+}
+
+function queryConcepts(query) {
+  return [...new Set(query.toLowerCase().match(/[a-z][a-z0-9_]*/g) ?? [])];
+}
+
+function duplicateLineRatio(texts) {
+  const linesByFile = texts.map(
+    (text) =>
+      new Set(
+        text
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .filter((line) => line.length >= 8),
+      ),
+  );
+  const occurrences = new Map();
+  for (const lines of linesByFile) {
+    for (const line of lines)
+      occurrences.set(line, (occurrences.get(line) ?? 0) + 1);
+  }
+  const total = [...occurrences.values()].reduce(
+    (sum, count) => sum + count,
+    0,
+  );
+  const duplicates = [...occurrences.values()].reduce(
+    (sum, count) => sum + Math.max(0, count - 1),
+    0,
+  );
+  return ratio(duplicates, total);
 }
 
 function percent(value) {

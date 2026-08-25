@@ -10,6 +10,8 @@ import { collectCallPaths } from "./paths.js";
 import { collectComponentImportEvidence } from "./component-imports.js";
 import { ExploreCandidatePool } from "./candidate-pool.js";
 import { assembleExploreFiles } from "./assembly.js";
+import { resolveExploreIntent } from "./intent.js";
+import { collectExploreFileEvidence } from "./file-evidence.js";
 import { semanticPathAffinity } from "../counterpart-policy.js";
 import {
   collectBlastRadius,
@@ -49,7 +51,6 @@ const DEFAULT_BLAST_LIMIT = EXPLORE_POLICY.blastLimit;
 const HIERARCHY_BUDGET_RATIO = EXPLORE_POLICY.hierarchyBudgetRatio;
 const DYNAMIC_BOUNDARY_BUDGET = EXPLORE_POLICY.dynamicBoundaryBudget;
 const COMPONENT_IMPORT_POLICY = EXPLORE_POLICY.componentImport;
-const DYNAMIC_BOUNDARY_FILE_POLICY = EXPLORE_POLICY.dynamicBoundaryFiles;
 const TRAVERSE_EDGE_KINDS: readonly GraphEdgeKind[] =
   EXPLORE_POLICY.traverseEdgeKinds;
 
@@ -127,6 +128,10 @@ export function exploreGraph(
   if (rootIds.length === 0) {
     return emptyResult(query, "no_seeds");
   }
+  const intent = resolveExploreIntent({
+    seedId: options.seedId,
+    hasExactSymbolGroup: Boolean(exactGroups?.[0]),
+  });
 
   // A single exact root in a high-degree graph should not automatically
   // consume the same 200-node budget as a multi-concept query. Conversely,
@@ -147,7 +152,6 @@ export function exploreGraph(
   const { callPaths } = subgraph;
   const nodeScores = new Map(subgraph.nodeScores);
   const candidates = new ExploreCandidatePool(subgraph.nodes, nodeScores);
-  collectModuleEntrypointNodes(candidates, graph, rootIds, query, 16);
   collectDirectCallCollaborators(
     candidates,
     subgraph.nodes,
@@ -263,8 +267,6 @@ export function exploreGraph(
     dynamicBoundaries,
     nodes,
     nodeScores,
-    edges,
-    rootIds,
   );
   const changeSurface = collectChangeSurface({
     graph,
@@ -280,11 +282,13 @@ export function exploreGraph(
     graph,
   );
   for (const node of assemblyNodes) impactCandidates.addNode(node);
-  const assemblyRootFileIds = exactGroups?.[0]
-    ? fileIdsForRoots(nodes, rootIds)
-    : primaryConceptualRootFileIds(nodes, rootIds, query, nodeScores, maxFiles);
-  for (const fileId of assemblyRootFileIds)
-    impactCandidates.addFileEvidence(fileId, "root");
+  const assemblyRootFileIds = fileIdsForRoots(nodes, rootIds);
+  for (const fileId of assemblyRootFileIds) {
+    impactCandidates.addFileEvidence(
+      fileId,
+      intent === "exact_symbol" ? "root" : "semantic_seed",
+    );
+  }
   for (const item of changeSurface) {
     impactCandidates.addFileEvidence(item.entity.file.id, "change_surface");
     if (item.structural)
@@ -293,8 +297,15 @@ export function exploreGraph(
         "structural_change_surface",
       );
   }
-  const files = assembleExploreFiles({
+  collectExploreFileEvidence({
+    pool: impactCandidates,
+    edges,
+    callPaths,
+    rootFileIds: assemblyRootFileIds,
     query,
+  });
+  const files = assembleExploreFiles({
+    intent,
     storage: graph,
     pool: impactCandidates,
     edges,
@@ -346,133 +357,6 @@ export function exploreGraph(
     dynamicBoundariesTruncated: visibleDynamicBoundariesTruncated,
     files,
   };
-}
-
-/**
- * Pair the strongest retained source symbols with their public declaration
- * file after blast-radius expansion. This is intentionally narrower than
- * normal counterpart discovery: names must match exactly, C-family
- * stem/directory affinity remains mandatory, and only four files can be
- * reserved.
- */
-function collectModuleEntrypointNodes(
-  pool: ExploreCandidatePool,
-  graph: GraphReader,
-  rootIds: readonly string[],
-  query: string,
-  limit: number,
-): void {
-  if (!/(?:\.|::|->|#)/.test(query) || limit <= 0) return;
-  const rootFiles = new Set(
-    rootIds
-      .map((id) => graph.getEntity(id)?.file.id)
-      .filter((id): id is string => Boolean(id)),
-  );
-  const importerFiles = graph
-    .expandFileNeighbors([...rootFiles], 16)
-    .filter((neighbor) => neighbor.direction === "in")
-    .map((neighbor) => neighbor.id);
-  const fileIds = new Set<string>();
-  let added = 0;
-  for (const fileId of importerFiles) {
-    if (added >= limit || fileIds.size >= 2) break;
-    let fileAdded = false;
-    for (const edge of graph.outgoingEdges([fileId], ["DEFINES"], 32)) {
-      const entity = graph.getEntity(edge.dst);
-      const metadata = entity?.entity.metadata;
-      if (!entity || metadata?.kind !== "code" || pool.has(edge.dst)) continue;
-      if (isLowValuePath(entity.file.relativePath)) continue;
-      pool.add(entity, 0.04);
-      added += 1;
-      fileAdded = true;
-      if (added >= limit) break;
-    }
-    if (fileAdded) {
-      fileIds.add(fileId);
-      pool.addFileEvidence(fileId, "counterpart");
-    }
-  }
-}
-
-/**
- * Retrieval seeds provide recall; protected root files consume scarce source
- * slots. For a natural-language query these are deliberately different sets:
- * retain a bounded group of strongest semantic anchors and let RWR decide
- * whether weaker lexical seeds deserve source. Exact symbol families bypass
- * this policy and preserve every declaration/implementation root file.
- */
-function primaryConceptualRootFileIds(
-  nodes: readonly ExploreNode[],
-  rootIds: readonly string[],
-  query: string,
-  nodeScores: ReadonlyMap<string, number>,
-  maxFiles: number,
-): Set<string> {
-  const roots = new Set(rootIds);
-  const terms = queryTerms(query);
-  const byFile = new Map<
-    string,
-    { coveredTerms: Set<string>; score: number; id: string }
-  >();
-  for (const node of nodes) {
-    if (!roots.has(node.id) || !node.entity) continue;
-    const metadata = node.entity.entity.metadata;
-    const identity = [
-      metadata?.kind === "code" ? metadata.symbolName : "",
-      metadata?.kind === "code" ? metadata.scope : "",
-      node.entity.file.relativePath,
-    ].join(" ");
-    const candidate = {
-      coveredTerms: semanticTermsCovered(identity, terms),
-      score: nodeScores.get(node.id) ?? 0,
-      id: node.id,
-    };
-    const existing = byFile.get(node.entity.file.id);
-    if (
-      !existing ||
-      candidate.coveredTerms.size > existing.coveredTerms.size ||
-      (candidate.coveredTerms.size === existing.coveredTerms.size &&
-        (candidate.score > existing.score ||
-          (candidate.score === existing.score && candidate.id < existing.id)))
-    )
-      byFile.set(node.entity.file.id, candidate);
-  }
-  // Keep two additional anchors beyond the query's distinct concepts when the
-  // file budget permits it. That slot preserves the primary domain type next
-  // to its controller/repository/validator collaborators instead of treating
-  // lexical concept coverage as a replacement for graph centrality.
-  const cap = Math.max(
-    2,
-    Math.min(6, Math.max(terms.length + 2, 2), maxFiles, byFile.size),
-  );
-  const remaining = [...byFile];
-  const selected = new Set<string>();
-  const covered = new Set<string>();
-  let postCoverageSlots = 2;
-  while (selected.size < cap && remaining.length > 0) {
-    if (terms.length > 0 && terms.every((term) => covered.has(term))) {
-      if (postCoverageSlots === 0) break;
-      postCoverageSlots -= 1;
-    }
-    remaining.sort((left, right) => {
-      const leftGain = [...left[1].coveredTerms].filter(
-        (term) => !covered.has(term),
-      ).length;
-      const rightGain = [...right[1].coveredTerms].filter(
-        (term) => !covered.has(term),
-      ).length;
-      return (
-        rightGain - leftGain ||
-        right[1].coveredTerms.size - left[1].coveredTerms.size ||
-        right[1].score - left[1].score ||
-        left[1].id.localeCompare(right[1].id)
-      );
-    });
-    const [fileId, candidate] = remaining.shift()!;
-    selected.add(fileId);
-    for (const term of candidate.coveredTerms) covered.add(term);
-  }
-  return selected;
 }
 
 /**
@@ -555,12 +439,9 @@ function collectDirectCallCollaborators(
         left.edge.dst.localeCompare(right.edge.dst),
     );
 
-  const fileIds = new Set<string>();
   for (const { edge, entity } of candidates) {
     if (!entity || existingIds.has(edge.dst)) continue;
-    if (fileIds.size >= 2 && !fileIds.has(entity.file.id)) continue;
     existingIds.add(edge.dst);
-    fileIds.add(entity.file.id);
     pool.addFileEvidence(entity.file.id, "collaborator");
     pool.add(entity, Math.max(0.02, (nodeScores.get(edge.src) ?? 0) * 0.65));
     if (pool.size - initialSize >= limit) break;
@@ -715,53 +596,19 @@ function selectDynamicBoundaries(
   return selected;
 }
 
-/**
- * Boundary source is useful context only when it is already near the query
- * spine. Merely discovering a candidate-rich dynamic call must not grant an
- * arbitrary peripheral file protected integration status and displace direct
- * callers, paths, or implementations from a bounded context pack.
- */
 function addDynamicBoundaryEvidence(
   pool: ExploreCandidatePool,
   boundaries: readonly DynamicBoundary[],
   nodes: readonly ExploreNode[],
   nodeScores: ReadonlyMap<string, number>,
-  edges: readonly ExploreEdge[],
-  rootIds: readonly string[],
 ): void {
   if (boundaries.length === 0) return;
-  const strongest = Math.max(...nodeScores.values(), 0);
-  const roots = new Set(rootIds);
-  const rootNeighborhood = new Set(rootIds);
-  for (const edge of edges) {
-    if (roots.has(edge.src)) rootNeighborhood.add(edge.dst);
-    if (roots.has(edge.dst)) rootNeighborhood.add(edge.src);
-  }
-  const nodesById = new Map(nodes.map((node) => [node.id, node] as const));
-  const adjacentOwnerScopes = new Set<string>();
-  for (const id of rootNeighborhood) {
-    const metadata = nodesById.get(id)?.entity?.entity.metadata;
-    if (metadata?.kind !== "code" || !isTypeishKind(metadata.symbolType ?? ""))
-      continue;
-    if (metadata.symbolName) adjacentOwnerScopes.add(metadata.symbolName);
-    if (metadata.scope && metadata.symbolName)
-      adjacentOwnerScopes.add(`${metadata.scope}::${metadata.symbolName}`);
-  }
   const nodeFiles = new Map(
     nodes.map((node) => [node.id, node.entity?.file.id] as const),
   );
   const scored = boundaries
     .map((boundary) => ({
       fileId: nodeFiles.get(boundary.sourceId),
-      sourceId: boundary.sourceId,
-      sourceScope: (() => {
-        const metadata = nodesById.get(boundary.sourceId)?.entity?.entity
-          .metadata;
-        return metadata?.kind === "code" ? metadata.scope : null;
-      })(),
-      // A dispatch site can be central even when its caller has a modest RWR
-      // score: interface roots often reach the site through the candidate
-      // implementations. Account for both ends of that semantic bridge.
       score: Math.max(
         nodeScores.get(boundary.sourceId) ?? 0,
         ...boundary.candidateDetails.map(
@@ -769,22 +616,8 @@ function addDynamicBoundaryEvidence(
         ),
       ),
     }))
-    .filter(
-      (
-        item,
-      ): item is {
-        fileId: string;
-        sourceId: string;
-        sourceScope: string | null;
-        score: number;
-      } =>
-        Boolean(item.fileId) &&
-        (rootNeighborhood.has(item.sourceId) ||
-          Boolean(
-            item.sourceScope && adjacentOwnerScopes.has(item.sourceScope),
-          ) ||
-          item.score >=
-            strongest * DYNAMIC_BOUNDARY_FILE_POLICY.relevanceFloor),
+    .filter((item): item is { fileId: string; score: number } =>
+      Boolean(item.fileId),
     );
   const byFile = new Map<string, number>();
   for (const item of scored)
@@ -795,7 +628,7 @@ function addDynamicBoundaryEvidence(
       (left, right) =>
         right.score - left.score || left.fileId.localeCompare(right.fileId),
     );
-  for (const item of ranked.slice(0, DYNAMIC_BOUNDARY_FILE_POLICY.maximum))
+  for (const item of ranked)
     pool.addFileEvidence(item.fileId, "dynamic_boundary", item.score || 1);
 }
 

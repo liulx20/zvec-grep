@@ -1,6 +1,5 @@
 import type { Range } from "../../types.js";
 import type { GraphReader } from "../types.js";
-import { isLowValuePath, isTestPath } from "../path-policy.js";
 import type {
   ExploreEdge,
   ExploreCallPath,
@@ -8,18 +7,13 @@ import type {
   ExploreNode,
   ExploreSymbolSnippet,
 } from "./types.js";
-import {
-  isTypeishKind,
-  queryTargetsPath,
-  queryTerms,
-  semanticTermCoverage,
-} from "./policy.js";
 import { polymorphicSiblingSkeletonNodeIds } from "./adaptive-sizing.js";
 import type { ExploreCandidatePool } from "./candidate-pool.js";
 import { selectExploreFiles } from "./file-selection.js";
+import type { ExploreIntent } from "./intent.js";
 
 export function assembleExploreFiles(input: {
-  query: string;
+  intent: ExploreIntent;
   storage: GraphReader;
   pool: ExploreCandidatePool;
   edges: readonly ExploreEdge[];
@@ -44,99 +38,23 @@ export function assembleExploreFiles(input: {
     byFile.set(file.id, list);
   }
 
-  const allCandidates = [...input.fileScores.entries()].filter(([fileId]) =>
-    byFile.has(fileId),
-  );
-  const allowLowValue =
-    /\b(test|tests|testing|spec|verify|docs?|documentation|example|benchmark|vendor|third[- ]party)\b/i.test(
-      input.query,
-    );
-  const productionCandidates = allCandidates.filter(([fileId]) => {
-    const path = byFile.get(fileId)?.[0]?.entity?.file.relativePath;
-    return path ? !isLowValuePath(path) : false;
-  });
-  const explicitlyTargetedLowValue = allCandidates.filter(([fileId]) => {
-    const path = byFile.get(fileId)?.[0]?.entity?.file.relativePath;
-    return path
-      ? isLowValuePath(path) &&
-          !isTestPath(path) &&
-          queryTargetsPath(input.query, path)
-      : false;
-  });
-  const candidates =
-    !allowLowValue &&
-    productionCandidates.length >= 1 &&
-    explicitlyTargetedLowValue.length === 0
-      ? productionCandidates
-      : !allowLowValue && explicitlyTargetedLowValue.length > 0
-        ? [...productionCandidates, ...explicitlyTargetedLowValue]
-        : allCandidates;
-
-  const orderedCandidates = candidates.sort((a, b) => {
-    const priority = (id: string): number =>
-      input.rootFileIds.has(id) ? 0 : 1;
-    const priorityDiff = priority(a[0]) - priority(b[0]);
-    if (priorityDiff !== 0) return priorityDiff;
-    if (b[1] !== a[1]) {
-      return b[1] - a[1];
-    }
-    return a[0].localeCompare(b[0]);
-  });
-  const pathFileIds = new Set(
-    nodes
-      .filter((node) => pathNodeIds.has(node.id))
-      .map((node) => node.entity?.file.id)
-      .filter((fileId): fileId is string => Boolean(fileId)),
-  );
-  for (const fileId of pathFileIds)
-    input.pool.addFileEvidence(fileId, "call_path");
-  const integrationFiles = directIntegrationFiles(
-    nodes,
-    input.edges,
-    input.rootFileIds,
-  );
-  const integrationFileWeights = integrationFiles.weights;
-  for (const [fileId, strength] of integrationFileWeights)
-    input.pool.addFileEvidence(fileId, "integration", strength);
-  for (const fileId of integrationFiles.entrypointFileIds)
-    input.pool.addFileEvidence(fileId, "entrypoint");
-  const hierarchyFileIds = representativeHierarchyFileIds(
-    orderedCandidates,
-    nodes,
-    input.edges,
-    input.rootFileIds,
-    Math.min(4, Math.max(1, input.maxFiles - 1)),
-  );
-  for (const fileId of hierarchyFileIds)
-    input.pool.addFileEvidence(fileId, "hierarchy");
+  const orderedCandidates = [...input.fileScores.entries()]
+    .filter(([fileId]) => byFile.has(fileId))
+    .sort((a, b) => {
+      if (b[1] !== a[1]) {
+        return b[1] - a[1];
+      }
+      return a[0].localeCompare(b[0]);
+    });
   const counterpartFileIds = new Set(input.pool.fileIds("counterpart"));
   const rootCounterpartFileIds = new Set(
     input.pool.fileIds("root_counterpart"),
   );
   const changeSurfaceFileIds = new Set(input.pool.fileIds("change_surface"));
-  const alignedChangeSurfaceFileIds = queryAlignedFileIds(
-    byFile,
-    changeSurfaceFileIds,
-    input.query,
-  );
-  const alignedFileIds = queryAlignedFileIds(
-    byFile,
-    [...byFile.keys()].filter((fileId) => !input.rootFileIds.has(fileId)),
-    input.query,
-  );
-  const alignedChangeSurfaceWeights = queryAlignmentWeights(
-    byFile,
-    alignedChangeSurfaceFileIds,
-    input.query,
-    integrationFileWeights,
-  );
-  for (const [fileId, strength] of alignedChangeSurfaceWeights)
-    input.pool.addFileEvidence(fileId, "aligned_change_surface", strength);
-  for (const fileId of alignedFileIds)
-    input.pool.addFileEvidence(fileId, "query_alignment");
   const rankedFileIds = selectExploreFiles({
     ordered: orderedCandidates,
     maxFiles: input.maxFiles,
+    intent: input.intent,
     evidence: fileEvidence,
   }).map((candidate) => candidate.fileId);
   const skeletonNodeIds = polymorphicSiblingSkeletonNodeIds(
@@ -153,9 +71,16 @@ export function assembleExploreFiles(input: {
   // Centrality is role-aware: keep the declaration root, prefer its matching
   // implementation unit, then fall back to the strongest integration file.
   const central = new Set<string>();
-  for (const fileId of rankedFileIds) {
-    if (input.rootFileIds.has(fileId)) central.add(fileId);
-  }
+  const centralSeeds = rankedFileIds.filter((fileId) =>
+    fileEvidence
+      .get(fileId)
+      ?.has(input.intent === "exact_symbol" ? "root" : "semantic_seed"),
+  );
+  for (const fileId of centralSeeds.slice(
+    0,
+    input.intent === "concept" ? 1 : 2,
+  ))
+    central.add(fileId);
   const coCentral =
     rankedFileIds.find(
       (fileId) => !central.has(fileId) && rootCounterpartFileIds.has(fileId),
@@ -247,228 +172,6 @@ export function assembleExploreFiles(input: {
     });
   }
   return bundles;
-}
-
-function queryAlignedFileIds(
-  byFile: ReadonlyMap<string, readonly ExploreNode[]>,
-  fileIds: Iterable<string>,
-  query: string,
-): Set<string> {
-  const terms = queryTerms(query);
-  if (terms.length < 2) return new Set();
-  const aligned = new Set<string>();
-  for (const fileId of fileIds) {
-    const nodes = byFile.get(fileId) ?? [];
-    if (fileSemanticCoverage(nodes, terms) >= 2) aligned.add(fileId);
-  }
-  return aligned;
-}
-
-/**
- * Rank an aligned surface by independent evidence, not PPR alone. Query-term
- * coverage identifies semantic fit, while integration weight distinguishes a
- * runtime collaborator from a passive signature/base type with the same
- * words. The multiplier keeps coverage as the primary tier.
- */
-function queryAlignmentWeights(
-  byFile: ReadonlyMap<string, readonly ExploreNode[]>,
-  fileIds: ReadonlySet<string>,
-  query: string,
-  integrationWeights: ReadonlyMap<string, number>,
-): Map<string, number> {
-  const terms = queryTerms(query);
-  const weights = new Map<string, number>();
-  for (const fileId of fileIds) {
-    const nodes = byFile.get(fileId) ?? [];
-    weights.set(
-      fileId,
-      fileSemanticCoverage(nodes, terms) * 100 +
-        (integrationWeights.get(fileId) ?? 0),
-    );
-  }
-  return weights;
-}
-
-function fileSemanticCoverage(
-  nodes: readonly ExploreNode[],
-  terms: readonly string[],
-): number {
-  const identity = nodes
-    .flatMap((node) => {
-      const metadata = node.entity?.entity.metadata;
-      return [
-        metadata?.kind === "code" ? metadata.symbolName : "",
-        metadata?.kind === "code" ? metadata.scope : "",
-        node.entity?.file.relativePath ?? "",
-      ];
-    })
-    .join(" ");
-  return semanticTermCoverage(identity, terms);
-}
-
-function representativeHierarchyFileIds(
-  ordered: readonly [string, number][],
-  nodes: readonly ExploreNode[],
-  edges: readonly ExploreEdge[],
-  rootFileIds: ReadonlySet<string>,
-  limit: number,
-): Set<string> {
-  const nodeFiles = new Map(
-    nodes.map((node) => [node.id, node.entity?.file.id] as const),
-  );
-  const rootIds = new Set(
-    nodes.filter((node) => node.isRoot).map((node) => node.id),
-  );
-  const candidates = new Set<string>();
-  const candidatesByRoot = new Map<string, Set<string>>();
-  const hierarchy = new Map<string, Set<string>>();
-  for (const edge of edges) {
-    if (edge.kind !== "INHERITS") continue;
-    const src = hierarchy.get(edge.src) ?? new Set<string>();
-    const dst = hierarchy.get(edge.dst) ?? new Set<string>();
-    src.add(edge.dst);
-    dst.add(edge.src);
-    hierarchy.set(edge.src, src);
-    hierarchy.set(edge.dst, dst);
-  }
-  for (const rootId of rootIds) {
-    const seen = new Set([rootId]);
-    let frontier = [rootId];
-    const rootCandidates = new Set<string>();
-    for (let depth = 0; depth < 2 && frontier.length > 0; depth += 1) {
-      const next: string[] = [];
-      for (const current of frontier) {
-        for (const relatedId of hierarchy.get(current) ?? []) {
-          if (seen.has(relatedId)) continue;
-          seen.add(relatedId);
-          next.push(relatedId);
-          const fileId = nodeFiles.get(relatedId);
-          if (fileId && !rootFileIds.has(fileId)) {
-            candidates.add(fileId);
-            rootCandidates.add(fileId);
-          }
-        }
-      }
-      frontier = next;
-    }
-    if (rootCandidates.size > 0) candidatesByRoot.set(rootId, rootCandidates);
-  }
-  const position = new Map(
-    ordered.map(([fileId], index) => [fileId, index] as const),
-  );
-  const selected = new Set<string>();
-  // Give each independently selected hierarchy root one representative before
-  // a high-degree root can consume the complete family budget.
-  for (const rootId of rootIds) {
-    const best = [...(candidatesByRoot.get(rootId) ?? [])]
-      .filter((fileId) => !selected.has(fileId))
-      .sort(
-        (left, right) =>
-          (position.get(left) ?? Number.MAX_SAFE_INTEGER) -
-            (position.get(right) ?? Number.MAX_SAFE_INTEGER) ||
-          left.localeCompare(right),
-      )[0];
-    if (best) selected.add(best);
-    if (selected.size >= limit) return selected;
-  }
-  for (const [fileId] of ordered) {
-    if (!candidates.has(fileId)) continue;
-    selected.add(fileId);
-    if (selected.size >= limit) break;
-  }
-  return selected;
-}
-
-function directIntegrationFiles(
-  nodes: readonly ExploreNode[],
-  edges: readonly ExploreEdge[],
-  rootFileIds: ReadonlySet<string>,
-): {
-  weights: Map<string, number>;
-  entrypointFileIds: Set<string>;
-} {
-  const nodeById = new Map(nodes.map((node) => [node.id, node] as const));
-  const nodeFiles = new Map(
-    nodes.map((node) => [node.id, node.entity?.file.id] as const),
-  );
-  const roots = new Set(
-    nodes.filter((node) => node.isRoot).map((node) => node.id),
-  );
-  const scopeOwners = rootSemanticOwners(edges, roots);
-  let changed = true;
-  while (changed) {
-    changed = false;
-    for (const edge of edges) {
-      if (
-        edge.kind === "CONTAINS" &&
-        scopeOwners.has(edge.src) &&
-        !scopeOwners.has(edge.dst)
-      ) {
-        scopeOwners.set(edge.dst, scopeOwners.get(edge.src)!);
-        changed = true;
-      }
-    }
-  }
-  const rootsByFile = new Map<string, Set<string>>();
-  const entrypointFileIds = new Set<string>();
-  for (const edge of edges) {
-    if (!["CALLS", "REFS", "INSTANTIATES"].includes(edge.kind)) continue;
-    // Integration points use the root/type scope. Outgoing dependencies are
-    // ordinary RWR candidates, but should not receive protected file status.
-    const rootOwner = scopeOwners.get(edge.dst);
-    if (!rootOwner || scopeOwners.has(edge.src)) continue;
-    const fileId = nodeFiles.get(edge.src);
-    if (!fileId || rootFileIds.has(fileId)) continue;
-    const connectedRoots = rootsByFile.get(fileId) ?? new Set<string>();
-    connectedRoots.add(rootOwner);
-    rootsByFile.set(fileId, connectedRoots);
-    const metadata = nodeById.get(edge.src)?.entity?.entity.metadata;
-    const rootMetadata = nodeById.get(rootOwner)?.entity?.entity.metadata;
-    if (
-      metadata?.kind === "code" &&
-      !isTypeishKind(
-        rootMetadata?.kind === "code" ? (rootMetadata.symbolType ?? "") : "",
-      ) &&
-      /^(?:main|__main__|application)$/i.test(metadata.symbolName ?? "")
-    )
-      entrypointFileIds.add(fileId);
-  }
-  return {
-    weights: new Map(
-      [...rootsByFile].map(([fileId, connectedRoots]) => [
-        fileId,
-        connectedRoots.size,
-      ]),
-    ),
-    entrypointFileIds,
-  };
-}
-
-/**
- * Treat declaration/implementation counterparts as one root scope before
- * measuring integration files. Otherwise a caller of a source definition is
- * invisible when the selected root is the matching header declaration.
- */
-function rootSemanticOwners(
-  edges: readonly ExploreEdge[],
-  roots: ReadonlySet<string>,
-): Map<string, string> {
-  const owners = new Map([...roots].map((id) => [id, id]));
-  let changed = true;
-  while (changed) {
-    changed = false;
-    for (const edge of edges) {
-      if (edge.rel !== "counterpart") continue;
-      const owner = owners.get(edge.src) ?? owners.get(edge.dst);
-      if (!owner) continue;
-      for (const id of [edge.src, edge.dst]) {
-        if (owners.has(id)) continue;
-        owners.set(id, owner);
-        changed = true;
-      }
-    }
-  }
-  return owners;
 }
 
 function preferNestedSourceSymbols(
