@@ -393,18 +393,18 @@ function callsFromEntities(
   callableReturnTypes: ReadonlyMap<string, string>,
   resolutionFacts: ReadonlyMap<number, ReadonlyMap<string, CallResolutionFact>>,
 ): FunctionCallSites[] {
-  return entities
-    .filter((entity) => entity.symbolType === "function")
-    .map((entity) => ({
-      name: entity.name,
-      symbolType: entity.symbolType,
-      startOffset: entity.node.startIndex,
-      startLine: entity.node.startPosition.row + 1,
-      sites: collectCallSites(entity.node, adapter, {
-        callableReturnTypes,
-        resolutionFacts: resolutionFacts.get(entity.node.startIndex),
-      }),
-    }));
+  const independentOwnerStarts = callOwnerStarts(entities);
+  return entities.filter(isCallOwnerEntity).map((entity) => ({
+    name: entity.name,
+    symbolType: entity.symbolType,
+    startOffset: entity.node.startIndex,
+    startLine: entity.node.startPosition.row + 1,
+    sites: collectCallSites(entity.node, adapter, {
+      callableReturnTypes,
+      resolutionFacts: resolutionFacts.get(entity.node.startIndex),
+      independentOwnerStarts,
+    }),
+  }));
 }
 
 function callResolutionFactsFromEntities(
@@ -413,14 +413,26 @@ function callResolutionFactsFromEntities(
   callableReturnTypes: ReadonlyMap<string, string>,
 ): Map<number, ReadonlyMap<string, CallResolutionFact>> {
   const result = new Map<number, ReadonlyMap<string, CallResolutionFact>>();
+  const independentOwnerStarts = callOwnerStarts(entities);
   for (const entity of entities) {
-    if (entity.symbolType !== "function") continue;
+    if (!isCallOwnerEntity(entity)) continue;
     const facts = adapter.extractCallResolutionFacts?.(entity.node, {
       callableReturnTypes,
+      independentOwnerStarts,
     });
     if (facts) result.set(entity.node.startIndex, facts);
   }
   return result;
+}
+
+function isCallOwnerEntity(entity: CodeEntity): boolean {
+  return entity.symbolType === "function" || entity.symbolType === "value";
+}
+
+function callOwnerStarts(entities: readonly CodeEntity[]): Set<number> {
+  return new Set(
+    entities.filter(isCallOwnerEntity).map((entity) => entity.node.startIndex),
+  );
 }
 
 function callableReturnTypesFromEntities(
@@ -1214,8 +1226,9 @@ export async function collectFunctionCallSites(
         adapter.format,
       );
       const out: FunctionCallSites[] = [];
+      const independentOwnerStarts = callOwnerStarts(entities);
       for (const entity of entities) {
-        if (entity.symbolType !== "function") {
+        if (!isCallOwnerEntity(entity)) {
           continue;
         }
         out.push({
@@ -1225,6 +1238,7 @@ export async function collectFunctionCallSites(
           startLine: entity.node.startPosition.row + 1,
           sites: collectCallSites(entity.node, adapter, {
             callableReturnTypes,
+            independentOwnerStarts,
           }),
         });
       }

@@ -66,13 +66,16 @@ function exploreLines(result: ExploreOutput): string[] {
   lines.push(
     `subgraph: ${result.nodes.length} nodes, ${result.edges.length} edges${result.edgesTruncated ? " (truncated)" : ""}, ${result.files.length} files`,
   );
+  if (result.files.some((file) => file.sourceOrigin === "current_disk")) {
+    lines.push(
+      "source note: current blocks below are line-numbered source reads; do not re-read displayed ranges unless marked indexed.",
+    );
+  }
 
   if (result.callPaths.length > 0) {
-    lines.push("", "call paths:");
-    for (const path of result.callPaths) {
-      lines.push(
-        `- ${path.nodes.map((id) => shortName(result, id)).join(" -> ")}`,
-      );
+    lines.push("", "flow:");
+    for (const [index, path] of result.callPaths.entries()) {
+      lines.push(`${index + 1}. ${formatCallPath(result, path.nodes)}`);
     }
   }
 
@@ -105,7 +108,7 @@ function exploreLines(result: ExploreOutput): string[] {
       const occurrences = boundary.occurrenceCount ?? 1;
       const details = boundary.candidateDetails ?? [];
       lines.push(
-        `- ${shortName(result, boundary.sourceId)} -> ${boundary.target.raw}`,
+        `- ${shortName(result, boundary.sourceId)}${boundary.line ? `@L${boundary.line}` : ""} -> ${boundary.target.raw}`,
       );
       lines.push(
         `  reason: ${boundary.reason.replaceAll("_", " ")}${occurrences > 1 ? `; occurrences: ${occurrences}` : ""}`,
@@ -155,7 +158,11 @@ function exploreLines(result: ExploreOutput): string[] {
     if ((file.reasons?.length ?? 0) > 0) {
       lines.push(`selected: ${file.reasons!.join(", ")}`);
     }
-    lines.push("source:");
+    lines.push(
+      file.sourceOrigin === "indexed_fragment"
+        ? "source (indexed fragment):"
+        : "source:",
+    );
     for (const textLine of file.text.split(/\r?\n/)) {
       lines.push(textLine);
     }
@@ -685,12 +692,33 @@ function shortName(result: ExploreOutput, id: string): string {
   return symbolLabel(id, node?.entity ?? null, true);
 }
 
+function formatCallPath(
+  result: ExploreOutput,
+  nodeIds: readonly string[],
+): string {
+  let text = shortName(result, nodeIds[0]!);
+  for (let index = 1; index < nodeIds.length; index++) {
+    const source = nodeIds[index - 1]!;
+    const target = nodeIds[index]!;
+    const edge = result.edges.find(
+      (candidate) =>
+        candidate.kind === "CALLS" &&
+        candidate.src === source &&
+        candidate.dst === target,
+    );
+    text += ` -CALLS${edge?.provenance === "heuristic" ? "?" : ""}-> ${shortName(result, target)}`;
+  }
+  return text;
+}
+
 function symbolLabel(
   id: string,
   entity: ZvecGrepGraphEntity | null | undefined,
   short = false,
 ): string {
-  const name = entity?.name ?? id.slice(0, 10);
+  const rawName = entity?.name ?? id.slice(0, 10);
+  const name =
+    !short && entity?.scope ? `${entity.scope}::${rawName}` : rawName;
   if (short) {
     return name;
   }

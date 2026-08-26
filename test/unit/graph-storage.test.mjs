@@ -299,6 +299,7 @@ test("text-inferred receiver types remain dynamic boundaries", async () => {
   assert.equal(graph.callees("caller", 1, 10).length, 0);
   const boundary = graph.dynamicBoundaries(["caller"], 10)[0];
   assert.equal(boundary?.reason, "lexical_dispatch");
+  assert.equal(boundary?.line, 3);
   assert.deepEqual(boundary?.candidates, ["worker-run"]);
   assert.equal(
     graph.database.db

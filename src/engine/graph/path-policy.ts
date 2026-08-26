@@ -4,7 +4,7 @@ import { basename, extname } from "node:path";
 export function isTestPath(path: string): boolean {
   const normalized = path.replaceAll("\\", "/");
   return (
-    /(^|\/)(tests?|specs?|__tests__|test-?dts?|type-tests?|testdata|fixtures?|mocks?)(\/|$)|(^|\/)test_[^/]+\.[^/]+$|(^|\/)conftest\.py$|(?:\.|_)(?:test|spec)(?:-d)?\.[^/]+$|_test\.[^/]+$/i.test(
+    /(^|\/)(?:__)?(?:tests?|specs?|test-?dts?|type-tests?|testdata|fixtures?|mocks?)(?:__)?(\/|$)|(^|\/)test_[^/]+\.[^/]+$|(^|\/)conftest\.py$|(?:\.|_|-)(?:test|spec|fixture|mock)(?:-d)?\.[^/]+$|_test\.[^/]+$/i.test(
       normalized,
     ) ||
     /(^|\/)(?:[a-z][a-z0-9]*)?(?:Test|Tests)(\/|$)/.test(normalized) ||

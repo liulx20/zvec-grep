@@ -128,6 +128,62 @@ test("nested entity parameters do not overwrite outer receiver types", async () 
   assert.equal(site.target.hints?.receiverType, "Runner");
 });
 
+test("module values own calls made by their initializer", async () => {
+  const calls = await collectFunctionCallSites(
+    source(
+      "typescript",
+      "factory.ts",
+      "export const client = createClient(new Runtime());",
+    ),
+  );
+  const owner = calls.find((candidate) => candidate.name === "client");
+  assert.equal(owner?.symbolType, "value");
+  assert.deepEqual(
+    owner?.sites.map((site) => site.name),
+    ["createClient", "Runtime"],
+  );
+});
+
+test("unindexed local callbacks contribute calls to their indexed owner", async () => {
+  const calls = await collectFunctionCallSites(
+    source(
+      "typescript",
+      "callback.ts",
+      `function ReviewButton() {
+        const { submit } = useForm();
+        const handleClick = () => submit();
+        return button(handleClick);
+      }`,
+    ),
+  );
+  const owner = calls.find((candidate) => candidate.name === "ReviewButton");
+  assert.deepEqual(
+    owner?.sites.map((site) => site.name),
+    ["useForm", "submit", "button"],
+  );
+  assert.equal(
+    owner?.sites.find((site) => site.name === "submit")?.target.hints
+      ?.lexicallyBound,
+    true,
+  );
+});
+
+test("unindexed callback parameters remain lexically bound", async () => {
+  const calls = await collectFunctionCallSites(
+    source(
+      "typescript",
+      "thunk.ts",
+      `export const save = createThunk("save", async ({ value }, { dispatch }) => {
+        return dispatch(commit(value));
+      });`,
+    ),
+  );
+  const dispatch = calls
+    .find((candidate) => candidate.name === "save")
+    ?.sites.find((site) => site.name === "dispatch");
+  assert.equal(dispatch?.target.hints?.lexicallyBound, true);
+});
+
 test("receiver type hints follow block scope and call position", async () => {
   const calls = await collectFunctionCallSites(
     source(
@@ -152,6 +208,28 @@ test("receiver type hints follow block scope and call position", async () => {
   assert.deepEqual(
     runSites.map((site) => site.target.hints?.receiverType),
     ["Runner", "Other"],
+  );
+});
+
+test("TypeScript private fields infer their constructed receiver type", async () => {
+  const calls = await collectFunctionCallSites(
+    source(
+      "typescript",
+      "PrivateField.ts",
+      `class Use {
+        #declared: Runner;
+        #constructed;
+        constructor() { this.#constructed = new Runner(); }
+        invoke() { this.#declared.run(); this.#constructed.run(); }
+      }`,
+    ),
+  );
+  const sites = calls
+    .flatMap((owner) => owner.sites)
+    .filter((item) => item.target.member === "run");
+  assert.deepEqual(
+    sites.map((site) => site.target.hints?.receiverType),
+    ["Runner", "Runner"],
   );
 });
 

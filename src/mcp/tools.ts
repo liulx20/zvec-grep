@@ -244,6 +244,7 @@ function searchRoutingRules(exactTool: string, focusedTools: string): string[] {
     `Use ${exactTool} first only when exact lookup alone is sufficient, such as locating one definition, literal, filename, configuration key, error message, regex match, or exhaustive occurrence list.`,
     "Use zvec_grep_search first when wording or location is unknown, or when semantic retrieval across files is needed. Search itself uses lexical and vector evidence; use the graph tools for verified relationships.",
     "Use zvec_grep_explore when you already have a symbol/name and need a multi-file call/type-neighborhood context pack assembled from the graph.",
+    "When Explore identifies a relevant intermediate symbol or path but omits its needed body or neighbors, call Explore once more with that exact symbol or path before reading or grepping source.",
     "Use zvec_grep_callers, zvec_grep_callees, or zvec_grep_impact for focused graph neighborhood questions about one symbol.",
     `When user-provided or verified exact symbols are present but the answer spans multiple files or relationships, treat the task as mixed: call zvec_grep_search for semantic discovery, then use ${focusedTools} for focused verification.`,
     "For a semantic or mixed workspace task, start discovery with focused zvec_grep_search before broad file discovery.",

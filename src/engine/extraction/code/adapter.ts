@@ -44,6 +44,7 @@ export type LanguageAdapter = {
     node: TSNode,
     context?: {
       callableReturnTypes?: ReadonlyMap<string, string>;
+      independentOwnerStarts?: ReadonlySet<number>;
     },
   ): ReadonlyMap<string, CallResolutionFact>;
   collectDeclaredFieldTypes?(node: TSNode): ReadonlyMap<string, string>;

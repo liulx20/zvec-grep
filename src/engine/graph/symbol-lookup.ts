@@ -308,7 +308,7 @@ function compareRepresentatives(
 }
 
 function normalizeQualifiedSymbolName(value: string): string {
-  return value.trim().replace(/(?:\.|#|::)+/g, "::");
+  return value.trim().replace(/(?:\.|::)+/g, "::");
 }
 
 function matchesSymbolQuery(

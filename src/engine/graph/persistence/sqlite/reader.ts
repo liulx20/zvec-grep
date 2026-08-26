@@ -417,6 +417,7 @@ export class SqliteGraphReader {
       receiver_kind: "owner" | "super" | "qualified" | null;
       receiver_name: string | null;
       resolution_hints: string | null;
+      line: number;
       reason:
         | "polymorphic_dispatch"
         | "unknown_receiver_type"
@@ -448,7 +449,7 @@ export class SqliteGraphReader {
            AND owner_id IN (${placeholders})
        )
        SELECT id,owner_id,ref_name,member_name,receiver_kind,receiver_name,
-              resolution_hints,reason,occurrence_count
+              resolution_hints,reason,line,occurrence_count
        FROM ranked WHERE occurrence_rank=1
        ORDER BY has_candidates DESC,owner_id,line,id LIMIT ?`,
       ...ids,
@@ -523,6 +524,7 @@ export class SqliteGraphReader {
         }));
       return {
         sourceId: row.owner_id,
+        line: row.line,
         target: {
           raw: row.ref_name,
           member: row.member_name,
@@ -613,6 +615,7 @@ export class SqliteGraphReader {
       const candidates = candidateRows.slice(0, 64);
       return {
         sourceId: row.owner_id,
+        line: row.line,
         target,
         reason: hints?.lexicallyBound
           ? "lexical_dispatch"

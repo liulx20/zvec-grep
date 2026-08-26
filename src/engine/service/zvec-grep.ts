@@ -1155,7 +1155,8 @@ async function exploreOpenWorkspaceIndex(
     edges: result.edges.map((edge) => ({ ...edge })),
     edgesTruncated: result.edgesTruncated,
     callPaths: result.callPaths.map((path) => ({
-      ...path,
+      from: path.from,
+      to: path.to,
       nodes: [...path.nodes],
     })),
     blastRadius: result.blastRadius.map((item) => ({
@@ -1175,6 +1176,7 @@ async function exploreOpenWorkspaceIndex(
     })),
     dynamicBoundaries: result.dynamicBoundaries.map((boundary) => ({
       sourceId: boundary.sourceId,
+      line: boundary.line,
       target: {
         raw: boundary.target.raw,
         member: boundary.target.member,
@@ -1221,6 +1223,7 @@ async function exploreOpenWorkspaceIndex(
         ...symbol,
         range: copyRange(symbol.range),
       })),
+      sourceOrigin: bundle.sourceOrigin,
       text: bundle.text,
     })),
     emptyReason: result.emptyReason,

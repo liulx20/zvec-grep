@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import { CodeExtractor } from "../../dist/engine/extraction/code/extractor.js";
 import {
@@ -94,6 +97,82 @@ test("resolveImportPath resolves JS/TS relative + extension table", () => {
   assert.equal(
     resolveImportPath("./missing", "a", "typescript", index).status,
     "failed",
+  );
+});
+
+test("resolveImportPath applies the nearest tsconfig paths", (t) => {
+  const rootPath = mkdtempSync(join(tmpdir(), "zg-tsconfig-"));
+  t.after(() => rmSync(rootPath, { recursive: true }));
+  const packagePath = join(rootPath, "packages/app");
+  mkdirSync(join(packagePath, "src/actions"), { recursive: true });
+  writeFileSync(
+    join(packagePath, "tsconfig.json"),
+    `{ "compilerOptions": { "paths": { "src/*": ["./src/*"] } } }`,
+  );
+  const file = (id, relativePath) => ({
+    ...codeFile(id, relativePath),
+    absolutePath: join(rootPath, relativePath),
+    rootPath,
+  });
+  const from = file("from", "packages/app/src/hooks/use-form.ts");
+  const target = file("target", "packages/app/src/actions/send.ts");
+
+  assert.equal(
+    resolveImportPath(
+      "src/actions/send",
+      from.id,
+      "typescript",
+      new FilePathIndex([from, target]),
+    ).fileId,
+    target.id,
+  );
+});
+
+test("workspace imports resolve indexed package entrypoints", async (t) => {
+  const rootPath = mkdtempSync(join(tmpdir(), "zg-workspace-"));
+  t.after(() => rmSync(rootPath, { recursive: true }));
+  const appPath = join(rootPath, "packages/app");
+  const libraryPath = join(rootPath, "packages/library");
+  mkdirSync(join(appPath, "src"), { recursive: true });
+  mkdirSync(join(libraryPath, "src"), { recursive: true });
+  writeFileSync(
+    join(appPath, "package.json"),
+    JSON.stringify({ dependencies: { "@repo/library": "workspace:*" } }),
+  );
+  writeFileSync(
+    join(libraryPath, "package.json"),
+    JSON.stringify({ name: "@repo/library", main: "src/index.ts" }),
+  );
+  const file = (id, relativePath, format = "typescript") => ({
+    ...codeFile(id, relativePath, format),
+    absolutePath: join(rootPath, relativePath),
+    rootPath,
+  });
+  const from = file("from", "packages/app/src/main.ts");
+  const target = file("target", "packages/library/src/index.ts");
+  const manifests = [
+    file("app-package", "packages/app/package.json", "json"),
+    file("library-package", "packages/library/package.json", "json"),
+  ];
+
+  assert.equal(
+    resolveImportPath(
+      "@repo/library",
+      from.id,
+      "typescript",
+      new FilePathIndex([from, target, ...manifests]),
+    ).fileId,
+    target.id,
+  );
+  assert.deepEqual(
+    (
+      await collectImportSpecs({
+        kind: "text",
+        file: from,
+        text: `import { run } from "@repo/library";`,
+      })
+    ).map((item) => item.spec),
+    ["@repo/library"],
   );
 });
 

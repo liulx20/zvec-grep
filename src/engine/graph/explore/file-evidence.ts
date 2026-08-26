@@ -29,6 +29,7 @@ export function collectExploreFileEvidence(input: {
     nodes.map((node) => [node.id, node.entity?.file.id] as const),
   );
   for (const path of input.callPaths) {
+    if (path.derived) continue;
     for (const id of path.nodes) {
       const fileId = nodeFiles.get(id);
       if (fileId) input.pool.addFileEvidence(fileId, "call_path");
@@ -64,10 +65,11 @@ export function collectExploreFileEvidence(input: {
       input.pool.addFileEvidence(fileId, "low_value_path");
     const coveredTerms = fileSemanticTerms(fileNodes, terms);
     if (coveredTerms.size <= 0) continue;
+    const pathTerms = semanticTermsCovered(path ?? "", terms);
     input.pool.addFileEvidence(
       fileId,
       "query_alignment",
-      coveredTerms.size / terms.length,
+      (coveredTerms.size + pathTerms.size) / terms.length,
     );
     for (const term of coveredTerms)
       input.pool.addFileEvidence(fileId, `concept:${term}`);

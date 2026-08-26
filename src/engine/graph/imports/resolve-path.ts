@@ -5,6 +5,12 @@ import {
   type FilePathIndex,
   type IndexedFile,
 } from "./path-index.js";
+import {
+  configuredJavaScriptImport,
+  isConfiguredJavaScriptImport,
+  resetJavaScriptConfigCache,
+  workspaceJavaScriptImport,
+} from "./javascript-config.js";
 
 const EXTENSION_RESOLUTION: Record<string, readonly string[]> = {
   typescript: [
@@ -151,11 +157,16 @@ export function resolveImportPath(
 
   const fromDir = dirname(from.absolutePath);
   const extensions = EXTENSION_RESOLUTION[language] ?? [];
+  const javascript = [
+    "javascript",
+    "jsx",
+    "typescript",
+    "tsx",
+    "vue",
+    "svelte",
+  ].includes(language);
 
-  if (
-    ["javascript", "jsx", "typescript", "tsx", "svelte"].includes(language) &&
-    trimmed.startsWith("$lib/")
-  ) {
+  if (javascript && trimmed.startsWith("$lib/")) {
     const base = resolveAbsolute(
       from.rootPath,
       `src/lib/${trimmed.slice("$lib/".length)}`,
@@ -164,6 +175,22 @@ export function resolveImportPath(
     return hit
       ? { status: "resolved", fileId: hit.id, absolutePath: hit.absolutePath }
       : { status: "failed" };
+  }
+
+  if (javascript && !trimmed.startsWith(".")) {
+    const configured = configuredJavaScriptImport(trimmed, from);
+    const workspace = workspaceJavaScriptImport(trimmed, index);
+    for (const base of [...configured.candidates, ...workspace.candidates]) {
+      const hit = tryImportExtensions(base, index, extensions, language);
+      if (hit)
+        return {
+          status: "resolved",
+          fileId: hit.id,
+          absolutePath: hit.absolutePath,
+        };
+    }
+    if (configured.pathAlias || workspace.workspace)
+      return { status: "failed" };
   }
 
   if (isExternalImportSpec(trimmed, language)) {
@@ -427,6 +454,7 @@ export function resetImportResolutionCaches(): void {
   RUST_PACKAGE_CACHE.clear();
   GO_WORKSPACE_CACHE = new WeakMap();
   RUST_WORKSPACE_CACHE = new WeakMap();
+  resetJavaScriptConfigCache();
 }
 
 function goWorkspaceModules(
@@ -627,6 +655,18 @@ export function isExternalImportSpec(spec: string, language: string): boolean {
   }
 
   return false;
+}
+
+export function isConfiguredProjectImportSpec(
+  spec: string,
+  language: string,
+  file: IndexedFile,
+): boolean {
+  return (
+    ["javascript", "jsx", "typescript", "tsx", "vue", "svelte"].includes(
+      language,
+    ) && isConfiguredJavaScriptImport(spec, file)
+  );
 }
 
 function resolvePythonRelative(

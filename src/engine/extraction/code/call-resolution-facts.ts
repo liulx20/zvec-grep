@@ -30,6 +30,7 @@ export function extractCallResolutionFacts(
   adapter: LanguageAdapter,
   context?: {
     callableReturnTypes?: ReadonlyMap<string, string>;
+    independentOwnerStarts?: ReadonlySet<number>;
   },
 ): ReadonlyMap<string, CallResolutionFact> {
   const resolutionRoot = callableResolutionRoot(node, adapter.format);
@@ -67,16 +68,26 @@ export function extractCallResolutionFacts(
     if (
       !skipSelfEntity &&
       adapter.entityTypes.has(current.type) &&
-      adapter.shouldIndexEntity?.(current) !== false
+      adapter.shouldIndexEntity?.(current) !== false &&
+      (!context?.independentOwnerStarts ||
+        context.independentOwnerStarts.has(current.startIndex))
     )
       return;
 
+    const callableScope = opensCallableScope(current.type);
     const opensScope =
-      !skipSelfEntity && opensLexicalScope(current.type, adapter.format);
+      !skipSelfEntity &&
+      (callableScope || opensLexicalScope(current.type, adapter.format));
     if (opensScope) {
-      scopes.push(new Map());
-      candidateScopes.push(new Map());
-      boundScopes.push(new Set());
+      scopes.push(
+        callableScope ? initialBindings(current, adapter) : new Map(),
+      );
+      candidateScopes.push(
+        callableScope ? initialBindingCandidates(current, adapter) : new Map(),
+      );
+      boundScopes.push(
+        callableScope ? initialBoundNames(current, adapter) : new Set(),
+      );
       dynamicCallableScopes.push(new Map());
     }
 
@@ -231,6 +242,14 @@ const DECLARATION_TYPES = new Set([
   "public_field_definition",
   "short_var_declaration",
 ]);
+const CALLABLE_SCOPE_TYPES = new Set([
+  "arrow_function",
+  "function_expression",
+  "function_literal",
+  "lambda",
+  "lambda_expression",
+  "closure_expression",
+]);
 
 function initialBindings(
   node: TSNode,
@@ -297,6 +316,7 @@ function initialBoundNames(
     if (PARAMETER_TYPES.has(current.type)) {
       const name = parameterBindingName(current, adapter.format);
       if (name) names.add(name);
+      else for (const item of declarationBindingNames(current)) names.add(item);
       return;
     }
     if (
@@ -492,7 +512,7 @@ function collectJavaScriptConstructorFields(
   if (!constructor) return;
   collectConstructedOwnerFields(
     constructor.text,
-    /\bthis\.([A-Za-z_$][\w$]*)\s*=\s*new\s+([A-Za-z_$][\w$.:]*)\s*(?:<[^;=(){}]+>)?\s*\(/g,
+    /\bthis\.(#?[A-Za-z_$][\w$]*)\s*=\s*new\s+([A-Za-z_$][\w$.:]*)\s*(?:<[^;=(){}]+>)?\s*\(/g,
     bindings,
   );
   const visit = (current: TSNode): void => {
@@ -505,7 +525,7 @@ function collectJavaScriptConstructorFields(
       return;
     if (/assignment/.test(current.type)) {
       const match = current.text.match(
-        /^this\.([A-Za-z_$][\w$]*)\s*=\s*new\s+([A-Za-z_$][\w$.:]*)\s*(?:<[^;=(){}]+>)?\s*\(/,
+        /^this\.(#?[A-Za-z_$][\w$]*)\s*=\s*new\s+([A-Za-z_$][\w$.:]*)\s*(?:<[^;=(){}]+>)?\s*\(/,
       );
       if (match && !bindings.has(match[1]!))
         bindings.set(match[1]!, normalizeType(match[2]!));
@@ -605,6 +625,10 @@ function opensLexicalScope(type: string, language: string): boolean {
   ]).has(type);
 }
 
+function opensCallableScope(type: string): boolean {
+  return CALLABLE_SCOPE_TYPES.has(type);
+}
+
 function declarationBindings(
   node: TSNode,
   language: string,
@@ -612,7 +636,7 @@ function declarationBindings(
   const text = node.text.trim();
   const results: { name: string; type: string }[] = [];
   const typed = text.match(
-    /^(?:(?:public|private|protected|readonly|static|declare|const|let|var)\s+)*([A-Za-z_]\w*)\s*[!?]?\s*:\s*([^=;,]+)/,
+    /^(?:(?:public|private|protected|readonly|static|declare|const|let|var)\s+)*(#?[A-Za-z_]\w*)\s*[!?]?\s*:\s*([^=;,]+)/,
   );
   if (typed) results.push({ name: typed[1]!, type: normalizeType(typed[2]!) });
   const explicit = text.match(
@@ -724,12 +748,37 @@ function declarationBindingNames(node: TSNode): string[] {
     node.childForFieldName("name") ??
     node.childForFieldName("pattern") ??
     node.childForFieldName("left");
-  if (direct && /^[A-Za-z_$][\w$]*$/.test(direct.text)) result.add(direct.text);
+  if (direct) collectBindingPatternNames(direct, result);
   for (const match of node.text.matchAll(
     /(?:^|\b(?:const|let|var)\s+)([A-Za-z_$][\w$]*)\s*(?::|:=|=)/g,
   ))
     result.add(match[1]!);
   return [...result];
+}
+
+function collectBindingPatternNames(node: TSNode, result: Set<string>): void {
+  if (
+    /^(?:identifier|shorthand_property_identifier_pattern)$/.test(node.type)
+  ) {
+    result.add(node.text);
+    return;
+  }
+  if (/^(?:pair|pair_pattern)$/.test(node.type)) {
+    const value = node.childForFieldName("value");
+    if (value) collectBindingPatternNames(value, result);
+    return;
+  }
+  if (/^(?:assignment_pattern|rest_pattern)$/.test(node.type)) {
+    const binding =
+      node.childForFieldName("left") ??
+      node.childForFieldName("argument") ??
+      node.namedChildren[0];
+    if (binding) collectBindingPatternNames(binding, result);
+    return;
+  }
+  if (!/(?:pattern|array|object)/.test(node.type)) return;
+  for (const child of node.namedChildren)
+    collectBindingPatternNames(child, result);
 }
 
 function collectionElementType(typeText: string): string | undefined {

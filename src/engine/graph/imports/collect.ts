@@ -3,7 +3,10 @@ import {
   type ImportSpec,
   type TextSource,
 } from "../../extraction/index.js";
-import { isExternalImportSpec } from "./resolve-path.js";
+import {
+  isConfiguredProjectImportSpec,
+  isExternalImportSpec,
+} from "./resolve-path.js";
 
 export type { ImportSpec };
 
@@ -13,6 +16,8 @@ export async function collectImportSpecs(
 ): Promise<readonly ImportSpec[]> {
   const specs = await collectSourceImportSpecs(source);
   return specs.filter(
-    (spec) => !isExternalImportSpec(spec.spec, source.file.format),
+    (spec) =>
+      !isExternalImportSpec(spec.spec, source.file.format) ||
+      isConfiguredProjectImportSpec(spec.spec, source.file.format, source.file),
   );
 }

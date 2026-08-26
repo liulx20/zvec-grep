@@ -66,6 +66,7 @@ export type GraphEdge = {
 
 export type DynamicBoundary = {
   sourceId: string;
+  line?: number;
   target: ReferenceTarget;
   reason:
     | "unknown_receiver_type"

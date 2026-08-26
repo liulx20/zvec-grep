@@ -14,6 +14,7 @@ export type ExploreOptions = {
 
 export type ExploreSubgraphOptions = {
   seedIds: readonly string[];
+  query?: string;
   seedWeights?: ReadonlyMap<string, number>;
   traversalDepth?: number;
   traversalDirection?: "outgoing" | "both";
@@ -45,6 +46,8 @@ export type ExploreCallPath = {
   from: string;
   to: string;
   nodes: string[];
+  /** Inferred from the already selected subgraph; presentation evidence only. */
+  derived?: boolean;
 };
 
 export type ExploreImpactRef = {
@@ -78,6 +81,8 @@ export type ExploreFileBundle = {
   /** Compact explanation of why this file survived graph ranking. */
   reasons: string[];
   symbols: ExploreSymbolSnippet[];
+  /** Whether Explore assembled the excerpt from the current file or index data. */
+  sourceOrigin: "current_disk" | "indexed_fragment";
   /** Zvec-layer assembled text for this file (entity content, clustered). */
   text: string;
 };

@@ -215,6 +215,7 @@ export type ZvecGrepExploreFileBundle = {
     range: Range;
     content: string;
   }[];
+  sourceOrigin: "current_disk" | "indexed_fragment";
   text: string;
 };
 
@@ -244,6 +245,7 @@ export type ZvecGrepExploreResult = {
   }[];
   dynamicBoundaries: {
     sourceId: string;
+    line?: number;
     target: {
       raw: string;
       member: string;

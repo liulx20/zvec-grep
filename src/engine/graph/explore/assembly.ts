@@ -1,5 +1,6 @@
 import type { Range } from "../../types.js";
 import type { GraphReader } from "../types.js";
+import type { DynamicBoundary } from "../types.js";
 import type {
   ExploreEdge,
   ExploreCallPath,
@@ -18,6 +19,7 @@ export function assembleExploreFiles(input: {
   pool: ExploreCandidatePool;
   edges: readonly ExploreEdge[];
   callPaths: readonly ExploreCallPath[];
+  dynamicBoundaries: readonly DynamicBoundary[];
   fileScores: Map<string, number>;
   nodeScores: ReadonlyMap<string, number>;
   maxFiles: number;
@@ -115,6 +117,7 @@ export function assembleExploreFiles(input: {
       input.nodeScores,
       pathNodeIds,
       skeletonNodeIds,
+      input.dynamicBoundaries,
     );
     const clustered = clusterSymbols(ranked);
     return [
@@ -168,6 +171,7 @@ export function assembleExploreFiles(input: {
       isChangeSurface: changeSurfaceFileIds.has(fileId),
       reasons: fileReasons(fileId, nodes, input.edges, input.rootFileIds),
       symbols: rendered.symbols,
+      sourceOrigin: sourceLines ? "current_disk" : "indexed_fragment",
       text,
     });
   }
@@ -302,6 +306,8 @@ type SymbolCluster = {
   spine: boolean;
 };
 
+const MIN_FOCUSED_EXCERPT_CHARS = 700;
+
 function clusterSymbols(symbols: readonly RankedSymbol[]): SymbolCluster[] {
   const ordered = [...symbols].sort(
     (a, b) => startLine(a.symbol.range) - startLine(b.symbol.range),
@@ -341,6 +347,7 @@ function rankSymbols(
   nodeScores: ReadonlyMap<string, number>,
   pathNodeIds: ReadonlySet<string>,
   skeletonNodeIds: ReadonlySet<string>,
+  dynamicBoundaries: readonly DynamicBoundary[],
 ): RankedSymbol[] {
   const nodeById = new Map(nodes.map((node) => [node.id, node]));
   const fileById = new Map(
@@ -349,6 +356,10 @@ function rankSymbols(
   return symbols.map((symbol) => {
     const node = nodeById.get(symbol.id);
     const focusLines: number[] = [];
+    for (const boundary of dynamicBoundaries) {
+      if (boundary.sourceId === symbol.id && boundary.line)
+        focusLines.push(boundary.line);
+    }
     let importance = 1;
     if (node?.isRoot) importance = 10;
     else if (pathNodeIds.has(symbol.id)) importance = 9;
@@ -370,7 +381,9 @@ function rankSymbols(
       relationScore += kindWeight * (crossFile ? 2 : 1);
       if (edge.provenance === "static") relationScore += 4;
       if (edge.src === symbol.id && edge.firstLine > 0) {
-        focusLines.push(edge.firstLine);
+        if (edge.kind === "CALLS" && pathNodeIds.has(edge.dst))
+          focusLines.unshift(edge.firstLine);
+        else focusLines.push(edge.firstLine);
       }
       if (crossFile && edge.kind === "CALLS" && edge.dst === symbol.id)
         importance = Math.max(importance, 6);
@@ -383,9 +396,12 @@ function rankSymbols(
         importance * 100 +
         relationScore +
         (nodeScores.get(symbol.id) ?? 0) * 100,
-      focusLines: [...new Set(focusLines)].sort((a, b) => a - b),
+      focusLines: [...new Set(focusLines)],
       spine: pathNodeIds.has(symbol.id),
-      skeleton: skeletonNodeIds.has(symbol.id),
+      skeleton:
+        skeletonNodeIds.has(symbol.id) &&
+        !node?.isRoot &&
+        !pathNodeIds.has(symbol.id),
     };
   });
 }
@@ -401,32 +417,47 @@ function renderFileText(
   // discarded every lower tier before budgeting, which left large context
   // budgets unused and hid useful implementation details from dense files.
   const ranked = [...clusters].sort((a, b) => {
-    if (a.spine !== b.spine) return Number(b.spine) - Number(a.spine);
     if (b.maxImportance !== a.maxImportance)
       return b.maxImportance - a.maxImportance;
+    if (a.spine !== b.spine) return Number(b.spine) - Number(a.spine);
     if (b.score !== a.score) return b.score - a.score;
     const densityA = a.score / Math.max(1, a.end - a.start + 1);
     const densityB = b.score / Math.max(1, b.end - b.start + 1);
     if (densityB !== densityA) return densityB - densityA;
     return a.end - a.start - (b.end - b.start);
   });
+  const completeBlocks = new Map(
+    ranked.map((cluster) => [
+      cluster,
+      cluster.symbols.length === 1
+        ? renderCluster(cluster, budget, false, sourceLines)
+        : "",
+    ]),
+  );
   const chosen = new Set<SymbolCluster>();
   const renderedByCluster = new Map<SymbolCluster, string>();
   let projected = 0;
-  for (const cluster of ranked) {
+  for (const [index, cluster] of ranked.entries()) {
     const remaining = Math.max(
       0,
       budget - projected - (chosen.size ? gap.length : 0),
     );
     if (remaining <= 0) continue;
-    // Keep one large symbol from consuming the complete file allowance. Every
-    // chosen cluster may still be truncated, so later relevant methods can use
-    // the remaining budget instead of being silently skipped.
-    const fairShare =
-      cluster.maxImportance >= 10 || ranked.length === 1
-        ? remaining
-        : Math.min(remaining, Math.max(700, Math.floor(budget * 0.38)));
-    const block = renderCluster(cluster, fairShare, true, sourceLines);
+    const complete = completeBlocks.get(cluster) ?? "";
+    const reserve =
+      !complete || complete.length > remaining
+        ? laterCompleteBodyCost(
+            ranked,
+            completeBlocks,
+            index,
+            remaining,
+            gap.length,
+          )
+        : 0;
+    const block =
+      complete && complete.length <= remaining
+        ? complete
+        : renderCluster(cluster, remaining - reserve, true, sourceLines);
     if (!block) continue;
     if (chosen.size === 0 || projected + gap.length + block.length <= budget) {
       chosen.add(cluster);
@@ -447,6 +478,22 @@ function renderFileText(
     selected.push(...cluster.symbols.map((item) => item.symbol));
   }
   return { text: parts.join(gap).slice(0, budget), symbols: selected };
+}
+
+function laterCompleteBodyCost(
+  ranked: readonly SymbolCluster[],
+  completeBlocks: ReadonlyMap<SymbolCluster, string>,
+  index: number,
+  remaining: number,
+  gapLength: number,
+): number {
+  for (const candidate of ranked.slice(index + 1)) {
+    if (!candidate.spine && candidate.maxImportance < 3) continue;
+    const cost = (completeBlocks.get(candidate)?.length ?? 0) + gapLength;
+    if (cost > gapLength && cost + MIN_FOCUSED_EXCERPT_CHARS <= remaining)
+      return cost;
+  }
+  return 0;
 }
 
 function renderCluster(
@@ -483,10 +530,7 @@ function renderCluster(
       continue;
     blocks.push(block);
   }
-  const rendered = blocks.join("\n").slice(0, budget);
-  return allowTruncate && rendered.includes("// ... truncated")
-    ? rendered.padEnd(budget)
-    : rendered;
+  return blocks.join("\n").slice(0, budget);
 }
 
 function renderSymbolSource(

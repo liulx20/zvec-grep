@@ -6,9 +6,72 @@ import {
   exploreGraph,
   exploreSubgraph,
   queryGraphNeighborhood,
+  resolveExploreSeeds,
 } from "../../dist/engine/graph/index.js";
 import { selectExploreFiles } from "../../dist/engine/graph/explore/file-selection.js";
+import { isTestPath } from "../../dist/engine/graph/path-policy.js";
+import {
+  matchesExactSymbolQuery,
+  symbolLookupLeaf,
+} from "../../dist/engine/graph/symbol-lookup.js";
 import { entityStorage, graphEntity as entity } from "../helpers/graph.mjs";
+
+test("test path policy recognizes generated fixture conventions", () => {
+  assert.equal(isTestPath("src/api/bitcoin.type-test.ts"), true);
+  assert.equal(isTestPath("src/utils/__fixtures__/amount.ts"), true);
+});
+
+test("private member lookup preserves the private identifier", () => {
+  const privateSend = entity("private-send", "#send", "client.ts", {
+    symbolType: "function",
+  });
+  privateSend.entity.metadata.scope = "Client";
+
+  assert.equal(symbolLookupLeaf("Client::#send"), "#send");
+  assert.equal(matchesExactSymbolQuery(privateSend, "#send"), true);
+  assert.equal(matchesExactSymbolQuery(privateSend, "send"), false);
+});
+
+test("qualified fallback seeds do not add compound text matches", () => {
+  const owner = entity("owner", "Service", "service.ts", {
+    symbolType: "value",
+  });
+  const unrelated = entity("unrelated", "AsyncInvoke", "async.ts");
+  const storage = entityStorage([owner, unrelated]);
+
+  assert.deepEqual(
+    resolveExploreSeeds(storage, "Service.invoke", undefined, 8),
+    ["owner"],
+  );
+});
+
+test("qualified flow queries select phrase coverage instead of one seed per word", () => {
+  const owner = entity("owner", "Client", "client.ts", {
+    symbolType: "value",
+  });
+  const review = entity("review", "ReviewButton", "ui/send/ReviewButton.tsx", {
+    symbolType: "value",
+    text: "const ReviewButton = () => useSendFormContext().signTransaction()",
+  });
+  const form = entity("form", "useSendForm", "ui/send/useSendForm.ts", {
+    symbolType: "value",
+    text: "const useSendForm = () => ({ reviewTransaction, sendTransaction })",
+  });
+  const unrelated = entity("unrelated", "send", "transport.ts", {
+    symbolType: "function",
+  });
+  const storage = entityStorage([owner, review, form, unrelated]);
+
+  assert.deepEqual(
+    resolveExploreSeeds(
+      storage,
+      "Client.signTransaction send form review",
+      undefined,
+      8,
+    ),
+    ["owner", "form", "review"],
+  );
+});
 
 test("file selection uses symbol overlap rather than role labels for redundancy", () => {
   const selected = selectExploreFiles({
@@ -259,7 +322,7 @@ test("exploreSubgraph drops call paths that exceed the retained node budget", ()
 test("explore maxChars is a hard source-text budget", () => {
   const graph = new SqliteGraphStorage("", { inMemory: true });
   graph.upsertFileGraph(
-    "large",
+    "file-large.ts",
     [
       {
         id: "large-symbol",
@@ -287,8 +350,67 @@ test("explore maxChars is a hard source-text budget", () => {
   assert.ok(
     result.files.reduce((sum, file) => sum + file.text.length, 0) <= 1_000,
   );
-  assert.equal(result.files[0].text.length, 1_000);
+  assert.ok(result.files[0].text.length <= 1_000);
   assert.match(result.files[0].text, /truncated/);
+  graph.close();
+});
+
+test("explore keeps a complete related body beside an oversized root", () => {
+  const graph = new SqliteGraphStorage("", { inMemory: true });
+  graph.upsertFileGraph(
+    "file-flow.ts",
+    [
+      {
+        id: "large-root",
+        kind: "function",
+        is_exported: true,
+        name: "largeRoot",
+      },
+      {
+        id: "next-step",
+        kind: "function",
+        is_exported: false,
+        name: "nextStep",
+      },
+    ],
+    [
+      {
+        src: "large-root",
+        dst: "next-step",
+        rel: "call",
+        count: 1,
+        first_line: 40,
+        ref_name: "nextStep",
+        kind: "CALLS",
+      },
+    ],
+    [],
+  );
+  const root = entity("large-root", "largeRoot", "flow.ts", {
+    symbolType: "function",
+    endLine: 182,
+    text: `function largeRoot() {\n${"  work();\n".repeat(180)}}`,
+  });
+  const next = entity("next-step", "nextStep", "flow.ts", {
+    symbolType: "function",
+    startLine: 220,
+    endLine: 224,
+    text: "function nextStep() {\n  prepare();\n  commit();\n  return COMPLETE_BODY;\n}",
+  });
+  root.entity.range.endOffset = 5_000;
+  next.entity.range.startOffset = 6_000;
+  next.entity.range.endOffset = 6_200;
+  Object.assign(graph, entityStorage([root, next]));
+
+  const result = exploreGraph(graph, {
+    query: "largeRoot",
+    maxChars: 1_200,
+    maxFiles: 1,
+  });
+  const text = result.files[0]?.text ?? "";
+  assert.ok(text.length <= 1_200);
+  assert.match(text, /focused call-site window/);
+  assert.match(text, /return COMPLETE_BODY/);
   graph.close();
 });
 

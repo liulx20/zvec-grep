@@ -35,6 +35,7 @@ export function collectCallSites(
   context?: {
     callableReturnTypes?: ReadonlyMap<string, string>;
     resolutionFacts?: ReadonlyMap<string, CallResolutionFact>;
+    independentOwnerStarts?: ReadonlySet<number>;
   },
 ): CallSite[] {
   const sites: CallSite[] = [];
@@ -52,6 +53,8 @@ export function collectCallSites(
       !skipSelfEntity &&
       entityTypes?.has(current.type) &&
       adapter?.shouldIndexEntity?.(current) !== false &&
+      (!context?.independentOwnerStarts ||
+        context.independentOwnerStarts.has(current.startIndex)) &&
       !isWrappedRootDeclaration(node, current)
     ) {
       return;
