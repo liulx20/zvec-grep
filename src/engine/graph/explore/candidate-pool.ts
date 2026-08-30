@@ -51,21 +51,22 @@ export class ExploreCandidatePool {
   }
 
   add(entity: StoredEntity, score: number): boolean {
-    if (this.candidates.has(entity.entity.id)) return false;
-    this.candidates.set(entity.entity.id, {
-      id: entity.entity.id,
-      kind:
-        entity.entity.metadata?.kind === "code"
-          ? entity.entity.metadata.symbolType
-          : undefined,
-      isRoot: false,
-      entity,
-    });
+    const added = !this.candidates.has(entity.entity.id);
+    if (added)
+      this.candidates.set(entity.entity.id, {
+        id: entity.entity.id,
+        kind:
+          entity.entity.metadata?.kind === "code"
+            ? entity.entity.metadata.symbolType
+            : undefined,
+        isRoot: false,
+        entity,
+      });
     this.scores.set(
       entity.entity.id,
       Math.max(this.scores.get(entity.entity.id) ?? 0, score),
     );
-    return true;
+    return added;
   }
 
   addFileEvidence(

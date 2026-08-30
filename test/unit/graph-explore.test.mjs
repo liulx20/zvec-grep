@@ -59,7 +59,7 @@ test("explicit file paths disambiguate exact explore symbols", () => {
 
   const groups = resolveExactExploreSeedGroups(
     entityStorage([target, unrelated]),
-    "signTransactionThunk src/sendFormThunks.ts",
+    "src/sendFormThunks.ts signTransactionThunk full function body",
     8,
   );
 

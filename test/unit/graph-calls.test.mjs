@@ -1179,7 +1179,7 @@ test("this.field receiver uses the owner field type, not a later local", async (
 interface Other { run(): void; }
 declare function makeOther(): Other;
 class Use {
-  value: Runner;
+  public value: Runner;
   invoke() {
     this.value.run();
     { const value: Other = makeOther(); value.run(); }
@@ -1199,6 +1199,22 @@ class Use {
   assert.equal(calls[0].target.receiver?.name, "this.value");
   assert.equal(calls[0].target.hints?.receiverType, "Runner");
   assert.equal(calls[1].target.hints?.receiverType, "Other");
+});
+
+test("Java annotated fields retain their declared receiver type", async () => {
+  const input = await extractGraph(
+    codeFile("Controller.java", { format: "java" }),
+    `class ProductService { void list() {} }
+class Controller {
+  @Autowired
+  private ProductService productService;
+  void handle() { productService.list(); }
+}`,
+  );
+  const call = input.refs.find(
+    (ref) => ref.type === "symbol" && ref.target.member === "list",
+  );
+  assert.equal(call?.target.hints?.receiverType, "ProductService");
 });
 
 test("TypeScript constructor parameter properties retain receiver types", async () => {

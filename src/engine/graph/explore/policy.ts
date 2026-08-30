@@ -22,6 +22,7 @@ type ScoredSeed = {
   score: number;
   coverage: number;
   coveredTerms: Set<string>;
+  coveredNameTerms: Set<string>;
   exact: boolean;
   retrievalRank: number | undefined;
   nameMatch: boolean;
@@ -437,6 +438,10 @@ export function resolveExploreSeeds(
     const contentHay = content;
     const identityHits = semanticTermCoverage(identityHay, terms);
     const contentHits = semanticTermCoverage(contentHay, terms);
+    const coveredTerms = semanticTermsCovered(symbolHay, terms);
+    const identityTermCount = semanticIdentityTerms(symbolHay).length;
+    const identityFocus =
+      identityTermCount === 0 ? 0 : identityHits / identityTermCount;
     const nameAffinity = terms.reduce(
       (total, term) =>
         total + identifierPrefixAffinity(symbolName(entity), term),
@@ -454,6 +459,8 @@ export function resolveExploreSeeds(
       (exact ? (preciseName ? 100 : 30) : 0) +
       retrievalScore +
       identityHits * 12 +
+      identityHits * identityFocus * 12 +
+      Number(coveredTerms.has(terms[0] ?? "")) * 18 +
       nameAffinity * 18 +
       (identityHits >= 2 ? 20 : 0) +
       contentHits * 3 +
@@ -463,7 +470,7 @@ export function resolveExploreSeeds(
     // Paths remain weak retrieval evidence above, but only symbol identity may
     // consume a concept slot. Otherwise every symbol below a directory named
     // after the query appears equally novel and crowds out the actual API.
-    const coveredTerms = semanticTermsCovered(symbolHay, terms);
+    const coveredNameTerms = semanticTermsCovered(symbolName(entity), terms);
     const callable = isCallableSymbolKind(kind);
     return {
       entity,
@@ -476,6 +483,7 @@ export function resolveExploreSeeds(
       structural: structuralIds.has(entity.entity.id),
       coverage: coveredTerms.size,
       coveredTerms,
+      coveredNameTerms,
     };
   });
   scored.sort((a, b) => b.score - a.score || a.id.localeCompare(b.id));
@@ -507,7 +515,7 @@ export function resolveExploreSeeds(
   const hardAnchorCount = selected.length;
 
   const structuralAnchor =
-    hardAnchorCount === 0 && !hasQualifiedAnchor
+    hardAnchorCount === 0 && !hasQualifiedAnchor && terms.length === 1
       ? scored.find(
           (candidate) =>
             candidate.nameMatch &&
@@ -635,7 +643,7 @@ export function resolveExploreSeeds(
   }
   const conceptSlots = Math.min(
     hasQualifiedAnchor ? 4 : limit,
-    Math.max(1, terms.length),
+    Math.max(1, Math.ceil(Math.sqrt(terms.length))),
   );
   const exactNameTarget = Math.min(
     limit,
@@ -671,31 +679,33 @@ export function resolveExploreSeeds(
     const coveredTerms = new Set(
       selected.flatMap((id) => [...(byId.get(id)?.coveredTerms ?? [])]),
     );
+    const coveredNameTerms = new Set(
+      selected.flatMap((id) => [...(byId.get(id)?.coveredNameTerms ?? [])]),
+    );
     const remaining = scored.filter(
       (item) =>
         !selectedIds.has(item.id) &&
         (item.exact ||
           (item.coverage >= 2 && item.retrievalRank !== undefined) ||
-          (item.coverage > 0 &&
-            item.callable &&
-            item.retrievalRank !== undefined) ||
-          (item.coverage > 0 &&
+          (item.coverage > 0 && item.callable && item.retrievalRank === 0) ||
+          (item.callable &&
             item.nameMatch &&
-            (item.callable || item.structural)) ||
+            (item.coverage >= 2 || item.coveredTerms.has(terms[0] ?? ""))) ||
           (item.coverage > 0 && connectedSeedIds.has(item.id))),
     );
     const novel = remaining.filter(
       (item) =>
         item.exact ||
-        [...item.coveredTerms].some((term) => !coveredTerms.has(term)),
+        [...item.coveredTerms].some((term) => !coveredTerms.has(term)) ||
+        [...item.coveredNameTerms].some((term) => !coveredNameTerms.has(term)),
     );
     const candidate = novel.sort(
       (left, right) =>
         Number(right.exact) - Number(left.exact) ||
         Number(connectedSeedIds.has(right.id)) -
           Number(connectedSeedIds.has(left.id)) ||
-        seedMarginalScore(right, coveredTerms) -
-          seedMarginalScore(left, coveredTerms) ||
+        seedMarginalScore(right, coveredTerms, coveredNameTerms) -
+          seedMarginalScore(left, coveredTerms, coveredNameTerms) ||
         Number(right.nameMatch) - Number(left.nameMatch) ||
         right.score - left.score ||
         left.id.localeCompare(right.id),
@@ -762,11 +772,20 @@ export function resolveExploreSeeds(
 function seedMarginalScore(
   candidate: ScoredSeed,
   covered: ReadonlySet<string>,
+  coveredNames: ReadonlySet<string>,
 ): number {
   const novel = [...candidate.coveredTerms].filter(
     (term) => !covered.has(term),
   ).length;
-  return candidate.score + novel * 12 + Number(candidate.callable) * 8;
+  const novelNames = [...candidate.coveredNameTerms].filter(
+    (term) => !coveredNames.has(term),
+  ).length;
+  return (
+    candidate.score +
+    novel * 12 +
+    novelNames * 6 +
+    Number(candidate.callable) * 8
+  );
 }
 
 function incomingExecutionCandidates(
@@ -912,12 +931,6 @@ export function resolveExactExploreSeedGroups(
   if (
     pathHint &&
     !referencedMatches?.[0] &&
-    !isBarePathLookup(query, pathHint, exact)
-  )
-    return null;
-  if (
-    pathHint &&
-    !referencedMatches?.[0] &&
     new Set(exact.map((entity) => lower(symbolName(entity)))).size > 1
   )
     return null;
@@ -950,24 +963,6 @@ export function resolveExactExploreSeedGroups(
     .slice(0, limit);
 }
 
-function isBarePathLookup(
-  query: string,
-  pathHint: string,
-  matches: readonly StoredEntity[],
-): boolean {
-  let residual = query.replace(pathHint, " ");
-  for (const name of new Set(matches.map(symbolName)))
-    residual = residual.replace(
-      new RegExp(`\\b${escapeRegExp(name)}\\b`, "gi"),
-      " ",
-    );
-  return !/[A-Za-z_][A-Za-z0-9_]{1,}/.test(residual);
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
 function explicitSourcePath(query: string): string | undefined {
   return query
     .split(/\s+/)
@@ -982,28 +977,25 @@ function symbolsNamedInPath(
   limit: number,
 ): StoredEntity[] {
   const normalizedPath = pathHint.replaceAll("\\", "/").replace(/^\.\//, "");
-  const pathTerms = new Set(queryNameTerms(normalizedPath).map(lower));
   const stem = fileStem(normalizedPath);
-  const queryNames = queryNameTerms(query);
-  const namesOutsidePath = queryNames.filter(
-    (name) => !pathTerms.has(lower(name)),
-  );
+  const namesOutsidePath = queryNameTerms(query.replace(pathHint, " "));
   const names =
     namesOutsidePath.length > 0
       ? namesOutsidePath
-      : queryNames.filter((name) => lower(name) === stem);
-  const byId = new Map<string, StoredEntity>();
+      : queryNameTerms(normalizedPath).filter((name) => lower(name) === stem);
   for (const name of names) {
-    for (const entity of storage.findSymbolsByName(name, limit * 8)) {
-      const path = entity.file.relativePath.replaceAll("\\", "/");
-      if (
-        lower(symbolName(entity)) === lower(name) &&
-        (path === normalizedPath || path.endsWith(`/${normalizedPath}`))
-      )
-        byId.set(entity.entity.id, entity);
-    }
+    const matches = storage
+      .findSymbolsByName(name, limit * 8)
+      .filter((entity) => {
+        const path = entity.file.relativePath.replaceAll("\\", "/");
+        return (
+          lower(symbolName(entity)) === lower(name) &&
+          (path === normalizedPath || path.endsWith(`/${normalizedPath}`))
+        );
+      });
+    if (matches.length > 0) return matches;
   }
-  return [...byId.values()];
+  return [];
 }
 
 function symbolsMatchingReferenceInPath(

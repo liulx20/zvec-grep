@@ -763,7 +763,12 @@ function declarationBindings(
   const cFamily = text.match(
     /^\s*([A-Za-z_][^\s=;,)]*)\s+([A-Za-z_]\w*)\s*(?:[=;,)])?/,
   );
-  if (cFamily && !/^(?:const|let|var|return|new)$/.test(cFamily[1]!)) {
+  if (
+    cFamily &&
+    !/^(?:const|declare|final|let|new|private|protected|public|readonly|return|static|transient|var|volatile)$/.test(
+      cFamily[1]!,
+    )
+  ) {
     results.push({ name: cFamily[2]!, type: normalizeType(cFamily[1]!) });
     const elementType = collectionElementType(cFamily[1]!);
     if (elementType)
@@ -771,14 +776,15 @@ function declarationBindings(
   }
   const declarationStyle = resolutionSemantics(language).declarationStyle;
   if (declarationStyle === "java") {
-    const javaField = text.match(
-      /^\s*(?:(?:public|protected|private|static|final|volatile|transient)\s+)*([A-Za-z_][\w.<>, ?[\]]*)\s+([A-Za-z_]\w*)\s*(?:[=;])?/,
-    );
-    if (javaField)
-      results.push({
-        name: javaField[2]!,
-        type: normalizeType(javaField[1]!),
-      });
+    const type = node.childForFieldName("type")?.text;
+    if (type) {
+      for (const declarator of node.namedChildren.filter(
+        (child) => child.type === "variable_declarator",
+      )) {
+        const name = declarator.childForFieldName("name")?.text;
+        if (name) results.push({ name, type: normalizeType(type) });
+      }
+    }
   }
   const constructed = constructedBinding(text, language);
   if (constructed) results.push(constructed);
