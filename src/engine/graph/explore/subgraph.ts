@@ -27,6 +27,7 @@ import {
   isTypeishKind,
   qualifiedReferenceNames,
   queryEvidenceTerms,
+  queryTargetsPath,
   queryTerms,
   semanticTermsCovered,
   resolveExactExploreSeedGroups,
@@ -171,10 +172,12 @@ export function exploreGraph(
   let { callPaths } = subgraph;
   const nodeScores = new Map(subgraph.nodeScores);
   const candidates = new ExploreCandidatePool(subgraph.nodes, nodeScores);
+  if (intent === "concept")
+    collectSemanticCandidates(candidates, graph, query, searchLimit);
   for (const fileId of subgraph.impactExpansionFileIds)
     candidates.addFileEvidence(fileId, "impact_summary");
   for (const fileId of subgraph.directImpactFileIds)
-    candidates.addFileEvidence(fileId, "direct_call");
+    candidates.addFileEvidence(fileId, "direct_caller");
   collectDirectCallCollaborators(
     candidates,
     subgraph.nodes,
@@ -269,6 +272,7 @@ export function exploreGraph(
       ]),
     ],
     traversalDepth,
+    executionSourceIds,
   );
   const contextNodes = impactCandidates.nodes;
   if (contextNodes.length !== nodes.length) {
@@ -438,6 +442,38 @@ export function exploreGraph(
     dynamicBoundariesTruncated: visibleDynamicBoundariesTruncated,
     files,
   };
+}
+
+function collectSemanticCandidates(
+  pool: ExploreCandidatePool,
+  graph: GraphReader,
+  query: string,
+  limit: number,
+): void {
+  const retrieved = graph.findSymbolsByQuery?.(query, limit * 2) ?? [];
+  const representedNames = new Set(
+    pool.nodes
+      .map((node) => node.entity?.entity.metadata)
+      .filter((metadata) => metadata?.kind === "code")
+      .map((metadata) => metadata.symbolName?.toLowerCase())
+      .filter((name): name is string => Boolean(name)),
+  );
+  const production = retrieved.filter((entity) => {
+    const metadata = entity.entity.metadata;
+    const name =
+      metadata?.kind === "code"
+        ? metadata.symbolName?.toLowerCase()
+        : undefined;
+    return (
+      (!name || !representedNames.has(name) || pool.has(entity.entity.id)) &&
+      (!isLowValuePath(entity.file.relativePath) ||
+        queryTargetsPath(query, entity.file.relativePath))
+    );
+  });
+  for (const [rank, entity] of (production.length > 0 ? production : retrieved)
+    .slice(0, limit)
+    .entries())
+    pool.add(entity, 0.2 * (1 - rank / limit));
 }
 
 function exclusiveFileIds(
@@ -744,6 +780,7 @@ function addDynamicBoundaryEvidence(
   nodeScores: ReadonlyMap<string, number>,
   queryTerms: readonly string[],
   continuationDepth: number,
+  executionSourceIds: ReadonlySet<string>,
 ): ExploreEdge[] {
   if (boundaries.length === 0) return [];
   const projections: ExploreEdge[] = [];
@@ -774,15 +811,42 @@ function addDynamicBoundaryEvidence(
     );
   for (const item of ranked)
     pool.addFileEvidence(item.fileId, "dynamic_boundary", item.score || 1);
+  const targets = new Map(
+    boundaries.map((boundary) => {
+      const resolved = boundary.candidateDetails.length === 1;
+      const contextualTarget = resolved
+        ? null
+        : contextualGenericTarget(graph, boundary);
+      return [
+        boundary,
+        resolved
+          ? graph.getEntity(boundary.candidateDetails[0]!.targetId)
+          : (contextualTarget ??
+            dynamicImplementationTarget(graph, boundary, queryTerms)),
+      ] as const;
+    }),
+  );
+  const executionIds = new Set(executionSourceIds);
+  for (let pass = 0; pass < boundaries.length; pass += 1) {
+    let changed = false;
+    for (const [boundary, target] of targets) {
+      if (
+        !target ||
+        !executionIds.has(boundary.sourceId) ||
+        executionIds.has(target.entity.id)
+      )
+        continue;
+      executionIds.add(target.entity.id);
+      changed = true;
+    }
+    if (!changed) break;
+  }
   for (const boundary of boundaries) {
     const resolved = boundary.candidateDetails.length === 1;
     const contextualTarget = resolved
       ? null
       : contextualGenericTarget(graph, boundary);
-    const target = resolved
-      ? graph.getEntity(boundary.candidateDetails[0]!.targetId)
-      : (contextualTarget ??
-        dynamicImplementationTarget(graph, boundary, queryTerms));
+    const target = targets.get(boundary);
     if (!target) continue;
     pool.add(target, (nodeScores.get(boundary.sourceId) ?? 0.02) * 0.8);
     pool.addFileEvidence(target.file.id, "dynamic_boundary");
@@ -811,7 +875,11 @@ function addDynamicBoundaryEvidence(
         "query_alignment",
         concepts.size / queryTerms.length,
       );
-    if (concepts.size >= 2 || contextualTarget) {
+    if (
+      executionIds.has(boundary.sourceId) ||
+      concepts.size >= 2 ||
+      contextualTarget
+    ) {
       pool.addFileEvidence(target.file.id, "call_path");
       const related = resolved
         ? graph.traverse(target.entity.id, {
@@ -995,6 +1063,13 @@ export function exploreSubgraph(
       depth: 0,
     });
   }
+  const rootCounterpartIds = [
+    ...graph.outgoingEdges(rootIds, ["COUNTERPART"], rootIds.length * 4),
+    ...graph.incomingEdges(rootIds, ["COUNTERPART"], rootIds.length * 4),
+  ]
+    .flatMap((edge) => [edge.src, edge.dst])
+    .filter((id) => !rootIds.includes(id));
+  for (const id of rootCounterpartIds) absorb(selected, { id }, false, 0);
   const hierarchyBudget = Math.max(
     8,
     Math.floor(maxNodes * HIERARCHY_BUDGET_RATIO),
@@ -1156,6 +1231,7 @@ export function exploreSubgraph(
   glueCallNeighbors(graph, selected, rootIds, DEFAULT_GLUE_LIMIT);
   const structuralBridgeIds = new Set(inheritedContractIds);
   const directImpactIds = new Set<string>();
+  const incomingCallPaths: ExploreCallPath[] = [];
   const impactGlueIds = glueImpactNeighbors(
     graph,
     selected,
@@ -1164,6 +1240,7 @@ export function exploreSubgraph(
     structuralBridgeIds,
     queryEvidenceTerms(options.query ?? ""),
     directImpactIds,
+    incomingCallPaths,
   );
   impactGlueIds.push(
     ...glueImpactNeighbors(
@@ -1174,6 +1251,7 @@ export function exploreSubgraph(
       structuralBridgeIds,
       queryEvidenceTerms(options.query ?? ""),
       directImpactIds,
+      incomingCallPaths,
       true,
     ),
   );
@@ -1215,10 +1293,9 @@ export function exploreSubgraph(
   for (const ref of pathResult.refs) absorb(selected, ref, false, 1);
   const pairCallPaths = [
     ...new Map(
-      [...focusedBoundaryPaths, ...pathResult.paths].map((path) => [
-        path.nodes.join("\0"),
-        path,
-      ]),
+      [...focusedBoundaryPaths, ...incomingCallPaths, ...pathResult.paths].map(
+        (path) => [path.nodes.join("\0"), path],
+      ),
     ).values(),
   ];
   const protectedIds = new Set([
@@ -1279,12 +1356,16 @@ export function exploreSubgraph(
       const metadata = node.entity?.entity.metadata;
       const identity =
         metadata?.kind === "code"
-          ? `${metadata.symbolName ?? ""} ${metadata.scope ?? ""} ${node.entity?.file.relativePath ?? ""}`
+          ? `${metadata.symbolName ?? ""} ${metadata.scope ?? ""} ${metadata.signature ?? ""} ${node.entity?.file.relativePath ?? ""}`
           : "";
       return [node.id, semanticTermsCovered(identity, terms)] as const;
     }),
   );
-  const executionStartIds = [...rootIds, ...representativeMemberIds];
+  const executionStartIds = [
+    ...rootIds,
+    ...rootCounterpartIds,
+    ...representativeMemberIds,
+  ];
   const callPaths =
     options.includeCallPaths === false
       ? []
@@ -1635,6 +1716,7 @@ function glueImpactNeighbors(
   structuralBridgeIds: Set<string>,
   terms: readonly string[],
   directImpactIds: Set<string>,
+  incomingCallPaths: ExploreCallPath[],
   requireQueryMatch = false,
 ): string[] {
   let added = 0;
@@ -1707,20 +1789,43 @@ function glueImpactNeighbors(
     const rootPath = graph.getEntity(rootId)?.file.relativePath ?? "";
     const bridges = constructionBridgeSources(graph, rootId, rootLimit);
     const bridgeIds = new Set(bridges.map((ref) => ref.id));
+    const dispatchTargetIds = [
+      rootId,
+      ...graph
+        .outgoingEdges([rootId], ["COUNTERPART"], 8)
+        .map((edge) => edge.dst),
+      ...graph
+        .incomingEdges([rootId], ["COUNTERPART"], 8)
+        .map((edge) => edge.src),
+    ];
+    const dynamicSources = graph.dynamicBoundarySources(
+      dispatchTargetIds,
+      Math.min(128, rootLimit * 4),
+    );
+    const dynamicSourceIds = new Set(dynamicSources.map((ref) => ref.id));
     const directCallSourceIds = new Set(
       graph
-        .incomingEdges([rootId], ["CALLS"], Math.min(256, rootLimit * 8))
+        .incomingEdges(
+          dispatchTargetIds,
+          ["CALLS"],
+          Math.min(256, rootLimit * 8),
+        )
         .map((edge) => edge.src),
     );
     const related = rankDirectImpactSources(
-      [...graph.impact(rootId, 2, Math.min(256, rootLimit * 8)), ...bridges],
+      [
+        ...graph.impact(rootId, 2, Math.min(256, rootLimit * 8)),
+        ...bridges,
+        ...dynamicSources,
+      ],
       graph,
       rootPath,
       terms,
       requireQueryMatch,
     );
     for (const ref of related) {
-      if (directCallSourceIds.has(ref.id)) directImpactIds.add(ref.id);
+      if (directCallSourceIds.has(ref.id) || dynamicSourceIds.has(ref.id))
+        directImpactIds.add(ref.id);
       if (bridgeIds.has(ref.id)) structuralBridgeIds.add(ref.id);
       const retained = selected.has(ref.id) || absorb(selected, ref, false, 2);
       if (retained) {
@@ -1729,6 +1834,29 @@ function glueImpactNeighbors(
         rootIdsAdded.push(ref.id);
       }
       if (rootAdded >= rootLimit) break;
+    }
+    if (!requireQueryMatch) {
+      for (const ref of related.slice(0, 8)) {
+        const source = graph.getEntity(ref.id);
+        if (
+          !source ||
+          source.file.id === graph.getEntity(rootId)?.file.id ||
+          isLowValuePath(source.file.relativePath)
+        )
+          continue;
+        const path = graph.pathBetween(ref.id, rootId, 2, 256);
+        if (!path || path.length < 3) continue;
+        for (const item of path) {
+          absorb(selected, item, false, 2);
+          structuralBridgeIds.add(item.id);
+        }
+        incomingCallPaths.push({
+          from: path[0]!.id,
+          to: path.at(-1)!.id,
+          nodes: path.map((item) => item.id),
+        });
+        break;
+      }
     }
   }
   return roundRobin(addedByRoot);

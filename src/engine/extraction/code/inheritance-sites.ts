@@ -43,6 +43,12 @@ export function collectInheritanceSites(
         return collectRust(node);
       case "go":
         return collectGo(node);
+      case "csharp":
+        return collectCsharp(node);
+      case "dart":
+        return collectDart(node);
+      case "swift":
+        return collectSwift(node);
       default:
         return [];
     }
@@ -51,6 +57,36 @@ export function collectInheritanceSites(
     ...site,
     target: referenceTargetFromSyntax(site.name),
   }));
+}
+
+function collectCsharp(node: TSNode): RawInheritanceSite[] {
+  const bases = node.childForFieldName("bases");
+  if (!bases) return [];
+  return nominalChildren(bases, "extends");
+}
+
+function collectDart(node: TSNode): RawInheritanceSite[] {
+  const superclass = node.childForFieldName("superclass");
+  return superclass ? nominalChildren(superclass, "extends") : [];
+}
+
+function collectSwift(node: TSNode): RawInheritanceSite[] {
+  return node.namedChildren
+    .filter((child) => child.type === "inheritance_specifier")
+    .flatMap((child) => nominalChildren(child, "extends"));
+}
+
+function nominalChildren(
+  node: TSNode,
+  kind: RawInheritanceSite["kind"],
+): RawInheritanceSite[] {
+  const candidates = node.namedChildren.filter((child) =>
+    /(?:identifier|name|type)$/.test(child.type),
+  );
+  return (candidates.length > 0 ? candidates : [node]).flatMap((candidate) => {
+    const name = normalizeTypeName(candidate);
+    return name ? [{ name, line: candidate.startPosition.row + 1, kind }] : [];
+  });
 }
 
 function collectJsTs(node: TSNode): RawInheritanceSite[] {

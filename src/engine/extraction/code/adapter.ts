@@ -2,12 +2,15 @@ import type { CodeEntityModifier, CodeSymbolType } from "../../types.js";
 import type { StructuredCodeFormat } from "../../code-formats.js";
 import type { TSNode } from "./tree-sitter/nodes.js";
 import { C_ADAPTER } from "./languages/c.js";
+import { CSHARP_ADAPTER } from "./languages/csharp.js";
 import { CPP_ADAPTER } from "./languages/cpp.js";
+import { DART_ADAPTER } from "./languages/dart.js";
 import { GO_ADAPTER } from "./languages/go.js";
 import { JAVA_ADAPTER } from "./languages/java.js";
 import { JAVASCRIPT_ADAPTER } from "./languages/javascript.js";
 import { PYTHON_ADAPTER } from "./languages/python.js";
 import { RUST_ADAPTER } from "./languages/rust.js";
+import { SWIFT_ADAPTER } from "./languages/swift.js";
 import { TYPESCRIPT_ADAPTER } from "./languages/typescript.js";
 import { extractCallableArity } from "./callable-shape.js";
 import {
@@ -55,13 +58,16 @@ export type LanguageAdapter = {
 
 const ADAPTERS = {
   c: withCallableShape(C_ADAPTER),
+  csharp: withCallableShape(CSHARP_ADAPTER),
   cpp: withCallableShape(CPP_ADAPTER),
+  dart: withCallableShape(DART_ADAPTER),
   go: withCallableShape(GO_ADAPTER),
   java: withCallableShape(JAVA_ADAPTER),
   javascript: withCallableShape(JAVASCRIPT_ADAPTER),
   jsx: withCallableShape(JAVASCRIPT_ADAPTER),
   python: withCallableShape(PYTHON_ADAPTER),
   rust: withCallableShape(RUST_ADAPTER),
+  swift: withCallableShape(SWIFT_ADAPTER),
   tsx: withCallableShape(TYPESCRIPT_ADAPTER),
   typescript: withCallableShape(TYPESCRIPT_ADAPTER),
 } satisfies Record<StructuredCodeFormat, LanguageAdapter>;

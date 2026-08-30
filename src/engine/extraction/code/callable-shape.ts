@@ -3,6 +3,7 @@ import type { TSNode } from "./tree-sitter/nodes.js";
 const PARAMETER_LIST_TYPES = new Set([
   "parameters",
   "formal_parameters",
+  "formal_parameter_list",
   "parameter_list",
 ]);
 
@@ -62,7 +63,10 @@ export function extractCallableReturnType(
     if (first) return normalizeReturnType(first.split(/\s+/).at(-1)!, language);
   }
 
-  if (symbolName && ["c", "cpp", "java"].includes(language ?? "")) {
+  if (
+    symbolName &&
+    ["c", "cpp", "csharp", "dart", "java"].includes(language ?? "")
+  ) {
     const escaped = symbolName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     const prefix = new RegExp(`^(.*?)\\b${escaped}\\s*\\(`).exec(
       signature,

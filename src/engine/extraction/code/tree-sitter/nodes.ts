@@ -1,6 +1,44 @@
-import type Parser from "web-tree-sitter";
+import type { Node, Tree } from "web-tree-sitter";
 
-export type TSNode = Parser.SyntaxNode;
+type RecursiveNodeMembers =
+  | "child"
+  | "childForFieldId"
+  | "childForFieldName"
+  | "children"
+  | "descendantsOfType"
+  | "firstChild"
+  | "firstNamedChild"
+  | "lastChild"
+  | "lastNamedChild"
+  | "namedChild"
+  | "namedChildren"
+  | "nextNamedSibling"
+  | "nextSibling"
+  | "parent"
+  | "previousNamedSibling"
+  | "previousSibling";
+
+/** Runtime nodes expose dense child arrays; model that invariant once. */
+export type TSNode = Omit<Node, RecursiveNodeMembers> & {
+  child(index: number): TSNode | null;
+  childForFieldId(fieldId: number): TSNode | null;
+  childForFieldName(fieldName: string): TSNode | null;
+  children: TSNode[];
+  descendantsOfType(types: string | string[]): TSNode[];
+  firstChild: TSNode | null;
+  firstNamedChild: TSNode | null;
+  lastChild: TSNode | null;
+  lastNamedChild: TSNode | null;
+  namedChild(index: number): TSNode | null;
+  namedChildren: TSNode[];
+  nextNamedSibling: TSNode | null;
+  nextSibling: TSNode | null;
+  parent: TSNode | null;
+  previousNamedSibling: TSNode | null;
+  previousSibling: TSNode | null;
+};
+
+export type TSTree = Omit<Tree, "rootNode"> & { rootNode: TSNode };
 
 export function findIdentifierLeaf(node: TSNode): TSNode | null {
   const wrappers = new Set([

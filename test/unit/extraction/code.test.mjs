@@ -435,6 +435,82 @@ test("Python ABC, Protocol, and abstract methods retain abstract semantics", asy
   );
 });
 
+test("Dart, C#, and Swift expose structured symbols and calls", async () => {
+  const cases = [
+    {
+      format: "dart",
+      path: "main.dart",
+      source: [
+        "void main() => runApp(const App());",
+        "class App extends Widget {",
+        "  Page build(Context context) { return Page(); }",
+        "}",
+      ].join("\n"),
+      symbols: ["App", "build", "main"],
+      call: "runApp",
+    },
+    {
+      format: "csharp",
+      path: "Controller.cs",
+      source: [
+        "public class Controller : BaseController {",
+        "  public Result Create(Create.Command command) => mediator.Send(command);",
+        "}",
+      ].join("\n"),
+      symbols: ["Controller", "Create"],
+      call: "mediator.Send",
+      typeRef: "Create.Command",
+    },
+    {
+      format: "swift",
+      path: "Controller.swift",
+      source: [
+        "enum Controller {",
+        "  static func show(req: Request) -> Model { GetRoute.query() }",
+        "}",
+        "func routes(app: App) { app.get(use: Controller.show) }",
+      ].join("\n"),
+      symbols: ["Controller", "routes", "show"],
+      call: "GetRoute.query",
+      functionRef: "Controller.show",
+    },
+  ];
+
+  for (const fixture of cases) {
+    const analysis = await new CodeExtractor().analyzeForIndexing(
+      codeSource(fixture.format, fixture.source, fixture.path),
+    );
+    assert.deepEqual(
+      analysis.fragments
+        .map(({ fragment }) => fragment.metadata?.symbolName)
+        .filter(Boolean)
+        .sort(),
+      fixture.symbols.sort(),
+    );
+    assert.ok(
+      analysis.calls.some((owner) =>
+        owner.sites.some((site) => site.name === fixture.call),
+      ),
+      `${fixture.format} should extract ${fixture.call}`,
+    );
+    if (fixture.functionRef)
+      assert.ok(
+        analysis.refs.some((owner) =>
+          owner.sites.some((site) => site.target.raw === fixture.functionRef),
+        ),
+        `${fixture.format} should extract ${fixture.functionRef}`,
+      );
+    if (fixture.typeRef)
+      assert.ok(
+        analysis.refs.some((owner) =>
+          owner.sites.some((site) => site.target.raw === fixture.typeRef),
+        ),
+        `${fixture.format} should extract ${fixture.typeRef}`,
+      );
+    assert.equal(analysis.sourceLanguage, fixture.format);
+  }
+});
+
 test("C field-shaped API declarations with pointer parameters remain functions", async () => {
   const fragments = await new CodeExtractor().extract(
     codeSource(

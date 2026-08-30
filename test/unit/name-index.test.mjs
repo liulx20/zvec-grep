@@ -85,6 +85,51 @@ test("preferred Rust type imports ignore same-file impl containers", () => {
   );
 });
 
+test("qualified types resolve relative to their lexical namespace", () => {
+  const names = new NameIndex();
+  names.load([
+    {
+      id: "articles-command",
+      fileId: "articles-create",
+      name: "Command",
+      qualifiedName: "App::Articles::Create::Command",
+      containerId: "articles-create-container",
+      kind: "class",
+    },
+    {
+      id: "users-command",
+      fileId: "users-create",
+      name: "Command",
+      qualifiedName: "App::Users::Create::Command",
+      containerId: "users-create-container",
+      kind: "class",
+    },
+  ]);
+
+  const result = resolveRef(
+    {
+      id: "ref",
+      src_file: "controller",
+      owner: "create-action",
+      ref_name: "Create.Command",
+      ref_kind: "type",
+      line: 1,
+      source_language: "csharp",
+    },
+    names,
+    [],
+    undefined,
+    "ArticlesController",
+    "articles-controller",
+    [],
+    undefined,
+    "App::Articles::ArticlesController::Create",
+  );
+
+  assert.equal(result.status, "resolved");
+  assert.equal(result.dst, "articles-command");
+});
+
 function functionEntry(id, filePath) {
   return {
     id,

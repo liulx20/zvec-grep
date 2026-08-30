@@ -181,6 +181,34 @@ export class NameIndex {
     return null;
   }
 
+  /** Resolve a static qualified type name relative to enclosing scopes. */
+  lookupLexicalQualified(
+    refName: string,
+    sourceQualifiedName: string | undefined,
+    allowedKinds?: ReadonlySet<string>,
+  ): NameLookupResult | null {
+    const qualified = refName.replaceAll(".", "::");
+    const scopes = sourceQualifiedName?.split("::") ?? [];
+    const names = [
+      qualified,
+      ...scopes.map((_, index) =>
+        [...scopes.slice(0, scopes.length - index), qualified].join("::"),
+      ),
+    ];
+    for (const name of names) {
+      const candidates = (this.byName.get(name) ?? []).filter(
+        (candidate) => !allowedKinds || allowedKinds.has(candidate.kind),
+      );
+      const entry =
+        candidates.length === 1
+          ? candidates[0]
+          : (crossFileDeclarationDefinitionGroup(candidates) ??
+            equivalentDeclarationGroup(candidates));
+      if (entry) return { entry, evidence: "container_scope" };
+    }
+    return null;
+  }
+
   candidates(name: string, fileIds: readonly string[]): NameEntry[] {
     const allowed = new Set(fileIds);
     return [...(this.byName.get(name) ?? [])]

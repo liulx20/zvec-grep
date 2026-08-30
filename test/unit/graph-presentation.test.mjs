@@ -390,6 +390,10 @@ test("relationship summary treats a root envelope as displayed", () => {
     roots: [root],
     nodes: [root, initialize, ...noise],
     edges: [
+      ...noise.map((node, index) => ({
+        ...call("Service", node.id, index + 1),
+        kind: "CONTAINS",
+      })),
       ...noise.map((node, index) =>
         call(node.id, noise[(index + 1) % noise.length].id, index + 1),
       ),

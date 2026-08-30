@@ -31,6 +31,7 @@ const VALUE_CONTEXTS = new Set([
   "method_reference",
   "pair",
   "return_statement",
+  "value_argument",
   ...GENERAL_VALUE_CONTEXTS,
 ]);
 
@@ -63,9 +64,12 @@ export function collectFunctionRefSites(
       shadowed.add(current.text);
     const reference = functionReference(current, language);
     const name = reference?.name;
+    const qualified = reference
+      ? referenceTargetFromSyntax(reference.raw).receiver?.kind === "qualified"
+      : false;
     if (
       name &&
-      candidateNames.has(name) &&
+      (candidateNames.has(name) || qualified) &&
       !shadowed.has(name) &&
       isFunctionValuePosition(current)
     ) {
@@ -119,7 +123,8 @@ function functionReference(
   node: TSNode,
   language: string,
 ): { name: string; raw: string } | undefined {
-  if (node.type === "identifier") return { name: node.text, raw: node.text };
+  if (node.type === "identifier" || node.type === "simple_identifier")
+    return { name: node.text, raw: node.text };
   if (
     (language === "javascript" ||
       language === "jsx" ||
@@ -135,16 +140,19 @@ function functionReference(
       "field_expression",
       "member_expression",
       "method_reference",
+      "navigation_expression",
       "qualified_identifier",
       "selector_expression",
       "scoped_identifier",
     ].includes(node.type)
   ) {
-    const member =
+    let member =
       node.childForFieldName("field") ??
       node.childForFieldName("property") ??
       node.childForFieldName("name") ??
       node.namedChildren.at(-1);
+    if (member?.type === "navigation_suffix")
+      member = member.namedChildren.at(-1);
     if (member)
       return { name: member.text, raw: node.text.replace(/::/g, ".") };
   }

@@ -106,9 +106,11 @@ function callArity(node: TSNode): number | undefined {
 
 export function isCallNode(node: TSNode): boolean {
   return (
+    node.type === "argument_part" ||
     node.type === "call" ||
     node.type === "call_expression" ||
     node.type === "function_call_expression" ||
+    node.type === "invocation_expression" ||
     node.type === "method_invocation" ||
     node.type === "object_creation_expression" ||
     node.type === "new_expression"
@@ -126,6 +128,9 @@ export function extractCallName(node: TSNode): string | undefined {
 }
 
 export function extractCallTarget(node: TSNode): ReferenceTarget | undefined {
+  if (node.type === "argument_part") {
+    return dartCallTarget(node);
+  }
   if (node.type === "method_invocation") {
     const reflection = dynamicCallTarget(
       node,
@@ -170,6 +175,26 @@ export function extractCallTarget(node: TSNode): ReferenceTarget | undefined {
   const raw = normalizeCallName(callableTargetText(target));
   if (!raw) return undefined;
   return dynamicCallTarget(target, raw) ?? referenceTargetFromSyntax(raw);
+}
+
+function dartCallTarget(node: TSNode): ReferenceTarget | undefined {
+  const selector = node.parent;
+  const callee = selector?.previousNamedSibling;
+  if (!selector || selector.type !== "selector" || !callee) return undefined;
+
+  if (
+    callee.type === "selector" ||
+    callee.type === "unconditional_assignable_selector"
+  ) {
+    const receiver = callee.previousNamedSibling?.text.trim();
+    const member = callee.text.replace(/^\s*\./, "").trim();
+    if (!receiver || !member) return undefined;
+    const raw = normalizeCallName(`${receiver}.${member}`);
+    return raw ? memberReferenceTarget(raw, receiver, member) : undefined;
+  }
+
+  const raw = normalizeCallName(callee.text);
+  return raw ? referenceTargetFromSyntax(raw) : undefined;
 }
 
 function constructedReceiverType(node: TSNode): string | undefined {

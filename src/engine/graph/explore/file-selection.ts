@@ -16,6 +16,7 @@ export type ExploreFileRoleEvidenceKind =
   | "dynamic_boundary"
   | "impact_summary"
   | "low_value_path"
+  | "direct_caller"
   | "direct_call"
   | "call_path";
 
@@ -44,7 +45,7 @@ const EXACT_WEIGHTS: Readonly<Record<ExploreFileRoleEvidenceKind, number>> = {
   root: 4,
   semantic_seed: 0.5,
   root_counterpart: 2.2,
-  counterpart: 1.4,
+  counterpart: 0.5,
   collaborator: 0.8,
   aligned_change_surface: 0.8,
   entrypoint: 0.7,
@@ -56,8 +57,9 @@ const EXACT_WEIGHTS: Readonly<Record<ExploreFileRoleEvidenceKind, number>> = {
   dynamic_boundary: 0.6,
   impact_summary: 0,
   low_value_path: -2.5,
+  direct_caller: 1.2,
   direct_call: 0.1,
-  call_path: 1.1,
+  call_path: 0.5,
 };
 
 const CONCEPT_WEIGHTS: Readonly<Record<ExploreFileRoleEvidenceKind, number>> = {
@@ -73,6 +75,7 @@ const CONCEPT_WEIGHTS: Readonly<Record<ExploreFileRoleEvidenceKind, number>> = {
   integration: 1,
   impact_summary: 0,
   low_value_path: -3,
+  direct_caller: 1,
   direct_call: 0.45,
   call_path: 0.65,
 };
@@ -126,7 +129,10 @@ export function selectExploreFiles(
     selectedIds.add(candidate.fileId);
   };
 
-  for (const candidate of eligible.filter((item) => item.evidence.has("root")))
+  const exactRoots = eligible.filter((item) => item.evidence.has("root"));
+  for (const candidate of exactRoots.length > 0
+    ? exactRoots
+    : eligible.filter((item) => item.evidence.has("semantic_seed")))
     take(candidate);
   take(
     eligible.find(
@@ -135,10 +141,6 @@ export function selectExploreFiles(
         !selectedIds.has(candidate.fileId),
     ),
   );
-  for (const candidate of eligible.filter((item) =>
-    item.evidence.has("call_path"),
-  ))
-    take(candidate);
   while (selected.length < input.maxFiles) {
     const next = eligible
       .filter((candidate) => !selectedIds.has(candidate.fileId))
@@ -162,7 +164,10 @@ function isEligibleSourceCandidate(candidate: ExploreFileCandidate): boolean {
       "counterpart",
       "root_counterpart",
       "hierarchy",
+      "direct_caller",
       "direct_call",
+      "call_path",
+      "semantic_seed",
     ] as const
   ).some((kind) => candidate.evidence.has(kind));
   return (
@@ -238,6 +243,7 @@ function repeatedFamilySemanticScore(
   // distinct execution role even when it shares every query term with a root.
   if (
     candidate.evidence.has("call_path") ||
+    candidate.evidence.has("direct_caller") ||
     candidate.evidence.has("entrypoint") ||
     candidate.evidence.has("root_counterpart") ||
     (candidate.evidence.has("direct_call") &&

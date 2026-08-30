@@ -724,7 +724,7 @@ test("impact-only files need source-upgrade evidence", () => {
   );
 });
 
-test("file selection keeps source for a rendered call path", () => {
+test("file selection ranks call paths instead of reserving a slot", () => {
   const selected = selectExploreFiles({
     ordered: [
       ["root", 10],
@@ -742,7 +742,7 @@ test("file selection keeps source for a rendered call path", () => {
 
   assert.deepEqual(
     selected.map(({ fileId }) => fileId),
-    ["root", "flow"],
+    ["root", "lexical"],
   );
 });
 

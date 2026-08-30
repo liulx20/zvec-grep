@@ -6,6 +6,7 @@ const CODE_FORMATS: Record<string, string> = {
   ".cc": "cpp",
   ".cpp": "cpp",
   ".cxx": "cpp",
+  ".dart": "dart",
   ".h": "cpp",
   ".hpp": "cpp",
   ".go": "go",

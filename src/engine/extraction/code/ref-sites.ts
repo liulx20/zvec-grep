@@ -181,7 +181,7 @@ export function collectRefSites(
     // `type_annotation`. Capture those nodes only when their AST position is
     // type-bearing; this avoids turning declaration names and expressions into
     // type references.
-    if (isDirectTypeReference(current)) {
+    if (isDirectTypeReference(current, language)) {
       for (const occurrence of typeNamesIn(current, language)) {
         if (!inHeritageContext(current)) {
           push(
@@ -350,11 +350,15 @@ function isWrappedRootDeclaration(root: TSNode, current: TSNode): boolean {
   );
 }
 
-function isDirectTypeReference(node: TSNode): boolean {
+function isDirectTypeReference(node: TSNode, language: string): boolean {
   if (
     node.type !== "type_identifier" &&
     node.type !== "scoped_type_identifier" &&
-    node.type !== "qualified_type"
+    node.type !== "qualified_type" &&
+    !(
+      language === "csharp" &&
+      (node.type === "qualified_name" || node.type === "generic_name")
+    )
   ) {
     return false;
   }
@@ -462,6 +466,7 @@ function typeNamesIn(node: TSNode, language: string): TypeNameOccurrence[] {
       current.type === "identifier" ||
       current.type === "nested_type_identifier" ||
       current.type === "qualified_identifier" ||
+      current.type === "qualified_name" ||
       current.type === "member_expression" ||
       current.type === "scoped_type_identifier" ||
       current.type === "qualified_type"
@@ -481,7 +486,11 @@ function typeNamesIn(node: TSNode, language: string): TypeNameOccurrence[] {
         }
       }
     }
-    if (current.type === "generic_type" || current.type === "template_type") {
+    if (
+      current.type === "generic_type" ||
+      current.type === "template_type" ||
+      current.type === "generic_name"
+    ) {
       const nameNode =
         current.childForFieldName("name") ?? current.namedChildren[0];
       const name = nameNode ? normalizeRefName(nameNode.text) : undefined;

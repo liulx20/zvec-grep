@@ -121,7 +121,9 @@ export function assembleExploreFiles(input: {
     ) ??
     rankedFileIds.find(
       (fileId) =>
-        !central.has(fileId) && fileEvidence.get(fileId)?.has("direct_call"),
+        !central.has(fileId) &&
+        (fileEvidence.get(fileId)?.has("direct_caller") ||
+          fileEvidence.get(fileId)?.has("direct_call")),
     ) ??
     rankedFileIds.find(
       (fileId) =>

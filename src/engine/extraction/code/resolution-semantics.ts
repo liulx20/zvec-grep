@@ -37,6 +37,11 @@ const LANGUAGE_SEMANTICS: Record<
   Partial<LanguageResolutionSemantics>
 > = {
   c: { functionPointerDispatch: true },
+  csharp: {
+    genericBoundsStyle: "extends",
+    packageVisibility: "directory",
+    virtualReturnDispatch: true,
+  },
   cpp: {
     functionPointerDispatch: true,
     genericBoundsStyle: "cpp",
@@ -82,6 +87,8 @@ const LANGUAGE_SEMANTICS: Record<
   },
   javascript: { ownerFieldInference: "javascript" },
   jsx: { ownerFieldInference: "javascript" },
+  dart: { virtualReturnDispatch: true },
+  swift: { virtualReturnDispatch: true },
 };
 
 export function resolutionSemantics(

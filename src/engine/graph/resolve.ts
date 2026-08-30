@@ -29,6 +29,7 @@ export function resolveRef(
   sourceContainerId?: string,
   hierarchyContainerIds: readonly string[] = [],
   analyzedReference?: AnalyzedReference,
+  sourceQualifiedName?: string,
 ): RefResolveResult {
   const reference =
     analyzedReference ??
@@ -94,7 +95,17 @@ export function resolveRef(
     };
   }
   const exactImport = binding?.kind === "exact";
-  let hit = names.lookupWithEvidence(
+  let hit =
+    !binding &&
+    reference.receiver.kind === "qualified" &&
+    isStaticTypeReference(ref.ref_kind)
+      ? names.lookupLexicalQualified(
+          reference.name,
+          sourceQualifiedName,
+          targetKinds,
+        )
+      : null;
+  hit ??= names.lookupWithEvidence(
     plan.lookupName,
     exactImport ? binding.fileId : ref.src_file,
     plan.preferredFileIds,
@@ -148,4 +159,8 @@ function allowedKinds(kind: string): ReadonlySet<string> | undefined {
 
 function isInheritanceRef(kind: string): boolean {
   return kind === "extends" || kind === "implements" || kind === "overrides";
+}
+
+function isStaticTypeReference(kind: string): boolean {
+  return ["type", "return", "new", "extends", "implements"].includes(kind);
 }

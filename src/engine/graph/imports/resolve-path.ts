@@ -71,6 +71,7 @@ const EXTENSION_RESOLUTION: Record<string, readonly string[]> = {
   python: [".py", "/__init__.py"],
   c: [".h", ".c"],
   cpp: [".h", ".hpp", ".hxx", ".cpp", ".cc", ".cxx"],
+  dart: [".dart"],
   rust: [".rs", "/mod.rs"],
   java: [".java"],
 };
@@ -241,6 +242,21 @@ export function resolveImportPath(
     return hit
       ? { status: "resolved", fileId: hit.id, absolutePath: hit.absolutePath }
       : { status: "failed" };
+  }
+
+  if (language === "dart") {
+    if (trimmed.startsWith("dart:")) return { status: "external" };
+    if (trimmed.startsWith("package:")) {
+      const packagePath = trimmed.slice("package:".length).split("/");
+      packagePath.shift();
+      const relative = packagePath.join("/");
+      const hit = relative
+        ? index.findUniqueRelativeSuffix(`lib/${relative}`, "dart")
+        : undefined;
+      return hit
+        ? { status: "resolved", fileId: hit.id, absolutePath: hit.absolutePath }
+        : { status: "external" };
+    }
   }
 
   if (language === "python" && trimmed.startsWith(".")) {

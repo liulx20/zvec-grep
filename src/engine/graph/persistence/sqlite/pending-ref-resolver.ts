@@ -55,6 +55,7 @@ type ResolvePhase =
 
 type OwnerContext = {
   file_id: string;
+  qualified_name: string | null;
   container_id: string | null;
   container_name: string | null;
 };
@@ -491,7 +492,7 @@ export class SqlitePendingRefResolver {
            END AS qualified_container_name
          FROM symbols s
        )
-       SELECT s.id,s.file_id,
+       SELECT s.id,s.file_id,s.qualified_name,
          COALESCE(p.id,(
            SELECT CASE WHEN COUNT(*)=1 THEN MIN(candidate.id) END
            FROM symbols candidate
@@ -938,6 +939,7 @@ export class SqlitePendingRefResolver {
           )
         : [],
       reference,
+      owner.qualified_name ?? undefined,
     );
     if (result.status === "external") {
       this.projections.markExternal(ref.id);

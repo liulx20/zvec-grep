@@ -301,13 +301,24 @@ function relationshipLines(result: ExploreOutput): string[] {
     MAX_RELATIONSHIP_CALL_DEPTH,
   );
   const displayedFileIds = new Set(result.files.map((file) => file.file.id));
+  const nodeFileIds = new Map(
+    result.nodes.map((node) => [node.id, node.entity?.file.id]),
+  );
+  const displayedFileRanks = new Map(
+    result.files.map((file, index) => [
+      file.file.id,
+      result.files.length - index,
+    ]),
+  );
+  const displayedEndpointRank = (
+    edge: ExploreOutput["edges"][number],
+  ): number =>
+    (displayedFileRanks.get(nodeFileIds.get(edge.src) ?? "") ?? 0) +
+    (displayedFileRanks.get(nodeFileIds.get(edge.dst) ?? "") ?? 0);
   const selectedNodeIds = new Set([
     ...rootIds,
     ...result.files.flatMap((file) => file.symbols.map((symbol) => symbol.id)),
   ]);
-  const nodeFileIds = new Map(
-    result.nodes.map((node) => [node.id, node.entity?.file.id]),
-  );
   for (const kind of DISPLAY_RELATIONSHIP_KINDS) {
     const grouped = new Map<string, ExploreOutput["edges"][number]>();
     for (const edge of result.edges.filter(
@@ -367,6 +378,7 @@ function relationshipLines(result: ExploreOutput): string[] {
             displayedFileIds,
             nodeFileIds,
           ) ||
+        displayedEndpointRank(right) - displayedEndpointRank(left) ||
         relationshipTestWeight(result, left) -
           relationshipTestWeight(result, right) ||
         left.firstLine - right.firstLine ||
@@ -533,9 +545,15 @@ function relationshipRelevance(
     dstDistance === srcDistance + 1
       ? Math.max(0, 160 - srcDistance * 20)
       : 0;
+  const touchesRoot =
+    rootIds.has(edge.src) ||
+    rootIds.has(edge.dst) ||
+    rootContext.equivalents.has(edge.src) ||
+    rootContext.equivalents.has(edge.dst);
   return (
     endpointScore(edge.src) +
     endpointScore(edge.dst) +
+    (touchesRoot ? 100 : 0) +
     (staysWithinRootContext ? 60 : 0) +
     (staysWithinContainer ? 70 : 0) +
     (crossesRootBoundary ? 80 : 0) +

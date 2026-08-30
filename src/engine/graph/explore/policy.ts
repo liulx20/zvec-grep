@@ -64,7 +64,6 @@ const QUERY_STOP_WORDS = new Set([
   "over",
   "path",
   "reach",
-  "show",
   "specific",
   "sent",
   "struct",
@@ -357,7 +356,7 @@ export function resolveExploreSeeds(
       continue;
     }
     for (const entity of storage.findSymbolsByName(rawTerm, limit * 8)) {
-      if (symbolName(entity).toLowerCase() === term)
+      if (semanticIdentityTerms(symbolName(entity)).includes(term))
         nameMatchedIds.add(entity.entity.id);
       pushEntity(entity);
     }
@@ -367,7 +366,9 @@ export function resolveExploreSeeds(
       const termLimit = limit * (acronymTerms.has(term) ? 32 : 8);
       for (const variant of semanticTermVariants(term))
         for (const entity of storage.findSymbolsByQuery(variant, termLimit)) {
-          if (lower(symbolName(entity)) === lower(variant))
+          if (
+            semanticIdentityTerms(symbolName(entity)).includes(lower(variant))
+          )
             nameMatchedIds.add(entity.entity.id);
           pushEntity(entity);
         }
@@ -512,6 +513,12 @@ export function resolveExploreSeeds(
             candidate.nameMatch &&
             candidate.structural &&
             candidate.coverage > 0 &&
+            (explicitReferences.length === 0 ||
+              explicitReferences.some((reference) =>
+                semanticIdentityTerms(symbolName(candidate.entity)).includes(
+                  lower(symbolLookupLeaf(reference)),
+                ),
+              )) &&
             !selectedIds.has(candidate.id),
         )
       : undefined;
@@ -533,9 +540,25 @@ export function resolveExploreSeeds(
     (explicitReferences.length >= 2 &&
       nameTerms.length <= explicitReferences.length + 2) ||
     (nameTerms.length <= 4 && matchedQueryTerms.size >= 2);
-  if (!terseSymbolList && !selected.some((id) => byId.get(id)?.callable)) {
+  const structuralFamilyQuery =
+    Boolean(structuralAnchor) && nameTerms.length === 1;
+  if (
+    !terseSymbolList &&
+    !structuralFamilyQuery &&
+    !selected.some((id) => byId.get(id)?.callable)
+  ) {
     const available = (candidate: ScoredSeed) =>
       !selectedIds.has(candidate.id) && !softAnchorIds.has(candidate.id);
+    const anchorFiles = new Set(
+      selected.map((id) => byId.get(id)?.entity.file.id).filter(Boolean),
+    );
+    const anchorFileCallable = scored.find(
+      (candidate) =>
+        available(candidate) &&
+        candidate.callable &&
+        (candidate.nameMatch || candidate.retrievalRank !== undefined) &&
+        anchorFiles.has(candidate.entity.file.id),
+    );
     const retrieved =
       scored.find(
         (candidate) => available(candidate) && candidate.retrievalRank === 0,
@@ -560,7 +583,17 @@ export function resolveExploreSeeds(
                 left.id.localeCompare(right.id),
             )[0]
         : undefined;
-    const primary = sameFileCallable ?? retrieved;
+    const primary =
+      anchorFileCallable ??
+      sameFileCallable ??
+      scored.find(
+        (candidate) =>
+          available(candidate) &&
+          candidate.callable &&
+          candidate.coverage >= 2 &&
+          candidate.retrievalRank !== undefined,
+      ) ??
+      retrieved;
     if (primary) {
       selected.push(primary.id);
       selectedIds.add(primary.id);
@@ -701,14 +734,6 @@ export function resolveExploreSeeds(
     if (
       name &&
       selected.some((id) => lower(symbolName(byId.get(id)!.entity)) === name)
-    ) {
-      selectedIds.add(candidate.id);
-      continue;
-    }
-    const fileId = candidate.entity.file.id;
-    if (
-      !terseSymbolList &&
-      selected.some((id) => byId.get(id)?.entity.file.id === fileId)
     ) {
       selectedIds.add(candidate.id);
       continue;
@@ -1326,6 +1351,7 @@ function semanticTermVariants(term: string): string[] {
     if (!term.endsWith(suffix)) continue;
     const base = term.slice(0, -suffix.length);
     if (base.length >= 5) variants.add(base);
+    if (suffix === "ation" && base.length >= 3) variants.add(`${base}ate`);
   }
   return [...variants];
 }

@@ -24,6 +24,7 @@ const IMPORT_NODE_TYPES = new Set([
   "export_statement",
   "preproc_include",
   "import_declaration",
+  "import_or_export",
   "mod_item",
   "use_declaration",
 ]);
@@ -124,6 +125,19 @@ function pythonQualifiedModuleCandidates(
 
 function extractSpecsFromNode(node: TSNode, language: string): ImportSpec[] {
   const line = node.startPosition.row + 1;
+
+  if (language === "dart" && node.type === "import_or_export") {
+    const match = /^\s*(import|export)\s+['"]([^'"]+)['"]/.exec(node.text);
+    return match?.[2]
+      ? [
+          {
+            spec: match[2],
+            line,
+            ...(match[1] === "export" ? { reexport: true } : {}),
+          },
+        ]
+      : [];
+  }
 
   if (language === "rust" && node.type === "mod_item") {
     // Inline modules own a body and do not refer to another source file.
