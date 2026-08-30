@@ -12,6 +12,9 @@ CREATE INDEX IF NOT EXISTS unresolved_refs_name_idx ON unresolved_refs(ref_name,
 CREATE INDEX IF NOT EXISTS unresolved_refs_owner_idx ON unresolved_refs(owner_id,owner_is_file);
 CREATE INDEX IF NOT EXISTS unresolved_refs_retry_idx ON unresolved_refs(ref_name,status,last_attempt,id);
 CREATE INDEX IF NOT EXISTS unresolved_refs_member_idx ON unresolved_refs(member_name,status);
+CREATE INDEX IF NOT EXISTS unresolved_refs_receiver_type_idx
+  ON unresolved_refs(status,json_extract(resolution_hints,'$.receiverType'))
+  WHERE ref_kind='call' AND owner_is_file=0;
 CREATE INDEX IF NOT EXISTS edge_candidates_target_idx ON edge_candidates(target_id);
 `;
 

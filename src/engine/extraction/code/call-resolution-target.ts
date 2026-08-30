@@ -19,8 +19,17 @@ export function enrichTargetWithResolutionFact(
         ...dynamicCallable,
         hints: { ...dynamicCallable.hints, ...arityHints },
       };
+    const lexicalSource = fact?.lexicalCallableSources.get(target.member);
     const lexicalHints = fact?.boundNames.has(target.member)
-      ? { lexicallyBound: true as const }
+      ? {
+          lexicallyBound: true as const,
+          ...(lexicalSource
+            ? {
+                lexicalSource,
+                resolutionDependencies: [lexicalSource],
+              }
+            : {}),
+        }
       : {};
     return Object.keys(arityHints).length === 0 &&
       Object.keys(lexicalHints).length === 0
@@ -31,7 +40,12 @@ export function enrichTargetWithResolutionFact(
         };
   }
   if (!fact) return target;
-  const receiverTail = receiver.split(".").pop() ?? receiver;
+  const receiverTail = receiverSegmentName(
+    receiver.split(".").pop() ?? receiver,
+  );
+  const lexicallyBoundReceiver =
+    target.receiver?.kind === "qualified" &&
+    (fact.boundNames.has(receiver) || fact.boundNames.has(receiverTail));
   const indexedRoot = /^(?:this\.)?([A-Za-z_]\w*)\s*\[/.exec(receiver)?.[1];
   const dynamicTypes =
     fact.dynamicReceivers.get(receiver) ??
@@ -55,7 +69,17 @@ export function enrichTargetWithResolutionFact(
         inferDeclaredFieldChainType(receiver, fact) ??
         factoryReceiverType ??
         fact.ownerFieldTypes.get(receiverTail)));
-  if (!receiverType) return target;
+  if (!receiverType)
+    return lexicallyBoundReceiver
+      ? {
+          ...target,
+          hints: {
+            ...target.hints,
+            ...arityHints,
+            lexicallyBound: true,
+          },
+        }
+      : target;
   const bounds = fact.genericBounds.get(receiverType);
   const dynamicDispatch = Boolean(dynamicTypes?.length);
   return {
@@ -140,11 +164,20 @@ function inferFactoryReceiverType(
     fact.callableReturnTypes.get(factory.replace(/\./g, "::")) ??
     fact.callableReturnTypes.get(factory.replace(/::/g, "."));
   if (exact) return exact;
+  if (
+    ["javascript", "jsx", "typescript", "tsx"].includes(fact.language) &&
+    /^[A-Z]/.test(tail)
+  )
+    return normalizeType(factory);
   return factory === tail ? fact.callableReturnTypes.get(tail) : undefined;
 }
 
 function isOwnerFieldReceiver(receiver: string): boolean {
   return /^(?:this|self|cls)\./.test(receiver);
+}
+
+function receiverSegmentName(value: string): string {
+  return value.replace(/[!?]+$/g, "");
 }
 
 function dispatchForLanguage(

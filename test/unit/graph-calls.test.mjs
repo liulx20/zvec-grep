@@ -142,6 +142,24 @@ export function run() {
   graph.close();
 });
 
+test("resolves methods chained from JS and TS constructors", async () => {
+  const file = codeFile("constructor-chain.ts");
+  const input = await extractGraph(
+    file,
+    `class Writer { writeObject(value: unknown) { return value; } }
+function serialize(value: unknown) { return new Writer().writeObject(value); }`,
+  );
+  const serialize = input.nodes.find((node) => node.name === "serialize");
+  const writeObject = input.nodes.find((node) => node.name === "writeObject");
+  assert.ok(serialize && writeObject);
+
+  const graph = await resolveGraph(file, input);
+  const [boundary] = graph.dynamicBoundaries([serialize.id], 10);
+  assert.equal(boundary.target.hints.receiverType, "Writer");
+  assert.deepEqual(boundary.candidates, [writeObject.id]);
+  graph.close();
+});
+
 test("language builtins do not hide a locally defined symbol", async () => {
   const file = codeFile("local-builtin-name.ts");
   const source = {
@@ -329,6 +347,54 @@ test("extractFileGraph resolves cross-file calls after second file indexed", asy
   graph.close();
 });
 
+test("imported destructured values remain valid call targets", async () => {
+  const graph = new SqliteGraphStorage("", { inMemory: true });
+  const apiFile = codeFile("api.ts", { id: "api-file" });
+  const callerFile = codeFile("caller.ts", { id: "caller-file" });
+  const api = await extractGraph(
+    apiFile,
+    "export const { useFooQuery, useBarQuery } = api;",
+  );
+  const caller = await extractGraph(
+    callerFile,
+    'import { useFooQuery } from "./api"; export function run() { return useFooQuery(); }',
+  );
+
+  upsertGraph(graph, apiFile, api);
+  upsertGraph(graph, callerFile, caller);
+  await graph.resolvePending({ files: [apiFile, callerFile] });
+
+  const run = caller.nodes.find((node) => node.name === "run");
+  const hook = api.nodes.find((node) => node.name === "useFooQuery");
+  assert.ok(run && hook);
+  assert.deepEqual(
+    graph.callees(run.id, 1, 10).map((item) => item.id),
+    [hook.id],
+  );
+
+  const factoryFile = codeFile("factory.ts", { id: "factory-file" });
+  const consumerFile = codeFile("consumer.ts", { id: "consumer-file" });
+  const factory = await extractGraph(
+    factoryFile,
+    "export const useActions = () => { const execute = () => 1; return { perform: execute }; };",
+  );
+  const consumer = await extractGraph(
+    consumerFile,
+    'import { useActions } from "./factory"; export function consume() { const { perform } = useActions(); return perform(); }',
+  );
+  upsertGraph(graph, factoryFile, factory);
+  upsertGraph(graph, consumerFile, consumer);
+  await graph.resolvePending({ files: [factoryFile, consumerFile] });
+
+  const consume = consumer.nodes.find((node) => node.name === "consume");
+  const perform = factory.nodes.find((node) => node.name === "perform");
+  assert.ok(consume && perform);
+  assert.ok(
+    graph.callees(consume.id, 1, 10).some((item) => item.id === perform.id),
+  );
+  graph.close();
+});
+
 for (const fixture of [
   {
     name: "TypeScript import alias",
@@ -432,6 +498,37 @@ for (const fixture of [
   });
 }
 
+test("TypeScript namespace re-exports resolve through a barrel", async () => {
+  const callerFile = codeFile("caller.ts", { id: "reexport-caller" });
+  const barrelFile = codeFile("barrel.ts", { id: "reexport-barrel" });
+  const targetFile = codeFile("codec.ts", { id: "reexport-target" });
+  const [caller, barrel, target] = await Promise.all([
+    extractGraph(
+      callerFile,
+      'import { Api } from "./barrel";\nexport function run() { return Api.decode(); }\n',
+    ),
+    extractGraph(barrelFile, 'export * as Api from "./codec";\n'),
+    extractGraph(targetFile, "export function decode() { return 1; }\n"),
+  ]);
+  const graph = new SqliteGraphStorage("", { inMemory: true });
+  for (const [file, input] of [
+    [callerFile, caller],
+    [barrelFile, barrel],
+    [targetFile, target],
+  ])
+    upsertGraph(graph, file, input);
+  await graph.resolvePending({ files: [callerFile, barrelFile, targetFile] });
+
+  const run = caller.nodes.find((node) => node.name === "run");
+  const decode = target.nodes.find((node) => node.name === "decode");
+  assert.ok(run && decode);
+  assert.deepEqual(
+    graph.callees(run.id, 1, 10).map((item) => item.id),
+    [decode.id],
+  );
+  graph.close();
+});
+
 test("named import receiver calls resolve to the imported member", async () => {
   const callerFile = codeFile("caller.ts", { id: "named-import-caller" });
   const targetFile = codeFile("codec.ts", { id: "named-import-target" });
@@ -482,6 +579,29 @@ export function run() { return Demo.helper(); }`,
   graph.close();
 });
 
+test("default import receivers retain their value dependency", async () => {
+  const targetFile = codeFile("client.ts", { id: "default-import-target" });
+  const callerFile = codeFile("caller.ts", { id: "default-import-caller" });
+  const target = await extractGraph(
+    targetFile,
+    "const Client = makeClient(); export default Client;",
+  );
+  const caller = await extractGraph(
+    callerFile,
+    'import Client from "./client"; export function run() { return Client.send(); }',
+  );
+  const graph = new SqliteGraphStorage("", { inMemory: true });
+  upsertGraph(graph, targetFile, target);
+  upsertGraph(graph, callerFile, caller);
+  await graph.resolvePending({ files: [targetFile, callerFile] });
+
+  const run = caller.nodes.find((node) => node.name === "run");
+  const client = target.nodes.find((node) => node.name === "Client");
+  assert.ok(run && client);
+  assert.equal(graph.outgoingEdges([run.id], ["REFS"], 10)[0]?.dst, client.id);
+  graph.close();
+});
+
 test("receiver calls use the owning or explicitly named container", async () => {
   const file = codeFile("scoped-receivers.ts");
   const source = {
@@ -521,6 +641,136 @@ class Second {
   assert.ok(firstRun && secondRun && firstHelper && demoHelper);
   assert.equal(callTargetFor(firstRun.id), firstHelper.id);
   assert.equal(callTargetFor(secondRun.id), demoHelper.id);
+});
+
+test("bound private methods are recorded as callback references", async () => {
+  const input = await extractGraph(
+    codeFile("bound-callback.ts", { format: "typescript" }),
+    `class Loop { constructor(callback: () => void) {} }
+class Session {
+  #sendLoopBody() {}
+  #sendLoop = new Loop(this.#sendLoopBody.bind(this));
+}`,
+  );
+  const session = input.nodes.find((node) => node.name === "Session");
+  const body = input.nodes.find((node) => node.name === "#sendLoopBody");
+  assert.ok(session && body);
+  assert.ok(
+    input.edges.some(
+      (edge) =>
+        edge.src === session.id &&
+        edge.dst === body.id &&
+        edge.kind === "REFS" &&
+        edge.rel === "function",
+    ),
+  );
+});
+
+test("computed handler bindings preserve their dynamic dispatch boundary", async () => {
+  const file = codeFile("computed-handler.ts", { format: "typescript" });
+  const input = await extractGraph(
+    file,
+    `export function invoke(registry: Record<string, () => void>, key: string) {
+  const handler = registry[key];
+  handler();
+}
+export function construct(registry: Record<string, new () => object>, key: string) {
+  const Handler = registry[key];
+  return new Handler();
+}`,
+  );
+  const invoke = input.nodes.find((node) => node.name === "invoke");
+  const construct = input.nodes.find((node) => node.name === "construct");
+  assert.ok(invoke && construct);
+
+  const graph = await resolveGraph(file, input);
+  const boundary = graph.dynamicBoundaries([invoke.id], 10)[0];
+  assert.equal(boundary?.target.raw, "registry[key]");
+  assert.equal(
+    boundary?.target.hints?.dynamicDispatch?.form,
+    "computed_member",
+  );
+  assert.equal(boundary?.reason, "runtime_dispatch");
+  assert.equal(
+    graph.dynamicBoundaries([construct.id], 10)[0]?.target.raw,
+    "registry[key]",
+  );
+  graph.close();
+
+  const callerFile = codeFile("caller.ts", { id: "dynamic-namespace-caller" });
+  const barrelFile = codeFile("handlers.ts", {
+    id: "dynamic-namespace-barrel",
+  });
+  const alphaFile = codeFile("alpha.ts", { id: "dynamic-namespace-alpha" });
+  const betaFile = codeFile("beta.ts", { id: "dynamic-namespace-beta" });
+  const [callerInput, alphaInput, betaInput] = await Promise.all([
+    extractGraph(
+      callerFile,
+      `import * as Handlers from "./handlers";
+export function construct(fallback: boolean, key: string) {
+  const choices = fallback ? {} : Handlers;
+  const Handler = choices[key];
+  return new Handler();
+}`,
+    ),
+    extractGraph(alphaFile, "export class Alpha { run() {} }"),
+    extractGraph(betaFile, "export class Beta { run() {} }"),
+  ]);
+  const initialBarrel = await extractGraph(
+    barrelFile,
+    'export * from "./alpha";',
+  );
+  const namespaceGraph = new SqliteGraphStorage("", { inMemory: true });
+  for (const [namespaceFile, namespaceInput] of [
+    [callerFile, callerInput],
+    [barrelFile, initialBarrel],
+    [alphaFile, alphaInput],
+    [betaFile, betaInput],
+  ])
+    upsertGraph(namespaceGraph, namespaceFile, namespaceInput);
+  await namespaceGraph.resolvePending({
+    files: [callerFile, barrelFile, alphaFile, betaFile],
+  });
+
+  const namespaceConstruct = callerInput.nodes.find(
+    (node) => node.name === "construct",
+  );
+  const alpha = alphaInput.nodes.find((node) => node.name === "Alpha");
+  const beta = betaInput.nodes.find((node) => node.name === "Beta");
+  assert.ok(namespaceConstruct && alpha && beta);
+  let namespaceBoundary = namespaceGraph.dynamicBoundaries(
+    [namespaceConstruct.id],
+    10,
+  )[0];
+  assert.ok(
+    namespaceBoundary?.target.hints?.dynamicDispatch?.receiverSources?.includes(
+      "Handlers",
+    ),
+  );
+  assert.deepEqual(namespaceBoundary?.candidates, [alpha.id]);
+  assert.equal(
+    namespaceBoundary?.candidateDetails[0]?.reason,
+    "namespace_export",
+  );
+  assert.deepEqual(namespaceGraph.callees(namespaceConstruct.id, 1, 10), []);
+
+  const expandedBarrel = await extractGraph(
+    barrelFile,
+    'export * from "./alpha";\nexport * from "./beta";',
+  );
+  upsertGraph(namespaceGraph, barrelFile, expandedBarrel);
+  await namespaceGraph.resolvePending({
+    files: [callerFile, barrelFile, alphaFile, betaFile],
+  });
+  namespaceBoundary = namespaceGraph.dynamicBoundaries(
+    [namespaceConstruct.id],
+    10,
+  )[0];
+  assert.deepEqual(
+    new Set(namespaceBoundary?.candidates),
+    new Set([alpha.id, beta.id]),
+  );
+  namespaceGraph.close();
 });
 
 test("owner receivers resolve through the inheritance chain", async () => {
@@ -733,6 +983,93 @@ func invoke[T Runner](value T) { value.Run() }
   graph.close();
 });
 
+test("TypeScript generic bounds drive dynamic call candidates", async () => {
+  const file = codeFile("generic.ts", { format: "typescript" });
+  const input = await extractGraph(
+    file,
+    `interface Client { call(value: number): void; }
+class Impl implements Client { call(_value: number) {} }
+const invoke = <C extends Client>(core: C) => { core.call(1); };
+new Impl();`,
+  );
+  const invoke = input.nodes.find((node) => node.name === "invoke");
+  assert.ok(invoke);
+
+  const graph = await resolveGraph(file, input);
+  const [boundary] = graph.dynamicBoundaries([invoke.id], 10);
+  assert.deepEqual(boundary?.target.hints?.genericBounds, ["Client"]);
+  assert.deepEqual(boundary?.target.hints?.candidateTypes, ["C", "Client"]);
+  graph.close();
+});
+
+test("TypeScript interface dispatch checks structural method sets", async () => {
+  const typesFile = codeFile("types.ts", {
+    id: "structural-types",
+    format: "typescript",
+  });
+  const managerFile = codeFile("manager.ts", {
+    id: "structural-manager",
+    format: "typescript",
+  });
+  const types = await extractGraph(
+    typesFile,
+    `export interface C { invoke(): void; close(): void; }
+export class Client { invoke() {} close() {} file(): void {} }
+export class Partial { invoke() {} }`,
+  );
+  const manager = await extractGraph(
+    managerFile,
+    `import type { C as BaseC } from "./types";
+interface C extends BaseC { file(): void; }
+export function send(client: C) { client.invoke(); }`,
+  );
+  const send = manager.nodes.find((node) => node.name === "send");
+  const invoke = memberIn(types, "Client", "invoke");
+  const partial = memberIn(types, "Partial", "invoke");
+  assert.ok(send && invoke && partial);
+
+  const graph = new SqliteGraphStorage("", { inMemory: true });
+  upsertGraph(graph, typesFile, types);
+  upsertGraph(graph, managerFile, manager);
+  await graph.resolvePending({ files: [typesFile, managerFile] });
+  const boundary = graph.dynamicBoundaries([send.id], 10)[0];
+  assert.ok(boundary);
+  assert.deepEqual(boundary.candidates, [invoke.id]);
+  assert.ok(!boundary.candidates.includes(partial.id));
+  graph.close();
+});
+
+test("TypeScript object aliases resolve typed object implementations", async () => {
+  const file = codeFile("typed-object.ts", { format: "typescript" });
+  const input = await extractGraph(
+    file,
+    `type Runner = { run(): void };
+type Tracer = { trace(): void };
+function run() {}
+function trace() {}
+const implementation: Runner & Tracer = { run, trace };
+function invoke(value: Runner & Tracer) { value.run(); }`,
+  );
+  const invoke = input.nodes.find((node) => node.name === "invoke");
+  const run = input.nodes.find(
+    (node) => node.name === "run" && node.kind === "function",
+  );
+  assert.ok(invoke && run);
+  assert.deepEqual(
+    input.refs.find((ref) => ref.owner === invoke.id)?.target.hints
+      ?.candidateTypes,
+    ["Runner", "Tracer"],
+  );
+
+  const graph = await resolveGraph(file, input);
+  assert.deepEqual(
+    graph.callees(invoke.id, 1, 10).map((item) => item.id),
+    [run.id],
+  );
+  assert.deepEqual(graph.dynamicBoundaries([invoke.id], 10), []);
+  graph.close();
+});
+
 test("Go concrete receiver type resolves a method call in its container", async () => {
   const file = codeFile("receiver.go", { format: "go" });
   const source = {
@@ -862,6 +1199,189 @@ class Use {
   assert.equal(calls[0].target.receiver?.name, "this.value");
   assert.equal(calls[0].target.hints?.receiverType, "Runner");
   assert.equal(calls[1].target.hints?.receiverType, "Other");
+});
+
+test("TypeScript constructor parameter properties retain receiver types", async () => {
+  const input = await extractGraph(
+    codeFile("service.ts", { format: "typescript" }),
+    `class Provider { lookup() {} }
+class Service {
+  constructor(private readonly provider: Provider) {}
+  run() { this.provider.lookup(); }
+}`,
+  );
+  const call = input.refs.find(
+    (ref) => ref.type === "symbol" && ref.target.member === "lookup",
+  );
+  assert.equal(call?.target.hints?.receiverType, "Provider");
+});
+
+test("TypeScript private fields retain their declared receiver type", async () => {
+  const input = await extractGraph(
+    codeFile("private-field.ts", { format: "typescript" }),
+    `interface ClientPort { invoke(value: unknown): Promise<unknown>; }
+class Manager {
+  #client: ClientPort;
+  constructor(client: ClientPort) { this.#client = client; }
+  async send(value: unknown) { return await this.#client.invoke(value); }
+}`,
+  );
+  const call = input.refs.find(
+    (ref) => ref.type === "symbol" && ref.target.member === "invoke",
+  );
+  assert.equal(call?.target.receiver?.name, "this.#client");
+  assert.equal(call?.target.hints?.receiverType, "ClientPort");
+});
+
+test("TypeScript private getters retain receiver types through non-null assertions", async () => {
+  const input = await extractGraph(
+    codeFile("private-getter.ts", { format: "typescript" }),
+    `interface ClientPort { invoke(value: unknown): Promise<unknown>; }
+class Manager {
+  #clients: ClientPort[] = [];
+  get #client(): ClientPort | undefined { return this.#clients[0]; }
+  async send(value: unknown) { return await this.#client!.invoke(value); }
+}`,
+  );
+  const call = input.refs.find(
+    (ref) => ref.type === "symbol" && ref.target.member === "invoke",
+  );
+  assert.equal(call?.target.receiver?.name, "this.#client!");
+  assert.equal(call?.target.hints?.receiverType, "ClientPort");
+});
+
+test("TypeScript inherited field chains follow imported return-type aliases", async () => {
+  const graph = new SqliteGraphStorage("", { inMemory: true });
+  const files = {
+    types: codeFile("types.ts", { id: "types", format: "typescript" }),
+    base: codeFile("base.ts", { id: "base", format: "typescript" }),
+    use: codeFile("use.ts", { id: "use", format: "typescript" }),
+  };
+  const types = (transport) => `
+export abstract class Transport { abstract send(): void; }
+export class Tcp extends Transport { send() {} }
+export abstract class OtherTransport { abstract send(): void; }
+export class Udp extends OtherTransport { send() {} }
+export type Provider = () => { transport: ${transport} };`;
+  const inputs = {
+    types: await extractGraph(files.types, types("Transport")),
+    base: await extractGraph(
+      files.base,
+      `import type { Provider } from "./types";
+       export abstract class Session {
+         protected channel: ReturnType<Provider>;
+       }`,
+    ),
+    use: await extractGraph(
+      files.use,
+      `import { Session } from "./base";
+       export class Encrypted extends Session {
+         flush() { this.channel.transport.send(); }
+       }`,
+    ),
+  };
+  for (const key of ["types", "base", "use"])
+    upsertGraph(graph, files[key], inputs[key]);
+  await graph.resolvePending({ files: Object.values(files) });
+  const flush = inputs.use.nodes.find((node) => node.name === "flush");
+  assert.ok(flush);
+  const candidates = () =>
+    graph
+      .dynamicBoundaries([flush.id], 10)[0]
+      ?.candidateDetails.map((candidate) => candidate.displayName);
+  assert.deepEqual(candidates(), ["Tcp::send"]);
+
+  inputs.types = await extractGraph(files.types, types("OtherTransport"));
+  upsertGraph(graph, files.types, inputs.types);
+  await graph.resolvePending({ files: Object.values(files) });
+  assert.deepEqual(candidates(), ["Udp::send"]);
+  graph.close();
+});
+
+test("untyped local receivers use a unique member from a directly imported module", async () => {
+  const files = {
+    caller: codeFile("caller.ts", { id: "caller" }),
+    runtime: codeFile("runtime.ts", { id: "runtime" }),
+    unrelated: codeFile("unrelated.ts", { id: "unrelated" }),
+  };
+  const inputs = {
+    caller: await extractGraph(
+      files.caller,
+      `import { createManager } from "./runtime";
+       export function invoke(manager = createManager()) {
+         const runtime = manager.get();
+         runtime.handleMessage();
+       }`,
+    ),
+    runtime: await extractGraph(
+      files.runtime,
+      `export function createManager() { return {}; }
+       export class Runtime { handleMessage() {} }`,
+    ),
+    unrelated: await extractGraph(
+      files.unrelated,
+      `export class Unrelated { handleMessage() {} }`,
+    ),
+  };
+  const graph = new SqliteGraphStorage("", { inMemory: true });
+  for (const key of Object.keys(files))
+    upsertGraph(graph, files[key], inputs[key]);
+  await graph.resolvePending({ files: Object.values(files) });
+
+  const invoke = inputs.caller.nodes.find((node) => node.name === "invoke");
+  const runtimeHandler = memberIn(inputs.runtime, "Runtime", "handleMessage");
+  assert.ok(invoke && runtimeHandler);
+  const callees = graph.callees(invoke.id, 1, 10).map((item) => item.id);
+  assert.ok(callees.includes(runtimeHandler.id));
+  const unrelatedHandler = memberIn(
+    inputs.unrelated,
+    "Unrelated",
+    "handleMessage",
+  );
+  assert.ok(unrelatedHandler && !callees.includes(unrelatedHandler.id));
+  graph.close();
+});
+
+test("construction selects a class over its same-name interface", async () => {
+  const graph = new SqliteGraphStorage("", { inMemory: true });
+  const posterFile = codeFile("poster.ts", { id: "poster-file" });
+  const serviceFile = codeFile("service.ts", { id: "service-file" });
+  const poster = await extractGraph(
+    posterFile,
+    `export interface Poster { ready: boolean }
+export class Poster {
+  constructor() { setTimeout(this.post.bind(this), 0); }
+  post() {}
+}`,
+  );
+  const service = await extractGraph(
+    serviceFile,
+    'import { Poster } from "./poster"; export function create() { return new Poster(); }',
+  );
+  upsertGraph(graph, posterFile, poster);
+  upsertGraph(graph, serviceFile, service);
+  await graph.resolvePending({ files: [posterFile, serviceFile] });
+
+  const create = service.nodes.find((node) => node.name === "create");
+  const posterClass = poster.nodes.find(
+    (node) => node.name === "Poster" && node.kind === "class",
+  );
+  assert.ok(create && posterClass);
+  const constructor = memberIn(poster, "Poster", "constructor");
+  const post = memberIn(poster, "Poster", "post");
+  assert.ok(constructor && post);
+  assert.equal(
+    graph.edges([create.id, posterClass.id], ["INSTANTIATES"], 10).edges.length,
+    1,
+  );
+  assert.equal(
+    graph.edges([create.id, constructor.id], ["CALLS"], 10).edges.length,
+    1,
+  );
+  assert.ok(
+    graph.edges([constructor.id, post.id], ["REFS"], 10).edges.length >= 1,
+  );
+  graph.close();
 });
 
 for (const fixture of [
@@ -1018,6 +1538,9 @@ class Use { void invoke(Runner value) { value.run(); } }
   assert.equal(boundary.reason, "polymorphic_dispatch");
   assert.deepEqual(boundary.candidates, []);
   assert.equal(boundary.candidatesTruncated, false);
+  const runner = input.nodes.find((node) => node.name === "Runner");
+  assert.ok(runner);
+  assert.ok(graph.impact(runner.id, 1, 10).some((ref) => ref.id === invoke.id));
   graph.close();
 });
 
@@ -1114,6 +1637,42 @@ class Use {
   const edge = graph.edges([invoke.id, alphaRun.id], ["CALLS"], 10).edges[0];
   assert.equal(edge?.provenance, "heuristic");
   assert.equal(edge?.evidence, "receiver_type_member");
+  graph.close();
+});
+
+test("production dispatch is not narrowed by test-only instantiations", async () => {
+  const sourceFile = codeFile("src/dispatch.ts", {
+    id: "dispatch-source",
+  });
+  const testFile = codeFile("test/dispatch.test.ts", {
+    id: "dispatch-test",
+  });
+  const source = await extractGraph(
+    sourceFile,
+    `export abstract class Runner { abstract run(): void; }
+export class ProductionRunner extends Runner { run() {} }
+export class Use { invoke(value: Runner) { value.run(); } }`,
+  );
+  const testInput = await extractGraph(
+    testFile,
+    `import { Runner } from "../src/dispatch";
+class TestRunner extends Runner { run() {} }
+export function makeTestRunner() { return new TestRunner(); }`,
+  );
+  const invoke = source.nodes.find((node) => node.name === "invoke");
+  const productionRun = memberIn(source, "ProductionRunner", "run");
+  assert.ok(invoke && productionRun);
+
+  const graph = new SqliteGraphStorage("", { inMemory: true });
+  upsertGraph(graph, sourceFile, source);
+  upsertGraph(graph, testFile, testInput);
+  await graph.resolvePending({ files: [sourceFile, testFile] });
+
+  assert.deepEqual(graph.callees(invoke.id, 1, 10), []);
+  const boundary = graph.dynamicBoundaries([invoke.id], 10)[0];
+  assert.ok(boundary);
+  assert.equal(boundary.reason, "polymorphic_dispatch");
+  assert.ok(boundary.candidates.includes(productionRun.id));
   graph.close();
 });
 

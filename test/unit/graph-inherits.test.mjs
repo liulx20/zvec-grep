@@ -99,6 +99,45 @@ test("extractFileGraph resolves cross-file extends after second file indexed", a
   graph.close();
 });
 
+test("import aliases outrank same-file names in inheritance", async () => {
+  const graph = new SqliteGraphStorage("", { inMemory: true });
+  const baseFile = codeFile("base-file", "base.ts");
+  const childFile = codeFile("child-file", "child.ts");
+  const baseInput = await extractGraph(
+    baseFile,
+    "export interface Context { invoke(): void }",
+  );
+  const childInput = await extractGraph(
+    childFile,
+    'import type { Context as BaseContext } from "./base";\ninterface Context extends BaseContext {}',
+  );
+
+  graph.upsertFileGraph(
+    baseFile.id,
+    baseInput.nodes,
+    baseInput.edges,
+    baseInput.refs,
+    baseFile,
+  );
+  graph.upsertFileGraph(
+    childFile.id,
+    childInput.nodes,
+    childInput.edges,
+    childInput.refs,
+    childFile,
+  );
+  await graph.resolvePending({ files: [baseFile, childFile] });
+
+  const base = baseInput.nodes.find((node) => node.name === "Context");
+  const child = childInput.nodes.find((node) => node.name === "Context");
+  assert.ok(base && child);
+  assert.deepEqual(
+    graph.hierarchy(child.id, "bases", 10).map((symbol) => symbol.id),
+    [base.id],
+  );
+  graph.close();
+});
+
 test("extractFileGraph handles C++ export macros between class keyword and name", async () => {
   const graph = new SqliteGraphStorage("", { inMemory: true });
   const baseFile = codeFile("cpp-base", "catalog.h", "cpp");

@@ -16,11 +16,13 @@ export type ExploreFileRoleEvidenceKind =
   | "dynamic_boundary"
   | "impact_summary"
   | "low_value_path"
+  | "direct_call"
   | "call_path";
 
 export type ExploreFileEvidenceKind =
   | ExploreFileRoleEvidenceKind
   | `concept:${string}`
+  | `family:${string}`
   | `symbol:${string}`
   | `path:${string}`;
 
@@ -54,6 +56,7 @@ const EXACT_WEIGHTS: Readonly<Record<ExploreFileRoleEvidenceKind, number>> = {
   dynamic_boundary: 0.6,
   impact_summary: 0,
   low_value_path: -2.5,
+  direct_call: 0.1,
   call_path: 1.1,
 };
 
@@ -70,11 +73,13 @@ const CONCEPT_WEIGHTS: Readonly<Record<ExploreFileRoleEvidenceKind, number>> = {
   integration: 1,
   impact_summary: 0,
   low_value_path: -3,
+  direct_call: 0.45,
   call_path: 0.65,
 };
 
 const SCALED_EVIDENCE = new Set<ExploreFileEvidenceKind>([
   "aligned_change_surface",
+  "direct_call",
   "integration",
 ]);
 
@@ -86,9 +91,9 @@ const NOVELTY_EVIDENCE = new Set<ExploreFileRoleEvidenceKind>([
 ]);
 
 /**
- * Rank every eligible file once from its accumulated evidence. Only roots and
- * one declaration/implementation counterpart are hard constraints; all other
- * roles compete in the same score space instead of consuming ordered quotas.
+ * Rank every eligible file once from its accumulated evidence. Roots, one
+ * declaration/implementation counterpart, and the primary call path are
+ * consistency constraints; all remaining roles compete in one score space.
  */
 export function selectExploreFiles(
   input: ExploreFileSelectionInput,
@@ -112,7 +117,6 @@ export function selectExploreFiles(
   });
   const eligible = candidates.filter(isEligibleSourceCandidate);
   eligible.sort(compareCandidates);
-
   const selected: ExploreFileCandidate[] = [];
   const selectedIds = new Set<string>();
   const take = (candidate: ExploreFileCandidate | undefined) => {
@@ -131,29 +135,42 @@ export function selectExploreFiles(
         !selectedIds.has(candidate.fileId),
     ),
   );
+  for (const candidate of eligible.filter((item) =>
+    item.evidence.has("call_path"),
+  ))
+    take(candidate);
   while (selected.length < input.maxFiles) {
     const next = eligible
       .filter((candidate) => !selectedIds.has(candidate.fileId))
-      .sort((left, right) => compareMarginal(left, right, selected))[0];
-    if (!next || marginalGain(next, selected) <= 0) break;
+      .sort((left, right) =>
+        compareMarginal(left, right, selected, input.intent),
+      )[0];
+    if (!next || marginalGain(next, selected, input.intent) <= 0) break;
     take(next);
   }
   return selected;
 }
 
 function isEligibleSourceCandidate(candidate: ExploreFileCandidate): boolean {
+  const conceptCount = [...candidate.evidence.keys()].filter((kind) =>
+    kind.startsWith("concept:"),
+  ).length;
+  const sourceUpgrade = (
+    [
+      "integration",
+      "collaborator",
+      "counterpart",
+      "root_counterpart",
+      "hierarchy",
+      "direct_call",
+    ] as const
+  ).some((kind) => candidate.evidence.has(kind));
   return (
     !candidate.evidence.has("impact_summary") ||
-    (
-      [
-        "integration",
-        "collaborator",
-        "counterpart",
-        "root_counterpart",
-        "hierarchy",
-      ] as const
-    ).some((kind) => candidate.evidence.has(kind)) ||
-    (candidate.evidence.get("query_alignment") ?? 0) >= 1
+    sourceUpgrade ||
+    (!candidate.evidence.has("low_value_path") &&
+      ((candidate.evidence.get("query_alignment") ?? 0) >= 1 ||
+        conceptCount >= 2))
   );
 }
 
@@ -170,6 +187,7 @@ function evidenceWeight(
   intent: ExploreIntent,
 ): number {
   if (kind.startsWith("concept:")) return intent === "concept" ? 0.35 : 0.2;
+  if (kind.startsWith("family:")) return intent === "concept" ? 0.8 : 0.3;
   if (kind.startsWith("symbol:") || kind.startsWith("path:")) return 0;
   return weights[kind as ExploreFileRoleEvidenceKind];
 }
@@ -178,16 +196,18 @@ function compareMarginal(
   left: ExploreFileCandidate,
   right: ExploreFileCandidate,
   selected: readonly ExploreFileCandidate[],
+  intent: ExploreIntent,
 ): number {
   return (
-    marginalGain(right, selected) - marginalGain(left, selected) ||
-    compareCandidates(left, right)
+    marginalGain(right, selected, intent) -
+      marginalGain(left, selected, intent) || compareCandidates(left, right)
   );
 }
 
 function marginalGain(
   candidate: ExploreFileCandidate,
   selected: readonly ExploreFileCandidate[],
+  intent: ExploreIntent,
 ): number {
   if (selected.length === 0) return candidate.score;
   const covered = new Set(
@@ -200,7 +220,61 @@ function marginalGain(
     ...selected.map((item) => fileSimilarity(candidate, item)),
     0,
   );
-  return candidate.score + novelty * 0.18 - redundancy * 0.2;
+  return (
+    candidate.score -
+    repeatedFamilySemanticScore(candidate, selected, intent) +
+    novelty * 0.18 -
+    redundancy * 0.2
+  );
+}
+
+function repeatedFamilySemanticScore(
+  candidate: ExploreFileCandidate,
+  selected: readonly ExploreFileCandidate[],
+  intent: ExploreIntent,
+): number {
+  // Family overlap suppresses interchangeable semantic hits, not files with
+  // independent structural evidence. A direct caller or call-path file is a
+  // distinct execution role even when it shares every query term with a root.
+  if (
+    candidate.evidence.has("call_path") ||
+    candidate.evidence.has("entrypoint") ||
+    candidate.evidence.has("root_counterpart") ||
+    (candidate.evidence.has("direct_call") &&
+      !candidate.evidence.has("hierarchy"))
+  )
+    return 0;
+  const families = features(candidate.evidence, "family:");
+  if (
+    families.size === 0 ||
+    !selected.some(
+      (item) => setOverlap(families, features(item.evidence, "family:")) > 0,
+    )
+  )
+    return 0;
+  const repeatedConcepts = new Set(
+    selected
+      .filter(
+        (item) => setOverlap(families, features(item.evidence, "family:")) > 0,
+      )
+      .flatMap((item) => [...features(item.evidence, "concept:")]),
+  );
+  const candidateConcepts = features(candidate.evidence, "concept:");
+  const repeatedRatio =
+    candidateConcepts.size === 0
+      ? 0
+      : [...candidateConcepts].filter((kind) => repeatedConcepts.has(kind))
+          .length / candidateConcepts.size;
+  const weights = evidenceWeights(intent);
+  return [...candidate.evidence].reduce((total, [kind, strength]) => {
+    if (kind === "query_alignment")
+      return (
+        total + evidenceWeight(weights, kind, intent) * strength * repeatedRatio
+      );
+    if (!kind.startsWith("concept:") || !repeatedConcepts.has(kind))
+      return total;
+    return total + evidenceWeight(weights, kind, intent) * strength;
+  }, 0);
 }
 
 function noveltyEvidence(
@@ -219,26 +293,31 @@ function fileSimilarity(
 ): number {
   return (
     setOverlap(
+      features(left.evidence, "family:"),
+      features(right.evidence, "family:"),
+    ) *
+      0.4 +
+    setOverlap(
       features(left.evidence, "symbol:"),
       features(right.evidence, "symbol:"),
     ) *
-      0.55 +
+      0.35 +
     setOverlap(
       features(left.evidence, "concept:"),
       features(right.evidence, "concept:"),
     ) *
-      0.25 +
+      0.15 +
     setOverlap(
       features(left.evidence, "path:"),
       features(right.evidence, "path:"),
     ) *
-      0.2
+      0.1
   );
 }
 
 function features(
   evidence: ReadonlyMap<ExploreFileEvidenceKind, number>,
-  prefix: "concept:" | "symbol:" | "path:",
+  prefix: "concept:" | "family:" | "symbol:" | "path:",
 ): Set<string> {
   return new Set(
     [...evidence.keys()].filter((kind) => kind.startsWith(prefix)),

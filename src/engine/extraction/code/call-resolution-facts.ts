@@ -13,6 +13,7 @@ export type CallResolutionFact = {
   /** Explicit union/choice annotations retained instead of collapsed to one type. */
   receiverCandidateTypes: ReadonlyMap<string, readonly string[]>;
   boundNames: ReadonlySet<string>;
+  lexicalCallableSources: ReadonlyMap<string, string>;
   ownerFieldTypes: ReadonlyMap<string, string>;
   /** Declaring type + field name -> declared field type (for receiver chains). */
   declaredFieldTypes: ReadonlyMap<string, string>;
@@ -45,6 +46,8 @@ export function extractCallResolutionFacts(
     initialBoundNames(resolutionRoot, adapter),
   ];
   const dynamicCallableScopes: Map<string, ReferenceTarget>[] = [new Map()];
+  const lexicalCallableSourceScopes: Map<string, string>[] = [new Map()];
+  const aliasSourceScopes: Map<string, readonly string[]>[] = [new Map()];
   const ownerFieldTypes = collectOwnerFields(resolutionRoot, adapter.format);
   const declaredFieldTypes =
     adapter.collectDeclaredFieldTypes?.(resolutionRoot) ??
@@ -89,6 +92,8 @@ export function extractCallResolutionFacts(
         callableScope ? initialBoundNames(current, adapter) : new Set(),
       );
       dynamicCallableScopes.push(new Map());
+      lexicalCallableSourceScopes.push(new Map());
+      aliasSourceScopes.push(new Map());
     }
 
     if (DECLARATION_TYPES.has(current.type)) {
@@ -101,6 +106,8 @@ export function extractCallResolutionFacts(
       for (const binding of declarationCandidateBindings(current))
         candidateScopes.at(-1)!.set(binding.name, binding.types);
       for (const name of declarationBindingNames(current)) boundScope.add(name);
+      for (const binding of destructuredCallableSources(current))
+        lexicalCallableSourceScopes.at(-1)!.set(binding.name, binding.source);
       for (const binding of contextualDeclarationBindings(
         current,
         scopes,
@@ -111,11 +118,22 @@ export function extractCallResolutionFacts(
         scope.set(binding.name, binding.type);
         candidateScopes.at(-1)!.set(binding.name, []);
       }
+      updateDynamicCallableScope(
+        dynamicCallableScopes.at(-1)!,
+        current,
+        dynamicCallableWithReceiverSources(
+          dynamicCallableAssignment(current),
+          aliasSourceScopes,
+        ),
+      );
+      updateAliasSourceScope(aliasSourceScopes.at(-1)!, current);
       if (opensScope) {
         scopes.pop();
         candidateScopes.pop();
         boundScopes.pop();
         dynamicCallableScopes.pop();
+        lexicalCallableSourceScopes.pop();
+        aliasSourceScopes.pop();
       }
       return;
     }
@@ -124,6 +142,8 @@ export function extractCallResolutionFacts(
       for (const child of current.namedChildren ?? []) visit(child, false);
       for (const name of declarationBindingNames(current))
         candidateScopes.at(-1)!.set(name, []);
+      for (const binding of destructuredCallableSources(current))
+        lexicalCallableSourceScopes.at(-1)!.set(binding.name, binding.source);
       for (const binding of contextualDeclarationBindings(
         current,
         scopes,
@@ -140,13 +160,19 @@ export function extractCallResolutionFacts(
       updateDynamicCallableScope(
         dynamicCallableScopes.at(-1)!,
         current,
-        dynamicCallableAssignment(current),
+        dynamicCallableWithReceiverSources(
+          dynamicCallableAssignment(current),
+          aliasSourceScopes,
+        ),
       );
+      updateAliasSourceScope(aliasSourceScopes.at(-1)!, current);
       if (opensScope) {
         scopes.pop();
         candidateScopes.pop();
         boundScopes.pop();
         dynamicCallableScopes.pop();
+        lexicalCallableSourceScopes.pop();
+        aliasSourceScopes.pop();
       }
       return;
     }
@@ -156,6 +182,7 @@ export function extractCallResolutionFacts(
         receiverTypes: flattenScopes(scopes),
         receiverCandidateTypes: flattenScopes(candidateScopes),
         boundNames: flattenBoundScopes(boundScopes),
+        lexicalCallableSources: flattenMapScopes(lexicalCallableSourceScopes),
         ownerFieldTypes,
         declaredFieldTypes,
         callableReturnTypes,
@@ -171,6 +198,8 @@ export function extractCallResolutionFacts(
       candidateScopes.pop();
       boundScopes.pop();
       dynamicCallableScopes.pop();
+      lexicalCallableSourceScopes.pop();
+      aliasSourceScopes.pop();
     }
   };
 
@@ -201,14 +230,83 @@ function updateDynamicCallableScope(
   node: TSNode,
   binding: DynamicCallableBinding | undefined,
 ): void {
-  const left = node.childForFieldName("left");
+  const left = node.childForFieldName("left") ?? node.childForFieldName("name");
   if (!left || !/^[A-Za-z_$][\w$]*$/.test(left.text)) return;
   if (binding) scope.set(binding.name, binding.target);
   else scope.delete(left.text);
 }
 
+function dynamicCallableWithReceiverSources(
+  binding: DynamicCallableBinding | undefined,
+  scopes: readonly ReadonlyMap<string, readonly string[]>[],
+): DynamicCallableBinding | undefined {
+  const receiver = binding?.target.receiver?.name;
+  const dispatch = binding?.target.hints?.dynamicDispatch;
+  if (!binding || !receiver || !dispatch) return binding;
+  const sources = resolveAliasSources(scopes, receiver);
+  if (sources.length === 0) return binding;
+  return {
+    ...binding,
+    target: {
+      ...binding.target,
+      hints: {
+        ...binding.target.hints,
+        dynamicDispatch: {
+          ...dispatch,
+          receiverSources: sources,
+        },
+      },
+    },
+  };
+}
+
+function updateAliasSourceScope(
+  scope: Map<string, readonly string[]>,
+  node: TSNode,
+): void {
+  const left = node.childForFieldName("left") ?? node.childForFieldName("name");
+  if (!left || !/^[A-Za-z_$][\w$]*$/.test(left.text)) return;
+  const right =
+    node.childForFieldName("right") ?? node.childForFieldName("value");
+  if (!right) {
+    scope.delete(left.text);
+    return;
+  }
+  const sources = new Set<string>();
+  const visit = (current: TSNode): void => {
+    if (current.type === "identifier" && current.text !== left.text)
+      sources.add(current.text);
+    for (const child of current.namedChildren ?? []) visit(child);
+  };
+  visit(right);
+  if (sources.size > 0) scope.set(left.text, [...sources]);
+  else scope.delete(left.text);
+}
+
+function resolveAliasSources(
+  scopes: readonly ReadonlyMap<string, readonly string[]>[],
+  name: string,
+): string[] {
+  const aliases = flattenMapScopes(scopes);
+  const result = new Set<string>();
+  const seen = new Set<string>();
+  const visit = (current: string): void => {
+    if (seen.has(current) || seen.size >= 32) return;
+    seen.add(current);
+    const sources = aliases.get(current);
+    if (!sources) {
+      result.add(current);
+      return;
+    }
+    for (const source of sources) visit(source);
+  };
+  visit(name);
+  result.delete(name);
+  return [...result].sort();
+}
+
 function flattenMapScopes<T>(
-  scopes: readonly Map<string, T>[],
+  scopes: readonly ReadonlyMap<string, T>[],
 ): Map<string, T> {
   const result = new Map<string, T>();
   for (const scope of scopes)
@@ -238,6 +336,7 @@ const DECLARATION_TYPES = new Set([
   "lexical_declaration",
   "let_declaration",
   "field_declaration",
+  "field_definition",
   "property_declaration",
   "public_field_definition",
   "short_var_declaration",
@@ -404,7 +503,7 @@ function collectOwnerFields(
       // current method. Entering it lets later locals overwrite a field type.
       if (/method|function|constructor/.test(current.type)) {
         const getter = current.text.match(
-          /^\s*(?:(?:public|private|protected|static)\s+)*get\s+([A-Za-z_]\w*)\s*\([^)]*\)\s*:\s*([^\s{]+)/,
+          /^\s*(?:(?:public|private|protected|static)\s+)*get\s+(#?[A-Za-z_]\w*)\s*\([^)]*\)\s*:\s*([^\s{]+)/,
         );
         if (getter) bindings.set(getter[1]!, normalizeType(getter[2]!));
         return;
@@ -510,6 +609,23 @@ function collectJavaScriptConstructorFields(
     );
   });
   if (!constructor) return;
+  const collectParameterProperty = (current: TSNode): void => {
+    if (PARAMETER_TYPES.has(current.type)) {
+      const parameterProperty =
+        current.namedChildren.some(
+          (child) => child.type === "accessibility_modifier",
+        ) || /^\s*readonly\b/.test(current.text);
+      const binding = parameterProperty
+        ? parameterBinding(current, "typescript")
+        : undefined;
+      if (binding) bindings.set(binding.name, binding.type);
+      return;
+    }
+    for (const child of current.namedChildren ?? [])
+      collectParameterProperty(child);
+  };
+  const parameters = constructor.childForFieldName("parameters");
+  if (parameters) collectParameterProperty(parameters);
   collectConstructedOwnerFields(
     constructor.text,
     /\bthis\.(#?[A-Za-z_$][\w$]*)\s*=\s*new\s+([A-Za-z_$][\w$.:]*)\s*(?:<[^;=(){}]+>)?\s*\(/g,
@@ -756,6 +872,29 @@ function declarationBindingNames(node: TSNode): string[] {
   return [...result];
 }
 
+function destructuredCallableSources(
+  node: TSNode,
+): { name: string; source: string }[] {
+  const pattern =
+    node.childForFieldName("name") ??
+    node.childForFieldName("pattern") ??
+    node.childForFieldName("left");
+  if (pattern?.type !== "object_pattern") return [];
+  const initializer =
+    node.childForFieldName("value") ?? node.childForFieldName("right");
+  if (!initializer || !/call/.test(initializer.type)) return [];
+  const callee =
+    initializer.childForFieldName("function") ??
+    initializer.childForFieldName("name") ??
+    initializer.childForFieldName("method");
+  if (!callee || !/^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*$/.test(callee.text))
+    return [];
+  return declarationBindingNames(node).map((name) => ({
+    name,
+    source: callee.text,
+  }));
+}
+
 function collectBindingPatternNames(node: TSNode, result: Set<string>): void {
   if (
     /^(?:identifier|shorthand_property_identifier_pattern)$/.test(node.type)
@@ -939,14 +1078,20 @@ function collectGenericBounds(
   let owner: TSNode | null = node;
   let genericNode: TSNode | undefined;
   for (let depth = 0; owner && depth < 3 && !genericNode; depth++) {
-    genericNode =
-      owner.childForFieldName("type_parameters") ??
-      owner.namedChildren.find((child) => genericTypes.has(child.type));
+    const callableValue =
+      owner.childForFieldName("value") ?? owner.childForFieldName("right");
+    genericNode = [owner, callableValue]
+      .filter((candidate): candidate is TSNode => Boolean(candidate))
+      .flatMap((candidate) => [
+        candidate.childForFieldName("type_parameters"),
+        candidate.namedChildren.find((child) => genericTypes.has(child.type)),
+      ])
+      .find((candidate): candidate is TSNode => Boolean(candidate));
     owner = owner.parent;
   }
   const text = genericNode?.text ?? "";
   const style = resolutionSemantics(language).genericBoundsStyle;
-  const separator = style === "java" ? /\s+extends\s+/ : /\s*:\s*/;
+  const separator = style === "extends" ? /\s+extends\s+/ : /\s*:\s*/;
   const inner =
     (text.startsWith("<") && text.endsWith(">")) ||
     (text.startsWith("[") && text.endsWith("]"))
@@ -1019,7 +1164,9 @@ function normalizeTypeCandidates(value: string): string[] {
   const wrapped = /^(?:(?:typing\.)?(?:Union|Optional))\s*\[(.*)\]$/.exec(
     trimmed,
   )?.[1];
-  const parts = (wrapped ?? trimmed).split(wrapped ? /\s*,\s*/ : /\s*\|\s*/);
+  const parts = (wrapped ?? trimmed).split(
+    wrapped ? /\s*,\s*/ : /\s*(?:\||&)\s*/,
+  );
   const ignored = new Set(["null", "undefined", "None", "NoneType"]);
   return [
     ...new Set(

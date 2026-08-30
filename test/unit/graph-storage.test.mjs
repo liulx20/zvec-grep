@@ -187,6 +187,66 @@ test("counterpart dirty files survive a failed projection", (t) => {
   assert.equal(attempts, 2);
 });
 
+test("qualified symbol lookup filters before applying its limit", (t) => {
+  const graph = new SqliteGraphStorage("", { inMemory: true });
+  t.after(() => graph.close());
+  const nodes = Array.from({ length: 70 }, (_, index) => ({
+    id: `candidate-${String(index).padStart(2, "0")}`,
+    kind: "function",
+    is_exported: true,
+    name: "queryFn",
+    qualifiedName: `api${index}::queryFn`,
+  }));
+  nodes.push({
+    id: "target",
+    kind: "function",
+    is_exported: true,
+    name: "queryFn",
+    qualifiedName: "swapperApi::endpoints::quote::queryFn",
+  });
+  graph.upsertFileGraph("api", nodes, [], []);
+
+  assert.deepEqual(
+    graph
+      .findSymbolsByName("swapperApi::endpoints::quote::queryFn", 1)
+      .map(({ entity }) => entity.id),
+    ["target"],
+  );
+});
+
+test("concept symbol lookup ranks term coverage before exact single terms", (t) => {
+  const graph = new SqliteGraphStorage("", { inMemory: true });
+  t.after(() => graph.close());
+  graph.upsertFileGraph(
+    "trade",
+    [
+      {
+        id: "single-term",
+        kind: "interface",
+        is_exported: true,
+        name: "Swapper",
+        qualifiedName: "Swapper",
+      },
+      {
+        id: "covered-flow",
+        kind: "function",
+        is_exported: true,
+        name: "getTradeQuotes",
+        qualifiedName: "swapperApi::getTradeQuotes",
+      },
+    ],
+    [],
+    [],
+  );
+
+  assert.deepEqual(
+    graph
+      .findSymbolsByQuery("swapper trade quote", 1)
+      .map(({ entity }) => entity.id),
+    ["covered-flow"],
+  );
+});
+
 test("SQLite graph upsert resolves callers and reattaches incoming edges", async (t) => {
   const dir = await mkdtemp(join(tmpdir(), "zvec-grep-graph-"));
   t.after(async () => {

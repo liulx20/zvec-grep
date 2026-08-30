@@ -90,6 +90,7 @@ export type ExploreFileBundle = {
 export type ExploreSymbolSnippet = {
   id: string;
   name: string;
+  scope?: string;
   kind?: string;
   range: Range;
   content: string;
@@ -119,8 +120,12 @@ export type ExploreSubgraphResult = {
   available: boolean;
   rootIds: string[];
   nodes: ExploreNode[];
+  /** Construction or injection sites that wire a root to its collaborator. */
+  structuralBridgeIds: string[];
   /** Files represented only by reverse impact expansion. */
   impactExpansionFileIds: string[];
+  /** Files calling a root through an unresolved dynamic receiver. */
+  directImpactFileIds: string[];
   edges: ExploreEdge[];
   edgesTruncated: boolean;
   callPaths: ExploreCallPath[];

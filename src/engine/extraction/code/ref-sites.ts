@@ -124,8 +124,11 @@ export function collectRefSites(
     }
 
     // Decorators attached to this entity (or nested non-entity nodes).
-    if (current.type === "decorator") {
-      const name = decoratorName(current);
+    if (
+      current.type === "decorator" &&
+      !annotationForNestedEntity(current, node, adapter)
+    ) {
+      const name = annotationName(current);
       if (name) {
         push(
           {
@@ -139,10 +142,11 @@ export function collectRefSites(
       // Still walk children for nested type args.
     }
 
-    if (current.type === "annotation" || current.type === "marker_annotation") {
-      const nameNode =
-        current.childForFieldName("name") ?? current.namedChildren[0];
-      const name = nameNode ? normalizeRefName(nameNode.text) : undefined;
+    if (
+      (current.type === "annotation" || current.type === "marker_annotation") &&
+      !annotationForNestedEntity(current, node, adapter)
+    ) {
+      const name = annotationName(current);
       if (name) {
         push(
           {
@@ -306,26 +310,17 @@ export function collectRefSites(
 
   visit(node, true);
 
-  // Decorators may sit on a parent export_statement / decorated_definition.
-  const parent = node.parent;
-  if (
-    parent?.type === "export_statement" ||
-    parent?.type === "decorated_definition"
-  ) {
-    for (const child of parent.namedChildren ?? []) {
-      if (child.type === "decorator") {
-        const name = decoratorName(child);
-        if (name) {
-          push(
-            {
-              name,
-              line: child.startPosition.row + 1,
-              kind: "decorates",
-            },
-            child,
-          );
-        }
-      }
+  for (const annotation of leadingAnnotations(node)) {
+    const name = annotationName(annotation);
+    if (name) {
+      push(
+        {
+          name,
+          line: annotation.startPosition.row + 1,
+          kind: "decorates",
+        },
+        annotation,
+      );
     }
   }
 
@@ -522,7 +517,26 @@ function isTypeishParent(parent: TSNode): boolean {
   );
 }
 
-function decoratorName(node: TSNode): string | undefined {
+export function leadingAnnotations(node: TSNode): TSNode[] {
+  const siblings = node.parent?.namedChildren ?? [];
+  const index = siblings.findIndex((candidate) =>
+    sameNodeRange(candidate, node),
+  );
+  if (index <= 0) return [];
+  const result: TSNode[] = [];
+  for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
+    const candidate = siblings[cursor];
+    if (!isAnnotation(candidate)) break;
+    result.unshift(candidate);
+  }
+  return result;
+}
+
+function annotationName(node: TSNode): string | undefined {
+  if (node.type !== "decorator") {
+    const nameNode = node.childForFieldName("name") ?? node.namedChildren[0];
+    return nameNode ? normalizeRefName(nameNode.text) : undefined;
+  }
   const call = node.namedChildren.find((c) => c.type === "call_expression");
   if (call) {
     const fn = call.childForFieldName("function") ?? call.namedChildren[0];
@@ -539,6 +553,35 @@ function decoratorName(node: TSNode): string | undefined {
     return undefined;
   }
   return normalizeRefName(id.text.replace(/^@/, ""));
+}
+
+function annotationForNestedEntity(
+  annotation: TSNode,
+  root: TSNode,
+  adapter: LanguageAdapter | null | undefined,
+): boolean {
+  if (sameNodeRange(annotation.parent ?? undefined, root) || !adapter)
+    return false;
+  const siblings = annotation.parent?.namedChildren ?? [];
+  const index = siblings.findIndex((candidate) =>
+    sameNodeRange(candidate, annotation),
+  );
+  for (const candidate of siblings.slice(index + 1)) {
+    if (isAnnotation(candidate)) continue;
+    return (
+      adapter.entityTypes.has(candidate.type) &&
+      adapter.shouldIndexEntity?.(candidate) !== false
+    );
+  }
+  return false;
+}
+
+function isAnnotation(node: TSNode): boolean {
+  return (
+    node.type === "decorator" ||
+    node.type === "annotation" ||
+    node.type === "marker_annotation"
+  );
 }
 
 function memberTarget(node: TSNode): ReferenceTarget | undefined {

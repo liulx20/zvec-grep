@@ -74,8 +74,13 @@ export function entityStorage(entities) {
   const byId = new Map(entities.map((item) => [item.entity.id, item]));
   return {
     findSymbolsByName(name) {
+      const leaf = name
+        .replace(/(?:\.|->)/g, "::")
+        .split("::")
+        .at(-1);
       return [...byId.values()].filter(
-        (item) => item.entity.metadata.symbolName === name,
+        (item) =>
+          item.entity.metadata.symbolName?.toLowerCase() === leaf.toLowerCase(),
       );
     },
     findSymbolsByQuery(query) {

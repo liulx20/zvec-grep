@@ -15,7 +15,7 @@ import {
   isConfiguredProjectImportSpec,
   isExternalImportSpec,
 } from "./imports/resolve-path.js";
-import type { LocalEdge } from "./types.js";
+import type { LocalEdge, SymNode } from "./types.js";
 import { resolveLocalReferenceCandidates } from "./local-reference-resolver.js";
 
 type RelationOwner = {
@@ -99,6 +99,7 @@ export async function extractFileGraph(
       occurrence,
       sourceLanguage,
       rustInlineModuleDepth: spec.rustInlineModuleDepth,
+      reexport: spec.reexport,
     });
     if (!seenRefIds.has(ref.id)) {
       seenRefIds.add(ref.id);
@@ -115,6 +116,7 @@ export async function extractFileGraph(
         localName: binding.local,
         sourceLanguage,
         rustInlineModuleDepth: spec.rustInlineModuleDepth,
+        reexport: spec.reexport,
       });
       if (!seenRefIds.has(bindingRef.id)) {
         seenRefIds.add(bindingRef.id);
@@ -150,6 +152,7 @@ export async function extractFileGraph(
     if (containerName) containerNameByChild.set(edge.dst, containerName);
     containerIdByChild.set(edge.dst, edge.src);
   }
+  const constructorsByContainer = indexConstructors(base.nodes, base.edges);
 
   const inheritance = analysis.inheritance;
   absorbRelationOwners({
@@ -168,6 +171,7 @@ export async function extractFileGraph(
     importedReceiverNames,
     externalImportedNames,
     nodeKindById,
+    constructorsByContainer,
   });
 
   const symbolRefs = analysis.refs;
@@ -187,6 +191,7 @@ export async function extractFileGraph(
     importedReceiverNames,
     externalImportedNames,
     nodeKindById,
+    constructorsByContainer,
   });
 
   const calls = analysis.calls;
@@ -206,6 +211,7 @@ export async function extractFileGraph(
     importedReceiverNames,
     externalImportedNames,
     nodeKindById,
+    constructorsByContainer,
   });
 
   return {
@@ -231,6 +237,7 @@ function absorbRelationOwners(input: {
   importedReceiverNames: ReadonlySet<string>;
   externalImportedNames: ReadonlySet<string>;
   nodeKindById: ReadonlyMap<string, string>;
+  constructorsByContainer: ReadonlyMap<string, readonly SymNode[]>;
 }): void {
   for (const owner of input.owners) {
     const ownerId =
@@ -335,7 +342,14 @@ function absorbRelationOwners(input: {
       }
 
       if (targets.length === 1) {
-        const dst = targets[0]!;
+        const instantiatedTarget = targets[0]!;
+        const dst =
+          site.kind === "new" && input.edgeKind === "CALLS"
+            ? (selectConstructor(
+                input.constructorsByContainer.get(instantiatedTarget) ?? [],
+                site.target.hints?.callArity,
+              ) ?? instantiatedTarget)
+            : instantiatedTarget;
         const key = `${ownerId}\0${dst}\0${site.kind}\0${input.edgeKind}\0${site.line}\0${occurrence}`;
         input.localEdges.set(key, {
           id: siteRef.id,
@@ -354,7 +368,7 @@ function absorbRelationOwners(input: {
           input.localEdges.set(instantiateKey, {
             id: `${siteRef.id}:instantiates`,
             src: ownerId,
-            dst,
+            dst: instantiatedTarget,
             rel: "instantiates",
             count: 1,
             first_line: site.line,
@@ -383,6 +397,45 @@ function absorbRelationOwners(input: {
       }
     }
   }
+}
+
+function indexConstructors(
+  nodes: readonly SymNode[],
+  edges: readonly LocalEdge[],
+): ReadonlyMap<string, readonly SymNode[]> {
+  const byId = new Map(nodes.map((node) => [node.id, node]));
+  const result = new Map<string, SymNode[]>();
+  for (const edge of edges) {
+    if (edge.kind !== "CONTAINS") continue;
+    const parent = byId.get(edge.src);
+    const child = byId.get(edge.dst);
+    if (
+      !parent?.name ||
+      !child?.name ||
+      !(
+        child.name === "constructor" ||
+        child.name === "__init__" ||
+        child.name === parent.name ||
+        child.nodeType?.includes("constructor")
+      )
+    )
+      continue;
+    result.set(edge.src, [...(result.get(edge.src) ?? []), child]);
+  }
+  return result;
+}
+
+function selectConstructor(
+  candidates: readonly SymNode[],
+  arity: number | undefined,
+): string | undefined {
+  const compatible = candidates.filter(
+    (candidate) =>
+      arity === undefined ||
+      candidate.arity === undefined ||
+      candidate.arity === arity,
+  );
+  return compatible.length === 1 ? compatible[0]!.id : undefined;
 }
 
 function isExternalImportedSite(

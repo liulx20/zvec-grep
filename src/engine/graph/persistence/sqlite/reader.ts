@@ -207,15 +207,27 @@ export class SqliteGraphReader {
   }
 
   findSymbolsByName(name: string, limit: number): StoredEntity[] {
-    const trimmed = symbolLookupLeaf(name.trim());
+    const input = name.trim();
+    const trimmed = symbolLookupLeaf(input);
     if (!trimmed || limit <= 0) return [];
+    const qualified =
+      /^[A-Za-z_$#][A-Za-z0-9_$#]*(?:(?:::|\.|->)#?[A-Za-z_$][A-Za-z0-9_$]*)+$/.test(
+        input,
+      )
+        ? input.replace(/(?:\.|->)/g, "::")
+        : undefined;
     return this.database
       .all<EntityProjectionRow>(
         `${ENTITY_PROJECTION_SELECT}
-         WHERE symbol.name=? COLLATE NOCASE
+         WHERE symbol.name=? COLLATE NOCASE${
+           qualified
+             ? " AND (symbol.qualified_name=? COLLATE NOCASE OR symbol.qualified_name LIKE ? COLLATE NOCASE)"
+             : ""
+         }
          ORDER BY symbol.is_exported DESC,symbol.id
          LIMIT ?`,
         trimmed,
+        ...(qualified ? [qualified, `%::${qualified}`] : []),
         limit,
       )
       .map((row) => this.projectEntity(row));
@@ -275,7 +287,7 @@ export class SqliteGraphReader {
   findSymbolsByQuery(query: string, limit: number): StoredEntity[] {
     const terms = [...new Set(query.match(/[\p{L}\p{N}_$]+/gu) ?? [])]
       .filter((term) => term.length > 1)
-      .slice(0, 8);
+      .slice(0, 16);
     if (limit <= 0 || terms.length === 0) return [];
     const clauses = terms.map(
       () =>
@@ -288,6 +300,14 @@ export class SqliteGraphReader {
       const pattern = `%${escapeLike(term)}%`;
       return [pattern, pattern, pattern, pattern];
     });
+    const coverageClauses = terms.map(
+      () => `(CASE WHEN
+        symbol.name LIKE ? ESCAPE '\\' COLLATE NOCASE OR
+        symbol.qualified_name LIKE ? ESCAPE '\\' COLLATE NOCASE OR
+        symbol.signature LIKE ? ESCAPE '\\' COLLATE NOCASE OR
+        file.relative_path LIKE ? ESCAPE '\\' COLLATE NOCASE
+       THEN 1 ELSE 0 END)`,
+    );
     const scoreClauses = terms.map(
       () => `(CASE
         WHEN symbol.name=? COLLATE NOCASE THEN 240
@@ -313,10 +333,12 @@ export class SqliteGraphReader {
       .all<EntityProjectionRow>(
         `${ENTITY_PROJECTION_SELECT}
          WHERE ${clauses.join(" OR ")}
-         ORDER BY (${scoreClauses.join(" + ")}) DESC,
+         ORDER BY (${coverageClauses.join(" + ")}) DESC,
+                  (${scoreClauses.join(" + ")}) DESC,
                   symbol.is_exported DESC,
                   symbol.id
          LIMIT ?`,
+        ...whereParams,
         ...whereParams,
         ...scoreParams,
         limit,
@@ -445,13 +467,19 @@ export class SqliteGraphReader {
                   ) DESC,line,id
                 ) AS occurrence_rank
          FROM unresolved_refs unresolved
-         WHERE status='dynamic' AND ref_kind='call'
+         WHERE status='dynamic' AND ref_kind IN ('call','new')
            AND owner_id IN (${placeholders})
+       ), fair AS (
+         SELECT *,ROW_NUMBER() OVER (
+           PARTITION BY owner_id
+           ORDER BY has_candidates DESC,line,id
+         ) AS owner_rank
+         FROM ranked WHERE occurrence_rank=1
        )
        SELECT id,owner_id,ref_name,member_name,receiver_kind,receiver_name,
               resolution_hints,reason,line,occurrence_count
-       FROM ranked WHERE occurrence_rank=1
-       ORDER BY has_candidates DESC,owner_id,line,id LIMIT ?`,
+       FROM fair
+       ORDER BY owner_rank,has_candidates DESC,owner_id,line,id LIMIT ?`,
       ...ids,
       limit,
     );
@@ -460,7 +488,12 @@ export class SqliteGraphReader {
       target_id: string;
       target_name: string;
       file_path: string;
-      reason: "hierarchy" | "generic_bound" | "method_set" | "function_pointer";
+      reason:
+        | "hierarchy"
+        | "generic_bound"
+        | "method_set"
+        | "function_pointer"
+        | "namespace_export";
       confidence: number;
     };
     const candidatesByEdge = new Map<string, CandidateRow[]>();
@@ -649,15 +682,31 @@ export class SqliteGraphReader {
     const ids = [...new Set(targetIds)];
     const placeholders = ids.map(() => "?").join(",");
     return this.all<{ id: string }>(
-      `SELECT DISTINCT unresolved.owner_id AS id
-       FROM edge_candidates candidate
-       JOIN unresolved_refs unresolved ON unresolved.id=candidate.edge_id
-       WHERE unresolved.status='dynamic'
-         AND unresolved.ref_kind='call'
-         AND unresolved.owner_is_file=0
-         AND candidate.target_id IN (${placeholders})
-       ORDER BY unresolved.owner_id
-       LIMIT ?`,
+      `WITH target_names(name) AS (
+         SELECT name FROM symbols WHERE id IN (${placeholders})
+         UNION
+         SELECT qualified_name FROM symbols
+         WHERE id IN (${placeholders}) AND qualified_name IS NOT NULL
+       ), sources(id) AS (
+         SELECT unresolved.owner_id
+         FROM edge_candidates candidate
+         JOIN unresolved_refs unresolved ON unresolved.id=candidate.edge_id
+         WHERE unresolved.status='dynamic'
+           AND unresolved.ref_kind IN ('call','new')
+           AND unresolved.owner_is_file=0
+           AND candidate.target_id IN (${placeholders})
+         UNION
+         SELECT unresolved.owner_id
+         FROM unresolved_refs unresolved
+         WHERE unresolved.status='dynamic'
+           AND unresolved.ref_kind IN ('call','new')
+           AND unresolved.owner_is_file=0
+           AND json_extract(unresolved.resolution_hints,'$.receiverType')
+               IN (SELECT name FROM target_names)
+       )
+       SELECT id FROM sources ORDER BY id LIMIT ?`,
+      ...ids,
+      ...ids,
       ...ids,
       limit,
     );

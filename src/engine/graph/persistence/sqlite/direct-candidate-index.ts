@@ -23,6 +23,7 @@ type InheritanceLink = { id: string; rel: string };
 
 export type DirectCandidateQuery = {
   sourceLanguage?: string;
+  sourceFileId: string;
   typeNames: readonly string[];
   memberName: string;
   callArity?: number;
@@ -47,7 +48,10 @@ export class DirectSemanticCandidateIndex {
     SemanticCandidateResolution | null
   >();
 
-  constructor(database: SqliteGraphDatabase) {
+  constructor(
+    database: SqliteGraphDatabase,
+    excludedInstantiationFileIds: ReadonlySet<string> = new Set(),
+  ) {
     for (const row of database.all<{
       id: string;
       name: string;
@@ -138,18 +142,27 @@ export class DirectSemanticCandidateIndex {
         rel: row.rel,
       });
     }
-    for (const row of database.all<{ dst_id: string }>(
-      `SELECT DISTINCT dst_id FROM edges
-       WHERE kind='INSTANTIATES' AND dst_is_file=0`,
+    for (const row of database.all<{ dst_id: string; source_file_id: string }>(
+      `SELECT DISTINCT made.dst_id,
+              CASE WHEN made.src_is_file=1 THEN made.src_id ELSE source.file_id END
+                AS source_file_id
+       FROM edges made
+       LEFT JOIN symbols source ON source.id=made.src_id
+       WHERE made.kind='INSTANTIATES' AND made.dst_is_file=0`,
     ))
-      this.instantiatedContainers.add(row.dst_id);
+      if (!excludedInstantiationFileIds.has(row.source_file_id))
+        this.instantiatedContainers.add(row.dst_id);
   }
 
   resolve(query: DirectCandidateQuery): SemanticCandidateResolution | null {
+    const visibleRoots = query.typeNames
+      .flatMap((name) => this.rootsByName.get(name) ?? [])
+      .filter((root) => query.visibleFiles.has(root.fileId));
+    const localRoots = visibleRoots.filter(
+      (root) => root.fileId === query.sourceFileId,
+    );
     const roots = collapseLogicalRoots(
-      query.typeNames
-        .flatMap((name) => this.rootsByName.get(name) ?? [])
-        .filter((root) => query.visibleFiles.has(root.fileId)),
+      localRoots.length > 0 ? localRoots : visibleRoots,
     );
     if (roots.length === 0) return null;
     const key = [
@@ -178,7 +191,12 @@ export class DirectSemanticCandidateIndex {
     // instead of collapsing them into an arbitrary direct hit.
     if (roots.length !== 1) return null;
     if (query.sourceLanguage === "go" && roots[0]!.kind === "interface")
-      return this.resolveGoStructural(query, roots[0]!);
+      return this.resolveStructural(query, roots[0]!, STRUCTURAL_RELATIONS);
+    if (
+      roots[0]!.kind === "interface" &&
+      ["typescript", "tsx"].includes(query.sourceLanguage ?? "")
+    )
+      return this.resolveStructural(query, roots[0]!, STRUCTURAL_RELATIONS);
     if (roots.some((root) => isAbstractKind(root.kind)))
       return this.resolveNominalHierarchy(query, roots[0]!);
     const owners = [...new Set(roots.map((root) => root.qualifiedName))];
@@ -304,18 +322,13 @@ export class DirectSemanticCandidateIndex {
     };
   }
 
-  /**
-   * Resolve a Go interface from its complete structural method set in memory.
-   * Go imports expose whole package directories, and interface satisfaction is
-   * implicit; repeatedly running the recursive SQL repository for every call
-   * dominated graph finalization on real router packages.
-   */
-  private resolveGoStructural(
+  /** Resolve structural interfaces from their complete visible method set. */
+  private resolveStructural(
     query: DirectCandidateQuery,
     root: TypeRoot,
+    relations: ReadonlySet<string>,
   ): SemanticCandidateResolution {
-    const relations = GO_PROVIDER_RELATIONS;
-    const required = root.ids.flatMap((id) => this.goMethodSet(id, relations));
+    const required = root.ids.flatMap((id) => this.methodSet(id, relations));
     const candidates: DirectMember[] = [];
     if (required.length > 0) {
       for (const candidateRoot of collapseLogicalRoots(
@@ -327,7 +340,7 @@ export class DirectSemanticCandidateIndex {
         )
           continue;
         const methods = candidateRoot.ids.flatMap((id) =>
-          this.goMethodSet(id, relations),
+          this.methodSet(id, relations),
         );
         if (!required.every((method) => hasCompatibleMethod(methods, method)))
           continue;
@@ -342,13 +355,15 @@ export class DirectSemanticCandidateIndex {
       }
     }
     return {
-      candidates: uniqueMembers(candidates, "go").map((member) => member.id),
+      candidates: uniqueMembers(candidates, query.sourceLanguage).map(
+        (member) => member.id,
+      ),
       abstractDispatch: true,
       rtaActive: false,
     };
   }
 
-  private goMethodSet(
+  private methodSet(
     rootId: string,
     relations: ReadonlySet<string>,
   ): DirectMember[] {
@@ -419,7 +434,7 @@ export class DirectSemanticCandidateIndex {
   }
 }
 
-const GO_PROVIDER_RELATIONS = new Set(["extends", "implements"]);
+const STRUCTURAL_RELATIONS = new Set(["extends", "implements"]);
 
 function collapseLogicalRoots(roots: Iterable<TypeRoot>): TypeRoot[] {
   const groups = new Map<string, TypeRoot>();

@@ -224,6 +224,7 @@ export function rawRef(
         occurrence?: number;
         sourceLanguage?: string;
         rustInlineModuleDepth?: number;
+        reexport?: boolean;
       }
     | {
         type: "import_binding";
@@ -235,6 +236,7 @@ export function rawRef(
         localName: string;
         sourceLanguage: string;
         rustInlineModuleDepth?: number;
+        reexport?: boolean;
       },
 ): RawRef {
   const refKind =
@@ -263,6 +265,7 @@ export function rawRef(
       local_name: input.localName,
       source_language: input.sourceLanguage,
       rust_inline_module_depth: input.rustInlineModuleDepth,
+      reexport: input.reexport,
     };
   if (input.type === "import")
     return {
@@ -271,6 +274,7 @@ export function rawRef(
       ref_kind: "import",
       source_language: input.sourceLanguage,
       rust_inline_module_depth: input.rustInlineModuleDepth,
+      reexport: input.reexport,
     };
   return {
     ...base,

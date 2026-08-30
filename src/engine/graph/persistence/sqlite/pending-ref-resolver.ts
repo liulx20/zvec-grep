@@ -29,6 +29,7 @@ import { CppReceiverTypeInference } from "../../cpp-receiver-inference.js";
 import { SqliteCounterpartProjector } from "./counterpart-projector.js";
 import { SqliteProjectionBuffer } from "./projection-buffer.js";
 import { resolutionSemantics } from "../../../extraction/index.js";
+import { isTestPath } from "../../path-policy.js";
 
 const PER_NAME_CEILING = 500;
 // Keep enough rows in one transaction to avoid repeatedly sorting the
@@ -70,7 +71,15 @@ type ImportBinding = {
   imported_name: string;
   dst_file_id: string;
   local_name: string;
+  reexport: boolean;
 };
+
+type DeclaredFields = {
+  fileId: string;
+  fields: Map<string, string>;
+};
+
+type ConstructorTarget = { id: string; arity: number | null };
 
 /** Converts pending call/ref/import sites into persisted graph edges. */
 export class SqlitePendingRefResolver {
@@ -84,6 +93,7 @@ export class SqlitePendingRefResolver {
     SemanticCandidateResolution
   >();
   private readonly functionPointerCandidateCache = new Map<string, string[]>();
+  private readonly namespaceCandidateCache = new Map<string, string[]>();
   private readonly callableReturnCache = new Map<
     string,
     CallableReturnCandidate[]
@@ -100,9 +110,20 @@ export class SqlitePendingRefResolver {
     string,
     { target: string; fileId: string }[]
   >();
+  private readonly declaredFieldsByContainer = new Map<
+    string,
+    ReadonlyMap<string, string>
+  >();
+  private readonly declaredFieldsByType = new Map<string, DeclaredFields[]>();
+  private readonly aliasObjectFields = new Map<string, DeclaredFields[]>();
+  private readonly constructorsByContainer = new Map<
+    string,
+    ConstructorTarget[]
+  >();
   private readonly failedRefIds = new Set<string>();
   private readonly fileDirectories = new Map<string, string>();
   private readonly filesByDirectory = new Map<string, string[]>();
+  private readonly testFileIds = new Set<string>();
   private semanticCandidateQueries = 0;
   private semanticCandidateCacheHits = 0;
   private semanticCandidateDurationMs = 0;
@@ -199,7 +220,10 @@ export class SqlitePendingRefResolver {
     this.resolvePhase(options, "instantiations", invocation);
     this.semanticCandidateCache.clear();
     this.timed(options, "graph_resolve_direct_index", () => {
-      this.directCandidates = new DirectSemanticCandidateIndex(this.database);
+      this.directCandidates = new DirectSemanticCandidateIndex(
+        this.database,
+        this.testFileIds,
+      );
     });
     // Build/cache hierarchy lookups only after every inheritance batch has
     // completed, so calls never observe a partial inheritance graph.
@@ -264,6 +288,12 @@ export class SqlitePendingRefResolver {
   private resetInvocationState(files: ResolvePendingOptions["files"]): void {
     this.fileDirectories.clear();
     this.filesByDirectory.clear();
+    this.testFileIds.clear();
+    for (const file of this.all<{ id: string; relative_path: string | null }>(
+      "SELECT id,relative_path FROM files",
+    ))
+      if (file.relative_path && isTestPath(file.relative_path))
+        this.testFileIds.add(file.id);
     for (const file of files ?? []) {
       // Absolute directory identity keeps same-named packages in different
       // workspace roots independent. Relative keys merge unrelated packages.
@@ -279,6 +309,7 @@ export class SqlitePendingRefResolver {
       this.semanticCandidateCache,
       this.semanticCandidateStatsByLanguage,
       this.functionPointerCandidateCache,
+      this.namespaceCandidateCache,
       this.callableReturnCache,
       this.functionPointerSlots,
     ])
@@ -448,6 +479,10 @@ export class SqlitePendingRefResolver {
     this.abstractTypeFiles.clear();
     this.typeFiles.clear();
     this.typeAliases.clear();
+    this.declaredFieldsByContainer.clear();
+    this.declaredFieldsByType.clear();
+    this.aliasObjectFields.clear();
+    this.constructorsByContainer.clear();
     for (const row of this.all<OwnerContext & { id: string }>(
       `WITH owner_symbols AS (
          SELECT s.*,
@@ -474,8 +509,11 @@ export class SqlitePendingRefResolver {
       dst_id: string;
       imported_name: string | null;
       local_name: string | null;
+      reexport: number;
     }>(
-      `SELECT src_id,dst_id,imported_name,local_name FROM edges
+      `SELECT src_id,dst_id,imported_name,local_name,
+              COALESCE(json_extract(resolution_hints,'$.reexport'),0) AS reexport
+         FROM edges
        WHERE src_is_file=1 AND dst_is_file=1 AND kind='IMPORTS'
        ORDER BY src_id,dst_id`,
     )) {
@@ -491,6 +529,7 @@ export class SqlitePendingRefResolver {
         imported_name: row.imported_name,
         dst_file_id: row.dst_id,
         local_name: row.local_name,
+        reexport: row.reexport === 1,
       });
       this.importBindings.set(row.src_id, bindings);
     }
@@ -520,11 +559,78 @@ export class SqlitePendingRefResolver {
       `SELECT name,signature,file_id FROM symbols
        WHERE kind='alias' AND name IS NOT NULL AND signature IS NOT NULL`,
     )) {
+      const files = this.typeFiles.get(row.name) ?? new Set<string>();
+      files.add(row.file_id);
+      this.typeFiles.set(row.name, files);
+      const fields = typeAliasObjectFields(row.signature);
+      if (fields.size > 0) {
+        const declarations = this.aliasObjectFields.get(row.name) ?? [];
+        declarations.push({ fileId: row.file_id, fields });
+        this.aliasObjectFields.set(row.name, declarations);
+      }
       const target = aliasTargetType(row.name, row.signature);
       if (!target) continue;
       const aliases = this.typeAliases.get(row.name) ?? [];
       aliases.push({ target, fileId: row.file_id });
       this.typeAliases.set(row.name, aliases);
+    }
+    for (const row of this.all<{
+      container_id: string;
+      container_name: string;
+      file_id: string;
+      name: string;
+      signature: string;
+    }>(
+      `SELECT parent.id AS container_id,parent.name AS container_name,
+              parent.file_id,field.name,field.signature
+         FROM contains ownership
+         JOIN symbols parent ON parent.id=ownership.parent_id
+         JOIN symbols field ON field.id=ownership.child_id
+        WHERE parent.name IS NOT NULL
+          AND parent.kind IN ('class','abstract_class','interface')
+          AND field.kind='value' AND field.name IS NOT NULL
+          AND field.signature IS NOT NULL
+        ORDER BY parent.id,field.name,field.id`,
+    )) {
+      const type = declaredFieldType(row.name, row.signature);
+      if (!type) continue;
+      const fields = new Map(
+        this.declaredFieldsByContainer.get(row.container_id) ?? [],
+      );
+      fields.set(row.name, type);
+      this.declaredFieldsByContainer.set(row.container_id, fields);
+      let declarations = this.declaredFieldsByType.get(row.container_name);
+      if (!declarations) {
+        declarations = [];
+        this.declaredFieldsByType.set(row.container_name, declarations);
+      }
+      let declaration = declarations.find(
+        (candidate) => candidate.fileId === row.file_id,
+      );
+      if (!declaration) {
+        declaration = { fileId: row.file_id, fields: new Map() };
+        declarations.push(declaration);
+      }
+      declaration.fields.set(row.name, type);
+    }
+    for (const row of this.all<{
+      container_id: string;
+      id: string;
+      arity: number | null;
+    }>(
+      `SELECT parent.id AS container_id,member.id,member.arity
+         FROM contains ownership
+         JOIN symbols parent ON parent.id=ownership.parent_id
+         JOIN symbols member ON member.id=ownership.child_id
+        WHERE member.kind IN ('function','method','constructor')
+          AND (member.name IN ('constructor','__init__')
+               OR member.name=parent.name
+               OR member.node_type LIKE '%constructor%')
+        ORDER BY parent.id,member.arity,member.id`,
+    )) {
+      const targets = this.constructorsByContainer.get(row.container_id) ?? [];
+      targets.push({ id: row.id, arity: row.arity });
+      this.constructorsByContainer.set(row.container_id, targets);
     }
   }
 
@@ -565,7 +671,7 @@ export class SqlitePendingRefResolver {
     );
     const receiver = refReceiver(ref.ref_name);
     const qualifiedReceiverBinding = Boolean(receiver && ref.member_name);
-    const binding = (this.importBindings.get(owner.file_id) ?? [])
+    const directBinding = (this.importBindings.get(owner.file_id) ?? [])
       .filter(
         (candidate) =>
           candidate.local_name === ref.ref_name ||
@@ -597,6 +703,7 @@ export class SqlitePendingRefResolver {
           left.imported_name.localeCompare(right.imported_name)
         );
       })[0];
+    const binding = this.resolveReexportBinding(directBinding);
     if (pending.target?.hints?.dynamicDispatch) {
       const functionPointerCandidates = this.functionPointerTargets(
         ref,
@@ -613,7 +720,19 @@ export class SqlitePendingRefResolver {
         );
         return;
       }
-      this.persistDynamicCall(ref, pending.target, [], "runtime_dispatch");
+      const namespaceCandidates = this.namespaceDispatchTargets(
+        ref,
+        pending.target,
+        owner.file_id,
+      );
+      this.persistDynamicCall(
+        ref,
+        pending.target,
+        namespaceCandidates,
+        "runtime_dispatch",
+        namespaceCandidates.length > 0 ? "namespace_export" : undefined,
+        0.7,
+      );
       return;
     }
     const goPackageTarget =
@@ -640,7 +759,26 @@ export class SqlitePendingRefResolver {
       );
       return;
     }
-    if (ref.ref_kind === "call" && pending.target?.hints?.lexicallyBound) {
+    if (
+      ref.ref_kind === "call" &&
+      pending.target?.hints?.lexicallyBound &&
+      !pending.target.receiver
+    ) {
+      const lexicalCandidate = this.lexicalSourceCandidate(
+        names,
+        owner.file_id,
+        pending.target.member,
+        pending.target.hints.lexicalSource,
+      );
+      if (lexicalCandidate) {
+        this.insertSymbolEdge(ref, lexicalCandidate, "CALLS", {
+          provenance: "heuristic",
+          confidence: 0.85,
+          evidence: "preferred_file",
+          resolutionHints: pending.target.hints,
+        });
+        return;
+      }
       this.persistDynamicCall(ref, pending.target, [], "lexical_dispatch");
       return;
     }
@@ -663,8 +801,14 @@ export class SqlitePendingRefResolver {
       else this.failRef(ref.id, attempt);
       return;
     }
-    const cppReceiver = this.withInferredCppReceiverType(
+    const structuredTarget = this.withInferredDeclaredReceiverType(
       pending.target!,
+      ref,
+      owner,
+      hierarchyCache,
+    );
+    const cppReceiver = this.withInferredCppReceiverType(
+      structuredTarget,
       ref,
       owner.file_id,
     );
@@ -753,6 +897,7 @@ export class SqlitePendingRefResolver {
           provenance: "heuristic",
           confidence: 0.75,
           evidence: "receiver_type_member",
+          resolutionHints: target.hints,
         },
       );
       return;
@@ -807,14 +952,16 @@ export class SqlitePendingRefResolver {
         this.projections.markExternal(ref.id);
         return;
       }
-      const heuristic = binding
-        ? this.heuristicCandidate(
-            ref,
-            names,
-            owner.file_id,
-            this.bindingVisibleFiles(binding),
-          )
-        : null;
+      const heuristic =
+        binding || target.hints?.lexicallyBound
+          ? this.heuristicCandidate(
+              ref,
+              names,
+              owner.file_id,
+              binding ? this.bindingVisibleFiles(binding) : preferred,
+              Boolean(binding),
+            )
+          : null;
       if (!heuristic) {
         // Preserve a qualified call as an explicit uncertainty boundary. A
         // missing receiver type is not evidence for an arbitrary same-named
@@ -918,6 +1065,93 @@ export class SqlitePendingRefResolver {
     };
   }
 
+  private withInferredDeclaredReceiverType(
+    target: NonNullable<PendingRef["target"]>,
+    ref: RefRow,
+    owner: OwnerContext,
+    hierarchyCache: Map<string, readonly string[]>,
+  ): NonNullable<PendingRef["target"]> {
+    const derived = Boolean(target.hints?.resolutionDependencies?.length);
+    const sourceTarget = derived
+      ? { ...target, hints: sourceResolutionHints(target.hints) }
+      : target;
+    if (
+      (sourceTarget.hints?.receiverType && !derived) ||
+      !sourceTarget.receiver?.name ||
+      !owner.container_id ||
+      !resolutionSemantics(ref.source_language).ownerFieldInference
+    )
+      return sourceTarget;
+    const fields = ownerFieldPath(sourceTarget.receiver.name);
+    if (fields.length === 0) return sourceTarget;
+    const hierarchy = this.cachedInheritanceContainers(
+      hierarchyCache,
+      owner.container_id,
+      true,
+    );
+    const initialTypes = new Set(
+      hierarchy.flatMap((containerId) => {
+        const type = this.declaredFieldsByContainer
+          .get(containerId)
+          ?.get(fields[0]!);
+        return type ? [type] : [];
+      }),
+    );
+    if (initialTypes.size !== 1) return sourceTarget;
+    const visibleFiles = new Set([
+      owner.file_id,
+      ...this.transitiveImportedFiles(owner.file_id),
+    ]);
+    let receiverType = [...initialTypes][0]!;
+    const dependencies = new Set(fields);
+    for (const name of typeDependencyNames(receiverType))
+      dependencies.add(name);
+    for (const field of fields.slice(1)) {
+      const next = this.declaredNestedFieldType(
+        receiverType,
+        field,
+        visibleFiles,
+      );
+      if (!next) return sourceTarget;
+      receiverType = next;
+      for (const name of typeDependencyNames(receiverType))
+        dependencies.add(name);
+    }
+    receiverType = typeLookupName(receiverType);
+    return {
+      ...sourceTarget,
+      hints: {
+        ...sourceTarget.hints,
+        receiverType,
+        candidateTypes: [receiverType],
+        resolutionDependencies: [...dependencies].sort(),
+        ...(resolutionSemantics(ref.source_language).virtualReturnDispatch
+          ? { dispatch: "virtual" as const }
+          : {}),
+      },
+    };
+  }
+
+  private declaredNestedFieldType(
+    ownerType: string,
+    field: string,
+    visibleFiles: ReadonlySet<string>,
+  ): string | undefined {
+    const returnAlias = /^ReturnType\s*<\s*([A-Za-z_$][\w$.:]*)\s*>$/.exec(
+      ownerType,
+    )?.[1];
+    const declarations = returnAlias
+      ? (this.aliasObjectFields.get(typeLookupName(returnAlias)) ?? [])
+      : (this.declaredFieldsByType.get(typeLookupName(ownerType)) ?? []);
+    const types = new Set(
+      declarations
+        .filter((declaration) => visibleFiles.has(declaration.fileId))
+        .map((declaration) => declaration.fields.get(field))
+        .filter((type): type is string => Boolean(type)),
+    );
+    return types.size === 1 ? [...types][0] : undefined;
+  }
+
   private resolveSemanticCandidates(
     ref: RefRow,
     target: NonNullable<PendingRef["target"]>,
@@ -970,6 +1204,7 @@ export class SqlitePendingRefResolver {
     }
     const direct = this.directCandidates?.resolve({
       sourceLanguage: ref.source_language ?? undefined,
+      sourceFileId: sourceFile,
       typeNames,
       memberName: target.member,
       callArity: target.hints?.callArity,
@@ -998,6 +1233,9 @@ export class SqlitePendingRefResolver {
       abstractRootHint: typeNames.some((typeName) =>
         this.isVisibleAbstractType(typeName, visibleFiles),
       ),
+      excludedInstantiationFileIds: this.testFileIds.has(sourceFile)
+        ? []
+        : [...this.testFileIds],
     };
     const key = [
       ref.source_language ?? "",
@@ -1124,6 +1362,36 @@ export class SqlitePendingRefResolver {
     ];
   }
 
+  private lexicalSourceCandidate(
+    names: NameIndex,
+    sourceFileId: string,
+    member: string,
+    lexicalSource: string | undefined,
+  ): string | undefined {
+    if (!lexicalSource || lexicalSource.includes(".")) return undefined;
+    const binding = this.resolveReexportBinding(
+      (this.importBindings.get(sourceFileId) ?? []).find(
+        (candidate) => candidate.local_name === lexicalSource,
+      ),
+    );
+    const directFiles = [binding?.dst_file_id ?? sourceFileId];
+    const direct = names
+      .candidates(member, directFiles)
+      .filter((candidate) => isCallableSymbolKind(candidate.kind));
+    if (direct.length !== 0)
+      return direct.length === 1 ? direct[0]!.id : undefined;
+    if (!binding) return undefined;
+    const immediate = names
+      .candidates(member, this.importAdjacency.get(binding.dst_file_id) ?? [])
+      .filter((candidate) => isCallableSymbolKind(candidate.kind));
+    if (immediate.length !== 0)
+      return immediate.length === 1 ? immediate[0]!.id : undefined;
+    const transitive = names
+      .candidates(member, this.transitiveImportedFiles(binding.dst_file_id))
+      .filter((candidate) => isCallableSymbolKind(candidate.kind));
+    return transitive.length === 1 ? transitive[0]!.id : undefined;
+  }
+
   private bindingVisibleFiles(binding: ImportBinding): readonly string[] {
     return [
       binding.dst_file_id,
@@ -1131,11 +1399,35 @@ export class SqlitePendingRefResolver {
     ];
   }
 
+  private resolveReexportBinding(
+    binding: ImportBinding | undefined,
+  ): ImportBinding | undefined {
+    if (!binding) return undefined;
+    const localName = binding.local_name;
+    const seen = new Set<string>();
+    let current = binding;
+    while (current.imported_name !== "*") {
+      const key = `${current.dst_file_id}\0${current.imported_name}`;
+      if (seen.has(key)) break;
+      seen.add(key);
+      const candidates = (
+        this.importBindings.get(current.dst_file_id) ?? []
+      ).filter(
+        (candidate) =>
+          candidate.reexport && candidate.local_name === current.imported_name,
+      );
+      if (candidates.length !== 1) break;
+      current = { ...candidates[0]!, local_name: localName };
+    }
+    return current;
+  }
+
   private heuristicCandidate(
     ref: RefRow,
     names: NameIndex,
     sourceFileId: string,
     preferredFileIds: readonly string[],
+    includeSourceFile = true,
   ): string | null {
     if (ref.receiver_kind !== "qualified" || !ref.member_name) return null;
     // Qualified syntax alone does not justify a bare-name fallback. Require
@@ -1143,7 +1435,10 @@ export class SqlitePendingRefResolver {
     // class's new(), nor console.log to an unrelated local log().
     if (preferredFileIds.length === 0) return null;
     const candidates = names
-      .candidates(ref.member_name, [sourceFileId, ...preferredFileIds])
+      .candidates(ref.member_name, [
+        ...(includeSourceFile ? [sourceFileId] : []),
+        ...preferredFileIds,
+      ])
       .filter(
         (entry) => entry.id !== ref.owner_id && entry.containerId !== undefined,
       );
@@ -1160,7 +1455,11 @@ export class SqlitePendingRefResolver {
       | "lexical_dispatch"
       | "runtime_dispatch",
     explicitCandidateReason?:
-      "hierarchy" | "generic_bound" | "method_set" | "function_pointer",
+      | "hierarchy"
+      | "generic_bound"
+      | "method_set"
+      | "function_pointer"
+      | "namespace_export",
     candidateConfidence = 0.65,
   ): void {
     this.projections.addDynamicRef({
@@ -1191,8 +1490,11 @@ export class SqlitePendingRefResolver {
       provenance: "static" | "heuristic";
       confidence: number;
       evidence?: string;
+      resolutionHints?: ReferenceResolutionHints;
     } = { provenance: "static", confidence: 1 },
   ): void {
+    let targetId = dst;
+    let targetKind = edgeKind;
     if (ref.ref_kind === "new") {
       this.projections.addEdge({
         id: `${ref.id}:instantiates`,
@@ -1216,14 +1518,25 @@ export class SqlitePendingRefResolver {
         confidence: 1,
         evidence: null,
       });
+      const arity = parseResolutionHints(ref.resolution_hints)?.callArity;
+      const constructors = (this.constructorsByContainer.get(dst) ?? []).filter(
+        (candidate) =>
+          arity === undefined ||
+          candidate.arity === null ||
+          candidate.arity === arity,
+      );
+      if (constructors.length === 1) {
+        targetId = constructors[0]!.id;
+        targetKind = "CALLS";
+      }
     }
     this.projections.addEdge({
       id: ref.id,
       src_id: ref.owner_id,
-      dst_id: dst,
+      dst_id: targetId,
       src_is_file: 0,
       dst_is_file: 0,
-      kind: edgeKind,
+      kind: targetKind,
       rel: ref.ref_kind,
       count: 1,
       first_line: ref.line,
@@ -1234,7 +1547,9 @@ export class SqlitePendingRefResolver {
       receiver_kind: ref.receiver_kind,
       receiver_name: ref.receiver_name,
       member_name: ref.member_name,
-      resolution_hints: ref.resolution_hints,
+      resolution_hints: metadata.resolutionHints
+        ? JSON.stringify(metadata.resolutionHints)
+        : ref.resolution_hints,
       provenance: metadata.provenance,
       confidence: metadata.confidence,
       evidence: metadata.evidence ?? null,
@@ -1407,6 +1722,62 @@ export class SqlitePendingRefResolver {
       this.functionPointerSlots.add(
         functionPointerSlotKey(row.container_type, row.field),
       );
+  }
+
+  private namespaceDispatchTargets(
+    ref: RefRow,
+    target: ReturnType<typeof referenceTargetFromRaw>,
+    sourceFileId: string,
+  ): string[] {
+    const receiverSources = new Set([
+      ...(target.hints?.dynamicDispatch?.receiverSources ?? []),
+      ...(target.receiver?.name ? [target.receiver.name] : []),
+    ]);
+    const namespaceFiles = [
+      ...new Set(
+        (this.importBindings.get(sourceFileId) ?? [])
+          .filter(
+            (binding) =>
+              binding.imported_name === "*" &&
+              receiverSources.has(binding.local_name),
+          )
+          .map((binding) => binding.dst_file_id),
+      ),
+    ].sort();
+    if (namespaceFiles.length === 0) return [];
+    const member = target.member === "<dynamic>" ? "" : target.member;
+    const key = `${ref.ref_kind}\x01${member}\x01${namespaceFiles.join("\0")}`;
+    const cached = this.namespaceCandidateCache.get(key);
+    if (cached) return cached;
+    const rows = this.all<{ id: string; kind: string; name: string }>(
+      `WITH RECURSIVE export_files(id) AS (
+         SELECT value FROM json_each(?)
+         UNION
+         SELECT edge.dst_id FROM edges edge
+         JOIN export_files source ON source.id=edge.src_id
+         WHERE edge.kind='IMPORTS'
+           AND edge.src_is_file=1 AND edge.dst_is_file=1
+           AND COALESCE(json_extract(edge.resolution_hints,'$.reexport'),0)=1
+       )
+       SELECT symbol.id,symbol.kind,symbol.name
+       FROM symbols symbol JOIN export_files file ON file.id=symbol.file_id
+       WHERE symbol.name IS NOT NULL AND symbol.is_exported=1
+         AND NOT EXISTS (
+           SELECT 1 FROM contains ownership WHERE ownership.child_id=symbol.id
+         )
+       ORDER BY symbol.name,symbol.id LIMIT 512`,
+      JSON.stringify(namespaceFiles),
+    );
+    const candidates = rows
+      .filter(
+        (row) =>
+          (isCallableSymbolKind(row.kind) ||
+            ["class", "component", "struct"].includes(row.kind)) &&
+          (!member || row.name.toLowerCase() === member.toLowerCase()),
+      )
+      .map((row) => row.id);
+    this.namespaceCandidateCache.set(key, candidates);
+    return candidates;
   }
 
   private functionPointerTargets(
@@ -1613,6 +1984,65 @@ function normalizePersistedType(value: string): string {
     .replace(/\[.*\]$/, "")
     .split(/::|\./)
     .at(-1)!;
+}
+
+function ownerFieldPath(receiver: string): string[] {
+  const segments = receiver
+    .split(".")
+    .map((segment) => segment.replace(/[!?]+$/g, "").trim())
+    .filter(Boolean);
+  return segments[0] === "this" ? segments.slice(1) : [];
+}
+
+function sourceResolutionHints(
+  hints: ReferenceResolutionHints | undefined,
+): ReferenceResolutionHints | undefined {
+  if (!hints) return undefined;
+  const source = { ...hints };
+  delete source.receiverType;
+  delete source.receiverTypeEvidence;
+  delete source.candidateTypes;
+  delete source.resolutionDependencies;
+  delete source.dispatch;
+  return Object.keys(source).length > 0 ? source : undefined;
+}
+
+function typeDependencyNames(type: string): string[] {
+  return [...type.matchAll(/[A-Za-z_$][\w$]*/g)]
+    .map((match) => match[0])
+    .filter((name) => name !== "ReturnType");
+}
+
+function declaredFieldType(name: string, signature: string): string | null {
+  const marker = new RegExp(`${escapeRegExp(name)}[!?]?\\s*:\\s*`).exec(
+    signature,
+  );
+  if (!marker) return null;
+  const value = signature.slice(marker.index + marker[0].length).trim();
+  const initializer = value.search(/=(?!=|>)/);
+  return (
+    (initializer >= 0 ? value.slice(0, initializer) : value)
+      .trim()
+      .replace(/[;,]$/, "") || null
+  );
+}
+
+function typeAliasObjectFields(signature: string): Map<string, string> {
+  const assignment = signature.indexOf("=");
+  if (assignment < 0) return new Map();
+  const target = signature.slice(assignment + 1).trim();
+  const body =
+    /=>\s*\{([\s\S]*)\}\s*;?$/.exec(target)?.[1] ??
+    /^\{([\s\S]*)\}\s*;?$/.exec(target)?.[1];
+  if (!body) return new Map();
+  const fields = new Map<string, string>();
+  for (const match of body.matchAll(
+    /(?:^|[;,])\s*(?:readonly\s+)?([#$A-Za-z_]\w*)[?]?\s*:\s*([^;,{}]+)/g,
+  )) {
+    const type = match[2]!.trim();
+    if (type) fields.set(match[1]!, type);
+  }
+  return fields;
 }
 
 function aliasTargetType(aliasName: string, signature: string): string | null {

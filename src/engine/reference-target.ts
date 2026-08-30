@@ -19,16 +19,22 @@ export type ReferenceResolutionHints = {
     confidence: number;
   };
   candidateTypes?: string[];
+  /** Symbol names whose declarations were followed to infer receiverType. */
+  resolutionDependencies?: string[];
   genericBounds?: string[];
   dispatch?: "static" | "virtual" | "interface" | "trait" | "dynamic";
   callArity?: number;
-  /** A parameter/local binding shadows this bare callable name. */
+  /** The callable or its receiver is a parameter/local binding. */
   lexicallyBound?: boolean;
+  /** Factory callable from which a destructured local callable originated. */
+  lexicalSource?: string;
   /** Runtime-selected call target retained from the source AST. */
   dynamicDispatch?: {
     form: "computed_member" | "getattr" | "reflection";
     /** Literal dispatch key when statically visible; absent for runtime keys. */
     key?: string;
+    /** Namespace/value aliases from which the computed receiver was derived. */
+    receiverSources?: string[];
   };
   /** High-precision C/C++ callback registration keyed by its storage slot. */
   functionPointerRegistration?: {

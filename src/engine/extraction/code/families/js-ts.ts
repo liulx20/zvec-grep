@@ -19,6 +19,7 @@ const JS_TS_FUNCTION_VALUE_TYPES = new Set([
 ]);
 
 const DEFAULT_EXPORT_BINDING_CACHE = new WeakMap<TSNode, ReadonlySet<string>>();
+const RETURNED_FUNCTION_ALIASES = new WeakSet<TSNode>();
 
 export function shouldIndexJavascriptTypescriptEntity(node: TSNode): boolean {
   if (node.type === "method_definition" && isObjectMember(node)) {
@@ -44,7 +45,7 @@ export function shouldIndexJavascriptTypescriptEntity(node: TSNode): boolean {
 
   if (node.type === "variable_declarator" && isModuleValue(node)) return true;
 
-  return hasFunctionValue(node);
+  return hasFunctionValue(node) || isTypedClassField(node);
 }
 
 export function hasJavascriptTypescriptFunctionValue(node: TSNode): boolean {
@@ -58,6 +59,9 @@ export function resolveJavascriptTypescriptEntities(
     return [node];
   }
 
+  const bindings = destructuredBindingNodes(node);
+  if (bindings.length > 0) return bindings;
+
   const objectEntities = exportedObjectFunctionEntities(node);
 
   return objectEntities.length > 0 ? [node, ...objectEntities] : [node];
@@ -66,6 +70,8 @@ export function resolveJavascriptTypescriptEntities(
 export function extractJavascriptTypescriptName(
   node: TSNode,
 ): string | undefined {
+  if (BINDING_IDENTIFIER_TYPES.has(node.type)) return node.text;
+
   if (node.type === "assignment_expression") {
     const left = node.childForFieldName("left");
     return (
@@ -87,15 +93,18 @@ export function javascriptTypescriptScopeBreadcrumb(
   node: TSNode,
   breadcrumb: readonly string[],
 ): readonly string[] {
-  const objectName = exportedObjectVariableName(node);
-
   if (node.type === "assignment_expression") {
     const left = node.childForFieldName("left");
     const receiver = left?.childForFieldName("object")?.text;
     return receiver ? [...breadcrumb, receiver] : breadcrumb;
   }
 
-  return objectName ? [...breadcrumb, objectName] : breadcrumb;
+  const objectName = BINDING_IDENTIFIER_TYPES.has(node.type)
+    ? undefined
+    : exportedObjectVariableName(node);
+  return objectName
+    ? [...breadcrumb, objectName, ...nestedFunctionOwners(node)]
+    : breadcrumb;
 }
 
 export function extractJavascriptTypescriptSignature(
@@ -125,6 +134,8 @@ export function extractJavascriptTypescriptSignature(
 export function classifyJavascriptTypescriptNode(
   node: TSNode,
 ): CodeSymbolType | undefined {
+  if (BINDING_IDENTIFIER_TYPES.has(node.type)) return "value";
+
   if (
     node.type === "variable_declarator" &&
     exportedObjectFunctionEntities(node).length > 0
@@ -137,12 +148,59 @@ export function classifyJavascriptTypescriptNode(
   ) {
     return hasFunctionValue(node)
       ? "function"
-      : node.type === "variable_declarator" && isModuleValue(node)
+      : isTypedClassField(node)
         ? "value"
-        : undefined;
+        : node.type === "variable_declarator" && isModuleValue(node)
+          ? "value"
+          : undefined;
   }
 
   return undefined;
+}
+
+function isTypedClassField(node: TSNode): boolean {
+  return (
+    (node.type === "field_definition" ||
+      node.type === "public_field_definition") &&
+    node.childForFieldName("type") !== null
+  );
+}
+
+const BINDING_IDENTIFIER_TYPES = new Set([
+  "identifier",
+  "shorthand_property_identifier_pattern",
+]);
+
+function destructuredBindingNodes(node: TSNode): TSNode[] {
+  if (!isModuleValue(node)) return [];
+  const pattern = node.childForFieldName("name");
+  if (!pattern || !/^(?:array|object)_pattern$/.test(pattern.type)) return [];
+
+  const bindings: TSNode[] = [];
+  collectBindingNodes(pattern, bindings);
+  return bindings;
+}
+
+function collectBindingNodes(node: TSNode, out: TSNode[]): void {
+  if (BINDING_IDENTIFIER_TYPES.has(node.type)) {
+    out.push(node);
+    return;
+  }
+  if (/^(?:pair|pair_pattern)$/.test(node.type)) {
+    const value = node.childForFieldName("value");
+    if (value) collectBindingNodes(value, out);
+    return;
+  }
+  if (/^(?:assignment_pattern|rest_pattern)$/.test(node.type)) {
+    const binding =
+      node.childForFieldName("left") ??
+      node.childForFieldName("argument") ??
+      node.namedChildren[0];
+    if (binding) collectBindingNodes(binding, out);
+    return;
+  }
+  if (!/(?:pattern|array|object)/.test(node.type)) return;
+  for (const child of node.namedChildren) collectBindingNodes(child, out);
 }
 
 function isModuleValue(node: TSNode): boolean {
@@ -156,9 +214,18 @@ function isModuleValue(node: TSNode): boolean {
 
 export const extractJavascriptTypescriptDoc = extractPrecedingDoc;
 
-export const extractJavascriptTypescriptModifiers = extractCommonModifiers;
+export function extractJavascriptTypescriptModifiers(
+  node: TSNode,
+): ReturnType<typeof extractCommonModifiers> {
+  const modifiers = extractCommonModifiers(node);
+  if (isExportedVariableDeclarator(node) && !modifiers.includes("exported"))
+    modifiers.push("exported");
+  return modifiers;
+}
 
 function hasFunctionValue(node: TSNode): boolean {
+  if (RETURNED_FUNCTION_ALIASES.has(node)) return true;
+  if (hasCallableType(node)) return true;
   const value =
     node.childForFieldName("value") ??
     node.namedChildren.find((child) =>
@@ -166,6 +233,15 @@ function hasFunctionValue(node: TSNode): boolean {
     );
 
   return value !== undefined && containsFunctionValue(value);
+}
+
+function hasCallableType(node: TSNode): boolean {
+  const annotation = node.childForFieldName("type")?.namedChildren[0];
+  return (
+    annotation?.type === "function_type" ||
+    (annotation?.type === "object_type" &&
+      annotation.namedChildren.some((child) => child.type === "call_signature"))
+  );
 }
 
 function containsFunctionValue(node: TSNode): boolean {
@@ -208,6 +284,9 @@ function collectReturnedObjectFunctions(
         child.type === "method_definition"
       ) {
         entities.push(child);
+        const value = child.childForFieldName("value");
+        if (value)
+          collectReturnedObjectFunctions(value, entities, localBindings);
         continue;
       }
       if (
@@ -215,11 +294,21 @@ function collectReturnedObjectFunctions(
         child.type === "shorthand_property_identifier_pattern"
       ) {
         const binding = localBindings.get(child.text);
-        if (binding) entities.push(binding);
+        if (binding && !entities.includes(binding)) entities.push(binding);
         continue;
       }
       if (child.type === "pair") {
         const value = child.childForFieldName("value");
+        const binding =
+          value?.type === "identifier"
+            ? localBindings.get(value.text)
+            : undefined;
+        if (binding) {
+          if (!entities.includes(binding)) entities.push(binding);
+          RETURNED_FUNCTION_ALIASES.add(child);
+          entities.push(child);
+          continue;
+        }
         if (value)
           collectReturnedObjectFunctions(value, entities, localBindings);
       }
@@ -230,6 +319,20 @@ function collectReturnedObjectFunctions(
   for (const child of node.namedChildren) {
     collectReturnedObjectFunctions(child, entities, localBindings);
   }
+}
+
+function nestedFunctionOwners(node: TSNode): string[] {
+  const pairs: TSNode[] = [];
+  let current = node.parent;
+  while (current && current.type !== "variable_declarator") {
+    if (current.type === "pair") pairs.push(current);
+    current = current.parent;
+  }
+  if (!pairs.some(hasFunctionValue)) return [];
+  return pairs
+    .map(extractJavascriptTypescriptName)
+    .filter((name): name is string => Boolean(name))
+    .reverse();
 }
 
 function collectLocalFunctionBindings(
@@ -328,7 +431,10 @@ function isDirectlyExportedVariable(node: TSNode): boolean {
 }
 
 function collectDefaultExportReferences(node: TSNode, out: Set<string>): void {
-  if (node.type === "shorthand_property_identifier") {
+  if (
+    node.type === "identifier" ||
+    node.type === "shorthand_property_identifier"
+  ) {
     out.add(node.text);
     return;
   }

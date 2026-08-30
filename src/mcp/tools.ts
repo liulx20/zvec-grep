@@ -541,7 +541,7 @@ export function registerZvecGrepTools(
     {
       title: "Explore code-graph context",
       description:
-        "Build a multi-file context pack from the workspace code graph for a symbol or short query: hierarchy + deep neighborhood + ranked file assembly of indexed entity source.",
+        "Primary code-understanding tool for a symbol, flow, or short question. Returns a graph-ranked multi-file context pack with line-numbered current source; treat displayed ranges as already read. Query may contain natural language, exact symbols, or file paths. If a needed step or body is missing, call Explore again with that exact symbol or path before reading or grepping source.",
       inputSchema: zvecGrepExploreInputSchema,
       annotations: {
         readOnlyHint: true,

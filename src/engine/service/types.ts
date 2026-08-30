@@ -211,6 +211,7 @@ export type ZvecGrepExploreFileBundle = {
   symbols: {
     id: string;
     name: string;
+    scope?: string;
     kind?: string;
     range: Range;
     content: string;
@@ -259,6 +260,7 @@ export type ZvecGrepExploreResult = {
         dynamicDispatch?: {
           form: "computed_member" | "getattr" | "reflection";
           key?: string;
+          receiverSources?: string[];
         };
       };
     };
@@ -274,7 +276,12 @@ export type ZvecGrepExploreResult = {
       targetId: string;
       displayName?: string;
       filePath?: string;
-      reason: "hierarchy" | "generic_bound" | "method_set" | "function_pointer";
+      reason:
+        | "hierarchy"
+        | "generic_bound"
+        | "method_set"
+        | "function_pointer"
+        | "namespace_export";
       confidence: number;
     }[];
   }[];

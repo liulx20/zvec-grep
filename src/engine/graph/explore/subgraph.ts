@@ -1,12 +1,13 @@
 import { isLowValuePath, isTestPath } from "../path-policy.js";
 import { isCallableSymbolKind } from "../symbol-kinds.js";
+import type { StoredEntity } from "../../storage/index.js";
 import type {
   DynamicBoundary,
   GraphEdgeKind,
   GraphReader,
   SymRef,
 } from "../types.js";
-import { collectCallPaths, extendCallPaths } from "./paths.js";
+import { collectCallPaths, deriveExecutionPaths } from "./paths.js";
 import { collectComponentImportEvidence } from "./component-imports.js";
 import { ExploreCandidatePool } from "./candidate-pool.js";
 import { assembleExploreFiles } from "./assembly.js";
@@ -22,7 +23,10 @@ import {
 import {
   EXPLORE_POLICY,
   exploreEdgeBudget,
+  hasExplicitQualifiedSymbolReference,
   isTypeishKind,
+  qualifiedReferenceNames,
+  queryEvidenceTerms,
   queryTerms,
   semanticTermsCovered,
   resolveExactExploreSeedGroups,
@@ -30,6 +34,7 @@ import {
 } from "./policy.js";
 import { rankExploreFiles, rankExploreNodes } from "./ranking.js";
 import type {
+  ExploreCallPath,
   ExploreEdge,
   ExploreNode,
   ExploreOptions,
@@ -102,9 +107,14 @@ export function exploreGraph(
     throw new Error("explore requires a query or seedId");
   }
 
-  const exactGroups = options.seedId
+  const seedEntity = options.seedId ? graph.getEntity(options.seedId) : null;
+  const exactGroups = seedEntity
     ? null
-    : resolveExactExploreSeedGroups(graph, query, searchLimit);
+    : resolveExactExploreSeedGroups(
+        graph,
+        options.seedId ?? query,
+        searchLimit,
+      );
   if (exactGroups && exactGroups.length > 1) {
     return {
       ...emptyResult(query, "no_context"),
@@ -121,9 +131,15 @@ export function exploreGraph(
       emptyReason: undefined,
     };
   }
+  const contextualSeedIds =
+    seedEntity && hasExplicitQualifiedSymbolReference(query)
+      ? resolveExploreSeeds(graph, query, undefined, searchLimit)
+      : [];
   const rootIds =
     exactGroups?.[0]?.ids ??
-    resolveExploreSeeds(graph, query, options.seedId, searchLimit);
+    (seedEntity
+      ? [...new Set([seedEntity.entity.id, ...contextualSeedIds])]
+      : resolveExploreSeeds(graph, query, undefined, searchLimit));
   if (rootIds.length === 0) {
     return emptyResult(query, "no_seeds");
   }
@@ -132,12 +148,14 @@ export function exploreGraph(
     hasExactSymbolGroup: Boolean(exactGroups?.[0]),
   });
 
-  // A single exact root in a high-degree graph should not automatically
-  // consume the same 200-node budget as a multi-concept query. Conversely,
-  // several independently relevant roots need enough room to connect. Keep
-  // explicit caller budgets unchanged and adapt only the default.
+  // Exact lookups can stay compact because the root is already known. Concept
+  // exploration needs the full candidate budget; maxFiles/maxChars selection
+  // is responsible for precision and final output size.
   const maxNodes = clampInt(
-    requestedMaxNodes ?? adaptiveNodeBudget(rootIds.length),
+    requestedMaxNodes ??
+      (intent === "concept" || contextualSeedIds.length > 0
+        ? DEFAULT_MAX_NODES
+        : adaptiveNodeBudget(rootIds.length)),
     16,
     2_000,
   );
@@ -150,11 +168,13 @@ export function exploreGraph(
     maxNodes,
     includeCallPaths: true,
   });
-  const { callPaths } = subgraph;
+  let { callPaths } = subgraph;
   const nodeScores = new Map(subgraph.nodeScores);
   const candidates = new ExploreCandidatePool(subgraph.nodes, nodeScores);
   for (const fileId of subgraph.impactExpansionFileIds)
     candidates.addFileEvidence(fileId, "impact_summary");
+  for (const fileId of subgraph.directImpactFileIds)
+    candidates.addFileEvidence(fileId, "direct_call");
   collectDirectCallCollaborators(
     candidates,
     subgraph.nodes,
@@ -191,17 +211,35 @@ export function exploreGraph(
     DYNAMIC_BOUNDARY_BUDGET.fetchMaximum,
     dynamicBoundaryLimit * DYNAMIC_BOUNDARY_BUDGET.fetchRatio,
   );
-  const dynamicBoundaryRows =
-    graph.dynamicBoundaries?.(
-      nodes.map((node) => node.id),
-      dynamicBoundaryFetchLimit + 1,
-    ) ?? [];
+  const executionSourceIds = new Set([
+    ...rootIds,
+    ...callPaths.flatMap((path) => path.nodes),
+  ]);
+  const dynamicBoundaryRows = [
+    ...new Map(
+      [
+        ...(graph.dynamicBoundaries?.(
+          [...executionSourceIds],
+          dynamicBoundaryFetchLimit + 1,
+        ) ?? []),
+        ...(graph.dynamicBoundaries?.(
+          nodes.map((node) => node.id),
+          dynamicBoundaryFetchLimit + 1,
+        ) ?? []),
+      ].map((boundary) => [
+        `${boundary.sourceId}\0${boundary.line ?? 0}\0${boundary.target.raw}\0${boundary.reason}`,
+        boundary,
+      ]),
+    ).values(),
+  ];
   const dynamicBoundaries = selectDynamicBoundaries(
     dynamicBoundaryRows,
     dynamicBoundaryLimit,
     nodes,
     nodeScores,
-    query,
+    executionSourceIds,
+    qualifiedReferenceNames(query),
+    queryEvidenceTerms(query),
   );
   const dynamicBoundariesTruncated =
     dynamicBoundaryRows.length > dynamicBoundaries.length;
@@ -217,9 +255,20 @@ export function exploreGraph(
     nodeScores,
     rootIds,
     32,
-    intent === "exact_symbol"
-      ? callPaths.flatMap((path) => path.nodes)
-      : undefined,
+  );
+  const dynamicProjectionEdges = addDynamicBoundaryEvidence(
+    impactCandidates,
+    graph,
+    dynamicBoundaries,
+    nodes,
+    nodeScores,
+    [
+      ...new Set([
+        ...queryEvidenceTerms(query),
+        ...qualifiedReferenceNames(query),
+      ]),
+    ],
+    traversalDepth,
   );
   const contextNodes = impactCandidates.nodes;
   if (contextNodes.length !== nodes.length) {
@@ -229,27 +278,54 @@ export function exploreGraph(
       exploreEdgeBudget(contextNodes.length),
     );
     edges = impactEdges.edges.map(toExploreEdge);
-    const impactNodeIds = new Set(contextNodes.map((node) => node.id));
-    const incidentRootEdges = graph
-      .incomingEdges(
-        rootIds,
-        ["CALLS", "REFS", "INHERITS", "INSTANTIATES"],
-        Math.min(1_024, Math.max(64, rootIds.length * 32)),
-      )
-      .filter((edge) => impactNodeIds.has(edge.src))
-      .map(toExploreEdge);
-    const edgeKeys = new Set(
-      edges.map(
-        (edge) => `${edge.src}\0${edge.dst}\0${edge.kind}\0${edge.rel}`,
-      ),
-    );
-    for (const edge of incidentRootEdges) {
-      const key = `${edge.src}\0${edge.dst}\0${edge.kind}\0${edge.rel}`;
-      if (edgeKeys.has(key)) continue;
-      edgeKeys.add(key);
-      edges.push(edge);
-    }
     edgesTruncated = impactEdges.truncated;
+  }
+  for (const edge of dynamicProjectionEdges) {
+    if (
+      !edges.some(
+        (existing) =>
+          existing.src === edge.src &&
+          existing.dst === edge.dst &&
+          existing.kind === edge.kind,
+      )
+    )
+      edges.push(edge);
+  }
+  if (dynamicProjectionEdges.length > 0) {
+    const continuationIds = new Set([
+      ...rootIds,
+      ...dynamicProjectionEdges.flatMap((edge) => [edge.src, edge.dst]),
+    ]);
+    callPaths = deriveExecutionPaths(
+      callPaths.filter((path) =>
+        path.nodes.some((id) => continuationIds.has(id)),
+      ),
+      edges,
+      rootIds,
+      new Map(),
+      nodeScores,
+      Math.max(4, traversalDepth * 2),
+      DEFAULT_PATH_LIMIT,
+      new Set(rootIds),
+    );
+  }
+  const contextNodeIds = new Set(contextNodes.map((node) => node.id));
+  const incidentRootEdges = graph
+    .incomingEdges(
+      rootIds,
+      ["CALLS", "REFS", "INHERITS", "INSTANTIATES"],
+      Math.min(1_024, Math.max(64, rootIds.length * 32)),
+    )
+    .filter((edge) => contextNodeIds.has(edge.src))
+    .map(toExploreEdge);
+  const edgeKeys = new Set(
+    edges.map((edge) => `${edge.src}\0${edge.dst}\0${edge.kind}\0${edge.rel}`),
+  );
+  for (const edge of incidentRootEdges) {
+    const key = `${edge.src}\0${edge.dst}\0${edge.kind}\0${edge.rel}`;
+    if (edgeKeys.has(key)) continue;
+    edgeKeys.add(key);
+    edges.push(edge);
   }
   const fileScores = rankExploreFiles(contextNodes, rootIds, query, nodeScores);
   for (const fileId of candidates.fileIds("collaborator")) {
@@ -262,12 +338,6 @@ export function exploreGraph(
       );
     fileScores.set(fileId, Math.max(0.02, score));
   }
-  addDynamicBoundaryEvidence(
-    impactCandidates,
-    dynamicBoundaries,
-    nodes,
-    nodeScores,
-  );
   const changeSurface = collectChangeSurface({
     graph,
     rootIds,
@@ -297,7 +367,12 @@ export function exploreGraph(
         "structural_change_surface",
       );
   }
+  for (const id of subgraph.structuralBridgeIds) {
+    const fileId = graph.getEntity(id)?.file.id;
+    if (fileId) impactCandidates.addFileEvidence(fileId, "call_path");
+  }
   collectExploreFileEvidence({
+    graph,
     pool: impactCandidates,
     edges,
     callPaths,
@@ -306,16 +381,21 @@ export function exploreGraph(
   });
   const files = assembleExploreFiles({
     intent,
+    query,
     storage: graph,
     pool: impactCandidates,
     edges,
     callPaths,
-    dynamicBoundaries,
+    dynamicBoundaries: dynamicBoundaryRows,
     fileScores,
     nodeScores,
     maxFiles,
     maxChars,
     rootFileIds: assemblyRootFileIds,
+    structuralBridgeIds: [
+      ...subgraph.structuralBridgeIds,
+      ...dynamicProjectionEdges.map((edge) => edge.dst),
+    ],
   });
   const visibleFileIds = new Set(files.map((file) => file.file.id));
   const visibleDynamicBoundaries = dynamicBoundaries.filter((boundary) => {
@@ -407,7 +487,7 @@ function collectDirectCallCollaborators(
         semanticTermsCovered(
           `${metadata.symbolName ?? ""} ${metadata.scope ?? ""} ${entity.file.relativePath}`,
           terms,
-        ).size > 0
+        ).size > 1
       );
     })
     .sort(
@@ -441,7 +521,7 @@ function collectDirectCallCollaborators(
         semanticTermsCovered(
           `${metadata.symbolName ?? ""} ${metadata.scope ?? ""} ${entity.file.relativePath}`,
           terms,
-        ).size > 0
+        ).size > 1
       );
     })
     .sort(
@@ -470,7 +550,6 @@ function includePersistedCounterparts(
   nodeScores: ReadonlyMap<string, number>,
   rootIds: readonly string[],
   limit: number,
-  peripheralIds = pool.nodes.map((node) => node.id),
 ): void {
   if (limit <= 0) return;
   // Resolve the declaration/implementation unit for the requested root before
@@ -485,6 +564,7 @@ function includePersistedCounterparts(
   )) {
     rootScopeIds.add(edge.dst);
   }
+  const poolIds = pool.nodes.map((node) => node.id);
   const queryCounterparts = (ids: readonly string[]) => [
     ...graph.outgoingEdges(ids, ["COUNTERPART"], limit * 4),
     ...graph.incomingEdges(ids, ["COUNTERPART"], limit * 4),
@@ -493,7 +573,7 @@ function includePersistedCounterparts(
   const seen = new Set(rootEdges.map((edge) => `${edge.src}\0${edge.dst}`));
   const edges = [
     ...rootEdges,
-    ...queryCounterparts(peripheralIds).filter(
+    ...queryCounterparts(poolIds).filter(
       (edge) => !seen.has(`${edge.src}\0${edge.dst}`),
     ),
   ]
@@ -563,9 +643,39 @@ function selectDynamicBoundaries(
   limit: number,
   nodes: readonly ExploreNode[],
   nodeScores: ReadonlyMap<string, number>,
-  query: string,
+  executionSourceIds: ReadonlySet<string>,
+  focusNames: readonly string[],
+  queryTerms: readonly string[],
 ): DynamicBoundary[] {
-  const terms = queryTerms(query);
+  const focused = new Set(focusNames.map((name) => name.toLowerCase()));
+  const nodeIdentity = new Map(
+    nodes.map((node) => {
+      const metadata = node.entity?.entity.metadata;
+      return [
+        node.id,
+        metadata?.kind === "code"
+          ? `${metadata.symbolName ?? ""} ${metadata.scope ?? ""} ${node.entity?.file.relativePath ?? ""}`
+          : "",
+      ] as const;
+    }),
+  );
+  const queryCoverage = (boundary: DynamicBoundary) =>
+    semanticTermsCovered(
+      `${nodeIdentity.get(boundary.sourceId) ?? ""} ${boundary.target.raw} ${boundary.candidateDetails
+        .map(
+          (candidate) =>
+            `${candidate.displayName ?? ""} ${candidate.filePath ?? ""}`,
+        )
+        .join(" ")}`,
+      queryTerms,
+    ).size;
+  const focusCoverage = (boundary: DynamicBoundary) =>
+    semanticTermsCovered(
+      boundary.candidateDetails
+        .map((candidate) => candidate.displayName ?? "")
+        .join(" "),
+      focusNames,
+    ).size;
   const testNodeIds = new Set(
     nodes
       .filter(
@@ -575,6 +685,14 @@ function selectDynamicBoundaries(
   );
   const ordered = [...boundaries].sort(
     (a, b) =>
+      Number(focused.has(b.target.member.toLowerCase())) -
+        Number(focused.has(a.target.member.toLowerCase())) ||
+      focusCoverage(b) - focusCoverage(a) ||
+      Number(executionSourceIds.has(b.sourceId)) -
+        Number(executionSourceIds.has(a.sourceId)) ||
+      Number(b.candidateDetails.length > 0) -
+        Number(a.candidateDetails.length > 0) ||
+      queryCoverage(b) - queryCoverage(a) ||
       Number(testNodeIds.has(a.sourceId)) -
         Number(testNodeIds.has(b.sourceId)) ||
       (nodeScores.get(b.sourceId) ?? 0) - (nodeScores.get(a.sourceId) ?? 0) ||
@@ -592,7 +710,7 @@ function selectDynamicBoundaries(
   for (const boundary of ordered) {
     if (
       boundary.candidateDetails.length === 0 &&
-      semanticTermsCovered(boundary.target.raw, terms).size === 0
+      !executionSourceIds.has(boundary.sourceId)
     )
       continue;
     const candidateKey = boundary.candidateDetails
@@ -620,11 +738,15 @@ function selectDynamicBoundaries(
 
 function addDynamicBoundaryEvidence(
   pool: ExploreCandidatePool,
+  graph: GraphReader,
   boundaries: readonly DynamicBoundary[],
   nodes: readonly ExploreNode[],
   nodeScores: ReadonlyMap<string, number>,
-): void {
-  if (boundaries.length === 0) return;
+  queryTerms: readonly string[],
+  continuationDepth: number,
+): ExploreEdge[] {
+  if (boundaries.length === 0) return [];
+  const projections: ExploreEdge[] = [];
   const nodeFiles = new Map(
     nodes.map((node) => [node.id, node.entity?.file.id] as const),
   );
@@ -652,6 +774,191 @@ function addDynamicBoundaryEvidence(
     );
   for (const item of ranked)
     pool.addFileEvidence(item.fileId, "dynamic_boundary", item.score || 1);
+  for (const boundary of boundaries) {
+    const resolved = boundary.candidateDetails.length === 1;
+    const contextualTarget = resolved
+      ? null
+      : contextualGenericTarget(graph, boundary);
+    const target = resolved
+      ? graph.getEntity(boundary.candidateDetails[0]!.targetId)
+      : (contextualTarget ??
+        dynamicImplementationTarget(graph, boundary, queryTerms));
+    if (!target) continue;
+    pool.add(target, (nodeScores.get(boundary.sourceId) ?? 0.02) * 0.8);
+    pool.addFileEvidence(target.file.id, "dynamic_boundary");
+    const source = nodes.find((node) => node.id === boundary.sourceId)?.entity;
+    const metadata = source?.entity.metadata;
+    const targetMetadata = target.entity.metadata;
+    const identity =
+      metadata?.kind === "code"
+        ? `${metadata.symbolName ?? ""} ${metadata.scope ?? ""} ${source?.file.relativePath ?? ""}`
+        : "";
+    const targetIdentity =
+      targetMetadata?.kind === "code"
+        ? `${targetMetadata.symbolName ?? ""} ${targetMetadata.scope ?? ""} ${target.file.relativePath}`
+        : target.file.relativePath;
+    const concepts = semanticTermsCovered(identity, queryTerms);
+    for (const term of semanticTermsCovered(
+      `${boundary.target.raw} ${targetIdentity}`,
+      queryTerms,
+    ))
+      concepts.add(term);
+    for (const term of concepts)
+      pool.addFileEvidence(target.file.id, `concept:${term}`);
+    if (concepts.size > 0)
+      pool.addFileEvidence(
+        target.file.id,
+        "query_alignment",
+        concepts.size / queryTerms.length,
+      );
+    if (concepts.size >= 2 || contextualTarget) {
+      pool.addFileEvidence(target.file.id, "call_path");
+      const related = resolved
+        ? graph.traverse(target.entity.id, {
+            edgeKinds: ["CALLS"],
+            direction: "outgoing",
+            maxDepth: continuationDepth,
+            limit: Math.max(8, continuationDepth * 4),
+            includeStart: false,
+          })
+        : graph
+            .outgoingEdges([target.entity.id], ["CONTAINS"], 8)
+            .map((edge) => ({ id: edge.dst }));
+      for (const ref of related) {
+        const entity = graph.getEntity(ref.id);
+        if (entity)
+          pool.add(entity, (nodeScores.get(boundary.sourceId) ?? 0.02) * 0.6);
+      }
+    }
+    const candidate = boundary.candidateDetails.find(
+      (detail) => detail.targetId === target.entity.id,
+    );
+    if (candidate)
+      projections.push({
+        src: boundary.sourceId,
+        dst: target.entity.id,
+        kind: "CALLS",
+        rel: "dynamic",
+        count: boundary.occurrenceCount ?? 1,
+        firstLine: boundary.line ?? 0,
+        refName: boundary.target.raw,
+        provenance: "heuristic",
+        confidence: candidate.confidence,
+        evidence: candidate.reason,
+      });
+  }
+  return projections;
+}
+
+/**
+ * Bind an ambiguous generic receiver to the implementation family instantiated
+ * by callers of that generic function. This is invocation evidence, not a
+ * naming fallback: without one unambiguous hierarchy match the boundary stays
+ * dynamic.
+ */
+function contextualGenericTarget(
+  graph: GraphReader,
+  boundary: DynamicBoundary,
+): StoredEntity | null {
+  const candidates = boundary.candidateDetails;
+  if (
+    candidates.length < 2 ||
+    candidates.some((candidate) => candidate.reason !== "generic_bound")
+  )
+    return null;
+
+  const callers = graph.incomingEdges(
+    [boundary.sourceId],
+    ["CALLS"],
+    Math.max(16, candidates.length * 8),
+  );
+  const instantiated = graph.outgoingEdges(
+    [...new Set(callers.map((edge) => edge.src))],
+    ["INSTANTIATES"],
+    Math.max(16, callers.length * 4),
+  );
+  if (instantiated.length === 0) return null;
+
+  const activeContainers = new Set(instantiated.map((edge) => edge.dst));
+  for (const typeId of [...activeContainers])
+    for (const base of graph.hierarchy(typeId, "bases", 16))
+      activeContainers.add(base.id);
+
+  const parentByCandidate = new Map(
+    graph
+      .expandContainers(
+        candidates.map((candidate) => candidate.targetId),
+        1,
+      )
+      .map((neighbor) => [neighbor.sid, neighbor.parent_id] as const),
+  );
+  const matches = candidates.filter(
+    (candidate) =>
+      activeContainers.has(candidate.targetId) ||
+      activeContainers.has(parentByCandidate.get(candidate.targetId) ?? ""),
+  );
+  return matches.length === 1 ? graph.getEntity(matches[0]!.targetId) : null;
+}
+
+function dynamicImplementationTarget(
+  graph: GraphReader,
+  boundary: DynamicBoundary,
+  terms: readonly string[],
+): StoredEntity | null {
+  const rankedBoundaryCandidates = boundary.candidateDetails
+    .map((candidate) => graph.getEntity(candidate.targetId))
+    .filter((entity): entity is StoredEntity => Boolean(entity))
+    .filter((entity) => !isLowValuePath(entity.file.relativePath))
+    .map((entity) => ({
+      entity,
+      coverage: dynamicImplementationCoverage(entity, terms),
+    }))
+    .sort(
+      (left, right) =>
+        right.coverage - left.coverage ||
+        left.entity.entity.id.localeCompare(right.entity.entity.id),
+    );
+  if (rankedBoundaryCandidates.length > 0) {
+    const [best, second] = rankedBoundaryCandidates;
+    return best!.coverage > 0 && best!.coverage > (second?.coverage ?? -1)
+      ? best!.entity
+      : null;
+  }
+  if (semanticTermsCovered(boundary.target.member, terms).size === 0)
+    return null;
+  const candidates = graph
+    .findSymbolsByName(boundary.target.member, 32)
+    .filter((entity) => {
+      const metadata = entity.entity.metadata;
+      return (
+        metadata?.kind === "code" &&
+        ["class", "component", "struct"].includes(metadata.symbolType) &&
+        !isLowValuePath(entity.file.relativePath)
+      );
+    });
+  return (
+    candidates.sort(
+      (left, right) =>
+        dynamicImplementationCoverage(right, terms) -
+          dynamicImplementationCoverage(left, terms) ||
+        left.entity.id.localeCompare(right.entity.id),
+    )[0] ?? null
+  );
+}
+
+function dynamicImplementationCoverage(
+  entity: StoredEntity,
+  terms: readonly string[],
+): number {
+  const metadata = entity.entity.metadata;
+  return semanticTermsCovered(
+    `${
+      metadata?.kind === "code"
+        ? `${metadata.symbolName ?? ""} ${metadata.scope ?? ""}`
+        : ""
+    } ${entity.file.relativePath}`,
+    terms,
+  ).size;
 }
 
 /**
@@ -688,7 +995,6 @@ export function exploreSubgraph(
       depth: 0,
     });
   }
-
   const hierarchyBudget = Math.max(
     8,
     Math.floor(maxNodes * HIERARCHY_BUDGET_RATIO),
@@ -717,16 +1023,17 @@ export function exploreSubgraph(
   // depend on persistence order (and can hide a type's execution entrypoints).
   // Select a bounded, structurally representative member set first, then let
   // the ordinary traversal expand from the type without CONTAINS edges.
-  const representativeSelectionEnabled = shouldSelectRepresentativeMembers(
-    graph,
-    rootIds,
-  );
+  const memberQueryTerms = options.query ? queryTerms(options.query) : [];
+  const representativeSelectionEnabled =
+    memberQueryTerms.length > 0 ||
+    shouldSelectRepresentativeMembers(graph, rootIds);
   const representativeMemberIds = representativeSelectionEnabled
     ? glueRepresentativeMembers(
         graph,
         selected,
-        rootIds,
+        [...new Set([...rootIds, ...hierarchyGlueIds])],
         Math.max(8, Math.min(32, Math.floor(maxNodes * 0.3))),
+        memberQueryTerms,
       )
     : [];
   const representativeDependencies = glueRepresentativeMemberDependencies(
@@ -734,7 +1041,15 @@ export function exploreSubgraph(
     selected,
     representativeMemberIds,
     Math.max(8, Math.min(24, Math.floor(maxNodes * 0.12))),
+    memberQueryTerms,
   );
+  const inheritedContractIds = glueInheritedContracts(
+    graph,
+    selected,
+    rootIds,
+    Math.min(16, Math.max(4, rootIds.length * 2)),
+  );
+  representativeMemberIds.push(...inheritedContractIds);
   const componentImports = collectComponentImportEvidence(
     graph,
     rootIds,
@@ -742,6 +1057,13 @@ export function exploreSubgraph(
     COMPONENT_IMPORT_POLICY.rankingWeight,
   );
   for (const id of componentImports.nodeIds) absorb(selected, { id }, false, 1);
+  const rootValueDependencies = glueRootValueDependencies(
+    graph,
+    selected,
+    rootIds,
+    memberQueryTerms,
+    COMPONENT_IMPORT_POLICY.protectedNodes,
+  );
 
   const perRootBudget = Math.max(
     8,
@@ -789,40 +1111,135 @@ export function exploreSubgraph(
     }
   }
 
+  const instantiationEdges = graph.outgoingEdges(
+    [...selected.keys()],
+    ["INSTANTIATES"],
+    Math.min(256, Math.max(32, selected.size * 2)),
+  );
+  const rootInstantiatedTypes = new Set(
+    instantiationEdges
+      .filter((edge) => rootIds.includes(edge.src))
+      .map((edge) => edge.dst),
+  );
+  const instantiatedTypes = [
+    ...new Set(instantiationEdges.map((edge) => edge.dst)),
+  ].filter((id) => {
+    const metadata = graph.getEntity(id)?.entity.metadata;
+    if (metadata?.kind !== "code" || !isTypeishKind(metadata.symbolType ?? ""))
+      return false;
+    absorb(selected, { id }, false, 1);
+    return true;
+  });
+  const instantiatedProviders = new Set<string>();
+  const rootInstantiatedProviders = new Set<string>();
+  for (const typeId of instantiatedTypes)
+    for (const edge of graph.outgoingEdges([typeId], ["INHERITS"], 4)) {
+      instantiatedProviders.add(edge.dst);
+      if (rootInstantiatedTypes.has(typeId))
+        rootInstantiatedProviders.add(edge.dst);
+      absorb(selected, { id: edge.dst }, false, 1);
+    }
+  representativeMemberIds.push(
+    ...glueRepresentativeMembers(
+      graph,
+      selected,
+      [...instantiatedTypes, ...instantiatedProviders],
+      Math.min(
+        DEFAULT_CONTAINER_GLUE_LIMIT,
+        instantiatedTypes.length + instantiatedProviders.size,
+      ),
+      memberQueryTerms,
+      true,
+    ),
+  );
+
   glueCallNeighbors(graph, selected, rootIds, DEFAULT_GLUE_LIMIT);
+  const structuralBridgeIds = new Set(inheritedContractIds);
+  const directImpactIds = new Set<string>();
   const impactGlueIds = glueImpactNeighbors(
     graph,
     selected,
     rootIds,
     DEFAULT_GLUE_LIMIT,
+    structuralBridgeIds,
+    queryEvidenceTerms(options.query ?? ""),
+    directImpactIds,
   );
+  impactGlueIds.push(
+    ...glueImpactNeighbors(
+      graph,
+      selected,
+      hierarchyGlueIds,
+      DEFAULT_GLUE_LIMIT - impactGlueIds.length,
+      structuralBridgeIds,
+      queryEvidenceTerms(options.query ?? ""),
+      directImpactIds,
+      true,
+    ),
+  );
+  extendStructuralBridges(
+    graph,
+    selected,
+    structuralBridgeIds,
+    memberQueryTerms,
+    Math.max(4, traversalDepth * 2),
+    Math.max(4, Math.min(12, Math.floor(maxNodes * 0.15))),
+  );
+  for (const id of rootInstantiatedProviders) structuralBridgeIds.add(id);
 
+  const focusNames = qualifiedReferenceNames(options.query ?? "");
+  const focusedBoundaryPaths = focusedDynamicBoundaryPaths(
+    graph,
+    rootIds,
+    focusNames,
+    Math.max(4, traversalDepth * 2),
+    perRootBudget,
+  );
+  const focusedBoundaryIds = new Set(
+    focusedBoundaryPaths.map((path) => path.to),
+  );
+  for (const path of focusedBoundaryPaths)
+    for (const [depth, id] of path.nodes.entries())
+      absorb(selected, { id }, false, depth);
   const pathResult =
     options.includeCallPaths === false
       ? { paths: [], refs: [] }
       : collectCallPaths(
           graph,
-          rootIds,
+          [...rootIds, ...focusedBoundaryIds],
           Math.max(4, traversalDepth * 2),
           DEFAULT_PATH_LIMIT,
+          memberQueryTerms,
+          focusNames,
         );
   for (const ref of pathResult.refs) absorb(selected, ref, false, 1);
-  const pairCallPaths = pathResult.paths;
-
+  const pairCallPaths = [
+    ...new Map(
+      [...focusedBoundaryPaths, ...pathResult.paths].map((path) => [
+        path.nodes.join("\0"),
+        path,
+      ]),
+    ).values(),
+  ];
   const protectedIds = new Set([
     ...rootIds,
     ...representativeMemberIds,
-    ...representativeDependencies.slice(0, 12),
+    ...representativeDependencies,
     ...pairCallPaths.flatMap((path) => path.nodes),
     ...hierarchyGlueIds,
-    ...componentImports.rankingLinks
-      .slice(0, COMPONENT_IMPORT_POLICY.protectedNodes)
-      .map((dependency) => dependency.dst),
-    // Preserve only a small integration spine. The rest remains subject to
-    // the ordinary node budget so high fan-in roots cannot flood Explore.
-    ...impactGlueIds.slice(0, Math.min(8, maxNodes - rootIds.length)),
+    ...rootValueDependencies,
+    ...structuralBridgeIds,
+    ...componentImports.rankingLinks.map((dependency) => dependency.dst),
+    ...impactGlueIds,
+    ...focusedBoundaryIds,
   ]);
-  trimToMaxNodes(selected, protectedIds, maxNodes);
+  trimToMaxNodes(
+    selected,
+    protectedIds,
+    maxNodes,
+    graph,
+    queryEvidenceTerms(options.query ?? ""),
+  );
   const retainedPairCallPaths = pairCallPaths.filter((path) =>
     path.nodes.every((id) => selected.has(id)),
   );
@@ -857,38 +1274,157 @@ export function exploreSubgraph(
     rankingLinks,
   );
   const terms = queryTerms(options.query ?? "");
-  const queryAffinity = new Map(
+  const nodeTerms = new Map(
     nodes.map((node) => {
       const metadata = node.entity?.entity.metadata;
       const identity =
         metadata?.kind === "code"
-          ? `${metadata.symbolName ?? ""} ${node.entity?.file.relativePath ?? ""}`
+          ? `${metadata.symbolName ?? ""} ${metadata.scope ?? ""} ${node.entity?.file.relativePath ?? ""}`
           : "";
-      return [node.id, semanticTermsCovered(identity, terms).size] as const;
+      return [node.id, semanticTermsCovered(identity, terms)] as const;
     }),
   );
+  const executionStartIds = [...rootIds, ...representativeMemberIds];
   const callPaths =
     options.includeCallPaths === false
       ? []
-      : extendCallPaths(
+      : deriveExecutionPaths(
           retainedPairCallPaths,
           edges,
-          [...rootIds, ...representativeMemberIds],
+          executionStartIds,
+          nodeTerms,
           nodeScores,
-          queryAffinity,
           Math.max(2, traversalDepth + 1),
           DEFAULT_PATH_LIMIT,
+          new Set(rootIds),
         );
   return {
     available: true,
     rootIds,
     nodes,
+    structuralBridgeIds: [...structuralBridgeIds].filter((id) =>
+      selected.has(id),
+    ),
     impactExpansionFileIds: exclusiveFileIds(nodes, impactGlueIds),
+    directImpactFileIds: [...fileIdsForRoots(nodes, [...directImpactIds])],
     edges,
     edgesTruncated: induced.truncated,
     callPaths,
     nodeScores,
   };
+}
+
+function focusedDynamicBoundaryPaths(
+  graph: GraphReader,
+  rootIds: readonly string[],
+  memberNames: readonly string[],
+  maxDepth: number,
+  perRootLimit: number,
+): ExploreCallPath[] {
+  if (memberNames.length === 0) return [];
+  const names = new Set(memberNames.map((name) => name.toLowerCase()));
+  const found = new Map<string, ExploreCallPath>();
+  const seen = new Set(rootIds);
+  const paths = new Map<string, string[]>(rootIds.map((id) => [id, [id]]));
+  let frontier = [...rootIds];
+  const nodeBudget = Math.min(512, Math.max(64, perRootLimit * 4));
+  for (let depth = 0; depth < maxDepth && frontier.length > 0; depth++) {
+    const next: string[] = [];
+    const enqueue = (sourceId: string, targetId: string) => {
+      if (seen.has(targetId) || seen.size >= nodeBudget) return;
+      const sourcePath = paths.get(sourceId);
+      if (!sourcePath) return;
+      seen.add(targetId);
+      paths.set(targetId, [...sourcePath, targetId]);
+      next.push(targetId);
+    };
+    const boundaries = graph.dynamicBoundaries(
+      frontier,
+      Math.min(512, Math.max(32, frontier.length * 8)),
+    );
+    for (const boundary of boundaries) {
+      const candidates = boundary.candidateDetails
+        .map((candidate) => graph.getEntity(candidate.targetId))
+        .filter((entity): entity is StoredEntity => Boolean(entity))
+        .sort(
+          (left, right) =>
+            dynamicImplementationCoverage(right, memberNames) -
+              dynamicImplementationCoverage(left, memberNames) ||
+            Number(isLowValuePath(left.file.relativePath)) -
+              Number(isLowValuePath(right.file.relativePath)) ||
+            left.entity.id.localeCompare(right.entity.id),
+        );
+      if (
+        names.has(boundary.target.member.toLowerCase()) ||
+        candidates.some(
+          (entity) => dynamicImplementationCoverage(entity, memberNames) > 0,
+        )
+      ) {
+        const nodes = paths.get(boundary.sourceId);
+        if (nodes)
+          found.set(boundary.sourceId, {
+            from: nodes[0]!,
+            to: boundary.sourceId,
+            nodes,
+          });
+      }
+      for (const entity of candidates.slice(0, 8))
+        enqueue(boundary.sourceId, entity.entity.id);
+    }
+    for (const edge of graph.outgoingEdges(
+      frontier,
+      ["CALLS", "REFS"],
+      Math.min(1_024, Math.max(64, frontier.length * 16)),
+    ))
+      if (edge.kind === "CALLS" || edge.rel === "function")
+        enqueue(edge.src, edge.dst);
+    frontier = next;
+  }
+  return [...found.values()];
+}
+
+function glueRootValueDependencies(
+  graph: GraphReader,
+  selected: Map<string, ScoredNode>,
+  rootIds: readonly string[],
+  terms: readonly string[],
+  limit: number,
+): string[] {
+  return graph
+    .outgoingEdges(
+      rootIds,
+      ["REFS"],
+      Math.min(256, Math.max(32, rootIds.length * 16)),
+    )
+    .map((edge) => ({ edge, entity: graph.getEntity(edge.dst) }))
+    .filter(({ entity }) => {
+      const metadata = entity?.entity.metadata;
+      return metadata?.kind === "code" && metadata.symbolType === "value";
+    })
+    .map(({ edge, entity }) => {
+      const metadata = entity!.entity.metadata;
+      return {
+        id: edge.dst,
+        confidence: edge.confidence,
+        coverage: semanticTermsCovered(
+          `${metadata?.kind === "code" ? metadata.symbolName : ""} ${
+            metadata?.kind === "code" ? metadata.scope : ""
+          } ${entity!.file.relativePath}`,
+          terms,
+        ).size,
+      };
+    })
+    .sort(
+      (left, right) =>
+        right.coverage - left.coverage ||
+        right.confidence - left.confidence ||
+        left.id.localeCompare(right.id),
+    )
+    .slice(0, limit)
+    .map(({ id }) => {
+      absorb(selected, { id }, false, 1);
+      return id;
+    });
 }
 
 function shouldSelectRepresentativeMembers(
@@ -919,6 +1455,8 @@ function glueRepresentativeMembers(
   selected: Map<string, ScoredNode>,
   rootIds: readonly string[],
   limit: number,
+  terms: readonly string[],
+  requireQueryMatch = false,
 ): string[] {
   const addedIds: string[] = [];
   const typeRoots = rootIds.filter((id) => {
@@ -928,20 +1466,35 @@ function glueRepresentativeMembers(
     );
   });
   if (typeRoots.length === 0 || limit <= 0) return addedIds;
-
-  const perRootLimit = Math.max(4, Math.ceil(limit / typeRoots.length));
+  const perRootLimit = Math.max(1, Math.ceil(limit / typeRoots.length));
   for (const rootId of typeRoots) {
+    if (addedIds.length >= limit) break;
     const members = graph.members(rootId);
     if (members.length === 0) continue;
     const memberIds = new Set(members.map((member) => member.id));
     const edgeLimit = Math.min(4_096, Math.max(128, members.length * 8));
+    const queryCoverage = new Map<string, number>();
     const scores = new Map(
       members.map((member) => {
-        const range = graph.getEntity(member.id)?.entity.range;
+        const stored = graph.getEntity(member.id);
+        const range = stored?.entity.range;
         const lines =
           range?.kind === "text"
             ? Math.max(1, range.endLine - range.startLine + 1)
             : 1;
+        const metadata = stored?.entity.metadata;
+        const content =
+          stored?.entity.content.kind === "text"
+            ? stored.entity.content.text.slice(0, 4_000)
+            : "";
+        const queryHits =
+          metadata?.kind === "code"
+            ? semanticTermsCovered(
+                `${metadata.symbolName ?? ""} ${metadata.scope ?? ""} ${metadata.signature ?? ""} ${content}`,
+                terms,
+              ).size
+            : 0;
+        queryCoverage.set(member.id, queryHits);
         // A small complexity prior keeps orchestration methods competitive
         // with tiny accessors that happen to have hundreds of callers.
         return [member.id, Math.min(24, Math.log2(lines + 1) * 5)];
@@ -974,11 +1527,18 @@ function glueRepresentativeMembers(
           Math.log2(Math.max(1, edge.count) + 1) * directionWeight * kindWeight,
       );
     }
-    const ranked = [...members].sort(
-      (left, right) =>
-        (scores.get(right.id) ?? 0) - (scores.get(left.id) ?? 0) ||
-        left.id.localeCompare(right.id),
-    );
+    const ranked = [...members]
+      .filter(
+        (member) =>
+          !requireQueryMatch || (queryCoverage.get(member.id) ?? 0) > 0,
+      )
+      .sort(
+        (left, right) =>
+          (queryCoverage.get(right.id) ?? 0) -
+            (queryCoverage.get(left.id) ?? 0) ||
+          (scores.get(right.id) ?? 0) - (scores.get(left.id) ?? 0) ||
+          left.id.localeCompare(right.id),
+      );
     // First represent distinct API operations. Dense types often expose many
     // overloads of `toJson`/`fromJson`; allowing those to consume every member
     // slot hides other important entrypoints such as factories and adapters.
@@ -1004,6 +1564,7 @@ function glueRepresentativeMembers(
     for (const member of representative) {
       absorb(selected, member, false, 1);
       addedIds.push(member.id);
+      if (addedIds.length >= limit) break;
     }
   }
   return addedIds;
@@ -1014,6 +1575,7 @@ function glueRepresentativeMemberDependencies(
   selected: Map<string, ScoredNode>,
   memberIds: readonly string[],
   limit: number,
+  terms: readonly string[],
 ): string[] {
   if (memberIds.length === 0 || limit <= 0) return [];
   const memberSet = new Set(memberIds);
@@ -1027,21 +1589,35 @@ function glueRepresentativeMemberDependencies(
       Math.min(2_048, Math.max(64, memberIds.length * 8)),
     )
     .filter((edge) => !memberSet.has(edge.dst))
+    .map((edge) => {
+      const entity = graph.getEntity(edge.dst);
+      const metadata = entity?.entity.metadata;
+      const path = entity?.file.relativePath ?? "";
+      const identity =
+        metadata?.kind === "code"
+          ? `${metadata.symbolName ?? ""} ${metadata.scope ?? ""} ${path}`
+          : path;
+      return {
+        edge,
+        path,
+        queryCoverage: semanticTermsCovered(identity, terms).size,
+      };
+    })
     .sort((left, right) => {
-      const leftPath = graph.getEntity(left.dst)?.file.relativePath ?? "";
-      const rightPath = graph.getEntity(right.dst)?.file.relativePath ?? "";
       const edgePriority = (kind: GraphEdgeKind): number =>
         kind === "INSTANTIATES" ? 0 : kind === "CALLS" ? 1 : 2;
       return (
-        edgePriority(left.kind) - edgePriority(right.kind) ||
-        Number(isLowValuePath(leftPath)) - Number(isLowValuePath(rightPath)) ||
-        leftPath.localeCompare(rightPath) ||
-        left.dst.localeCompare(right.dst)
+        right.queryCoverage - left.queryCoverage ||
+        edgePriority(left.edge.kind) - edgePriority(right.edge.kind) ||
+        Number(isLowValuePath(left.path)) -
+          Number(isLowValuePath(right.path)) ||
+        left.path.localeCompare(right.path) ||
+        left.edge.dst.localeCompare(right.edge.dst)
       );
     });
   const added: string[] = [];
   const seen = new Set<string>();
-  for (const edge of candidates) {
+  for (const { edge } of candidates) {
     if (seen.has(edge.dst)) continue;
     seen.add(edge.dst);
     if (absorb(selected, { id: edge.dst, kind: undefined }, false, 2))
@@ -1056,11 +1632,22 @@ function glueImpactNeighbors(
   selected: Map<string, ScoredNode>,
   rootIds: readonly string[],
   limit: number,
+  structuralBridgeIds: Set<string>,
+  terms: readonly string[],
+  directImpactIds: Set<string>,
+  requireQueryMatch = false,
 ): string[] {
   let added = 0;
-  const addedIds: string[] = [];
-  for (const rootId of rootIds) {
+  const addedByRoot: string[][] = [];
+  for (const [index, rootId] of rootIds.entries()) {
     if (added >= limit) break;
+    const rootIdsAdded: string[] = [];
+    addedByRoot.push(rootIdsAdded);
+    const rootLimit = Math.max(
+      1,
+      Math.ceil((limit - added) / (rootIds.length - index)),
+    );
+    let rootAdded = 0;
     const metadata = graph.getEntity(rootId)?.entity.metadata;
     const kind = metadata?.kind === "code" ? metadata.symbolType : undefined;
     if (isTypeishKind(kind ?? "")) {
@@ -1069,58 +1656,277 @@ function glueImpactNeighbors(
       // commonly depend on a type through CALLS/REFS/INSTANTIATES. Query those
       // edge kinds explicitly so a high-cardinality interface cannot crowd
       // real integration points out with derived types.
-      const remaining = Math.max(1, limit - added);
+      const rootTargets = [
+        rootId,
+        ...graph.members(rootId).map((ref) => ref.id),
+      ];
       const edges = graph.incomingEdges(
-        [rootId],
+        rootTargets,
         ["CALLS", "REFS", "INSTANTIATES"],
-        Math.min(256, remaining * 8),
+        Math.min(256, rootLimit * 8),
+      );
+      const dynamicSources = graph.dynamicBoundarySources(
+        rootTargets,
+        Math.min(128, rootLimit * 4),
+      );
+      const dynamicSourceIds = new Set(
+        dynamicSources.map((source) => source.id),
+      );
+      const directCallSourceIds = new Set(
+        edges.filter((edge) => edge.kind === "CALLS").map((edge) => edge.src),
       );
       const rootPath = graph.getEntity(rootId)?.file.relativePath ?? "";
       const sources = rankDirectImpactSources(
-        edges.map((edge) => ({ id: edge.src })),
+        [...edges.map((edge) => ({ id: edge.src })), ...dynamicSources],
         graph,
         rootPath,
+        terms,
+        requireQueryMatch,
       );
       for (const source of sources) {
-        if (absorb(selected, source, false, 1)) {
+        if (
+          dynamicSourceIds.has(source.id) ||
+          directCallSourceIds.has(source.id)
+        )
+          directImpactIds.add(source.id);
+        const retained =
+          selected.has(source.id) || absorb(selected, source, false, 1);
+        if (retained) {
           added += 1;
-          addedIds.push(source.id);
+          rootAdded += 1;
+          rootIdsAdded.push(source.id);
         }
-        if (added >= limit) break;
+        if (rootAdded >= rootLimit) break;
       }
       continue;
     }
-    // Reverse dependents are ordinary subgraph candidates, not presentation
-    // exceptions. Once selected, their real CALLS/REFS/INHERITS edges feed the
-    // same RWR and marginal-file ranking as every other node.
-    for (const ref of graph.impact(rootId, 2, Math.max(1, limit - added))) {
-      if (absorb(selected, ref, false, 2)) {
+    // Reverse dependents and construction sites are ordinary subgraph
+    // candidates. The latter preserves object-wiring code when a root calls a
+    // method on a collaborator created elsewhere (constructor injection,
+    // registries, factories) without reserving a separate presentation slot.
+    const rootPath = graph.getEntity(rootId)?.file.relativePath ?? "";
+    const bridges = constructionBridgeSources(graph, rootId, rootLimit);
+    const bridgeIds = new Set(bridges.map((ref) => ref.id));
+    const directCallSourceIds = new Set(
+      graph
+        .incomingEdges([rootId], ["CALLS"], Math.min(256, rootLimit * 8))
+        .map((edge) => edge.src),
+    );
+    const related = rankDirectImpactSources(
+      [...graph.impact(rootId, 2, Math.min(256, rootLimit * 8)), ...bridges],
+      graph,
+      rootPath,
+      terms,
+      requireQueryMatch,
+    );
+    for (const ref of related) {
+      if (directCallSourceIds.has(ref.id)) directImpactIds.add(ref.id);
+      if (bridgeIds.has(ref.id)) structuralBridgeIds.add(ref.id);
+      const retained = selected.has(ref.id) || absorb(selected, ref, false, 2);
+      if (retained) {
         added += 1;
-        addedIds.push(ref.id);
+        rootAdded += 1;
+        rootIdsAdded.push(ref.id);
       }
-      if (added >= limit) break;
+      if (rootAdded >= rootLimit) break;
     }
   }
-  return addedIds;
+  return roundRobin(addedByRoot);
+}
+
+function constructionBridgeSources(
+  graph: GraphReader,
+  rootId: string,
+  limit: number,
+): SymRef[] {
+  const callees = graph
+    .outgoingEdges([rootId], ["CALLS"], Math.min(128, limit * 4))
+    .map((edge) => edge.dst);
+  const containers = new Set<string>();
+  for (const callee of callees) {
+    const container = graph.context(callee).containers[0];
+    const metadata = container
+      ? graph.getEntity(container.id)?.entity.metadata
+      : undefined;
+    if (metadata?.kind === "code" && isTypeishKind(metadata.symbolType ?? ""))
+      containers.add(container!.id);
+  }
+  if (containers.size === 0) return [];
+  return graph
+    .incomingEdges(
+      [...containers],
+      ["CALLS", "INSTANTIATES"],
+      Math.min(256, limit * 8),
+    )
+    .filter((edge) => edge.rel === "new")
+    .map((edge) => ({ id: edge.src }));
+}
+
+function extendStructuralBridges(
+  graph: GraphReader,
+  selected: Map<string, ScoredNode>,
+  bridgeIds: Set<string>,
+  terms: readonly string[],
+  maxDepth: number,
+  limit: number,
+): void {
+  let frontier = [...bridgeIds];
+  let remaining = limit;
+  const rankedCandidates = (
+    edges: ReturnType<GraphReader["outgoingEdges"]>,
+    fallbackTerm?: string,
+  ) =>
+    edges
+      .filter(
+        (edge) =>
+          (edge.kind === "CALLS" && edge.rel !== "new") ||
+          edge.rel === "function",
+      )
+      .map((edge) => {
+        const entity = graph.getEntity(edge.dst);
+        const source = graph.getEntity(edge.src);
+        const metadata = entity?.entity.metadata;
+        const sourceMetadata = source?.entity.metadata;
+        const identity =
+          metadata?.kind === "code"
+            ? `${metadata.symbolName ?? ""} ${metadata.scope ?? ""}`
+            : "";
+        const operation = (value: string | null | undefined) =>
+          value?.replace(/^#+/, "").toLowerCase() ?? "";
+        const coveredTerms = semanticTermsCovered(identity, terms);
+        if (coveredTerms.size === 0 && fallbackTerm)
+          coveredTerms.add(fallbackTerm);
+        const targetOperation =
+          metadata?.kind === "code" ? operation(metadata.symbolName) : "";
+        const sourceOperation =
+          sourceMetadata?.kind === "code"
+            ? operation(sourceMetadata.symbolName)
+            : "";
+        return {
+          edge,
+          coveredTerms,
+          lowValue: Number(isLowValuePath(entity?.file.relativePath ?? "")),
+          sameOperation: Number(
+            Boolean(targetOperation) && targetOperation === sourceOperation,
+          ),
+          sameContainer: Number(
+            metadata?.kind === "code" &&
+              sourceMetadata?.kind === "code" &&
+              Boolean(metadata.scope) &&
+              metadata.scope === sourceMetadata.scope,
+          ),
+          sameFile: Number(source?.file.id === entity?.file.id),
+        };
+      })
+      .filter((candidate) => candidate.coveredTerms.size > 0)
+      .sort(
+        (left, right) =>
+          right.coveredTerms.size - left.coveredTerms.size ||
+          left.lowValue - right.lowValue ||
+          right.sameOperation - left.sameOperation ||
+          right.sameContainer - left.sameContainer ||
+          Number(left.edge.kind !== "CALLS") -
+            Number(right.edge.kind !== "CALLS") ||
+          right.sameFile - left.sameFile ||
+          right.edge.confidence - left.edge.confidence ||
+          left.edge.dst.localeCompare(right.edge.dst),
+      );
+  for (
+    let depth = 0;
+    depth < maxDepth && frontier.length && remaining;
+    depth++
+  ) {
+    const outgoing = graph.outgoingEdges(
+      frontier,
+      ["CALLS", "REFS"],
+      Math.min(256, remaining * 16),
+    );
+    let candidates = rankedCandidates(outgoing);
+    if (candidates.length === 0)
+      candidates = rankedCandidates(outgoing, `bridge:${depth}`);
+    if (candidates.length === 0) {
+      const containers = [
+        ...new Set(
+          frontier.flatMap((id) =>
+            graph.context(id).containers.map((container) => container.id),
+          ),
+        ),
+      ];
+      candidates = rankedCandidates(
+        graph
+          .outgoingEdges(containers, ["REFS"], Math.min(128, remaining * 8))
+          .filter((edge) => edge.rel === "function"),
+      );
+    }
+    const next: string[] = [];
+    const coveredAtDepth = new Set<string>();
+    for (const { edge, coveredTerms } of candidates) {
+      if (bridgeIds.has(edge.dst)) continue;
+      if ([...coveredTerms].every((term) => coveredAtDepth.has(term))) continue;
+      for (const term of coveredTerms) coveredAtDepth.add(term);
+      absorb(selected, { id: edge.dst }, false, depth + 2);
+      bridgeIds.add(edge.dst);
+      next.push(edge.dst);
+      remaining -= 1;
+      if (remaining === 0) break;
+    }
+    frontier = next;
+  }
+}
+
+function roundRobin<T>(groups: readonly (readonly T[])[]): T[] {
+  const result: T[] = [];
+  const longest = Math.max(0, ...groups.map((group) => group.length));
+  for (let index = 0; index < longest; index += 1)
+    for (const group of groups)
+      if (group[index] !== undefined) result.push(group[index]);
+  return result;
 }
 
 function rankDirectImpactSources(
   refs: readonly SymRef[],
   storage: GraphReader,
   rootPath: string,
+  terms: readonly string[],
+  requireQueryMatch = false,
 ): SymRef[] {
   const unique = [...new Map(refs.map((ref) => [ref.id, ref])).values()];
-  return unique.sort((left, right) => {
-    const leftPath = storage.getEntity(left.id)?.file.relativePath ?? "";
-    const rightPath = storage.getEntity(right.id)?.file.relativePath ?? "";
-    return (
-      Number(isLowValuePath(leftPath)) - Number(isLowValuePath(rightPath)) ||
-      semanticPathAffinity(rootPath, rightPath) -
-        semanticPathAffinity(rootPath, leftPath) ||
-      leftPath.localeCompare(rightPath) ||
-      left.id.localeCompare(right.id)
-    );
-  });
+  const identities = new Map(
+    unique.map((ref) => {
+      const entity = storage.getEntity(ref.id);
+      const metadata = entity?.entity.metadata;
+      const path = entity?.file.relativePath ?? "";
+      return [
+        ref.id,
+        {
+          path,
+          coverage: semanticTermsCovered(
+            metadata?.kind === "code"
+              ? `${metadata.symbolName ?? ""} ${metadata.scope ?? ""} ${path}`
+              : path,
+            terms,
+          ).size,
+        },
+      ] as const;
+    }),
+  );
+  return unique
+    .filter((ref) =>
+      requireQueryMatch ? (identities.get(ref.id)?.coverage ?? 0) > 0 : true,
+    )
+    .sort((left, right) => {
+      const leftIdentity = identities.get(left.id)!;
+      const rightIdentity = identities.get(right.id)!;
+      return (
+        rightIdentity.coverage - leftIdentity.coverage ||
+        Number(isLowValuePath(leftIdentity.path)) -
+          Number(isLowValuePath(rightIdentity.path)) ||
+        semanticPathAffinity(rootPath, rightIdentity.path) -
+          semanticPathAffinity(rootPath, leftIdentity.path) ||
+        leftIdentity.path.localeCompare(rightIdentity.path) ||
+        left.id.localeCompare(right.id)
+      );
+    });
 }
 
 function emptySubgraph(available: boolean): ExploreSubgraphResult {
@@ -1128,7 +1934,9 @@ function emptySubgraph(available: boolean): ExploreSubgraphResult {
     available,
     rootIds: [],
     nodes: [],
+    structuralBridgeIds: [],
     impactExpansionFileIds: [],
+    directImpactFileIds: [],
     edges: [],
     edgesTruncated: false,
     callPaths: [],
@@ -1282,7 +2090,7 @@ function glueCallNeighbors(
     }
     for (const ref of [
       ...graph.callers(rootId, 1, 20),
-      ...graph.callees(rootId, 2, 20),
+      ...graph.callees(rootId, 1, 20),
     ]) {
       if (absorb(selected, ref, false, 1)) {
         added += 1;
@@ -1336,8 +2144,11 @@ function glueCallNeighbors(
       }
     }
     const rootPath = entity?.file.relativePath ?? "";
+    const directDynamicSources = graph.dynamicBoundarySources([rootId], 64);
     const dynamicSources = selectRelevantDynamicSources(
-      graph.dynamicBoundarySources([...dispatchTargetIds], 256),
+      directDynamicSources.length > 0
+        ? directDynamicSources
+        : graph.dynamicBoundarySources([...dispatchTargetIds], 256),
       graph,
       rootPath,
       Math.min(8, Math.max(1, limit - added)),
@@ -1387,6 +2198,61 @@ function symbolName(storage: GraphReader, id: string): string | undefined {
     : undefined;
 }
 
+function glueInheritedContracts(
+  graph: GraphReader,
+  selected: Map<string, ScoredNode>,
+  rootIds: readonly string[],
+  limit: number,
+): string[] {
+  const names = new Set(
+    rootIds
+      .filter((id) => {
+        const metadata = graph.getEntity(id)?.entity.metadata;
+        return (
+          metadata?.kind === "code" &&
+          isCallableSymbolKind(metadata.symbolType ?? "")
+        );
+      })
+      .map((id) => symbolName(graph, id)?.toLowerCase())
+      .filter((name): name is string => Boolean(name)),
+  );
+  if (names.size === 0) return [];
+
+  const owners = [
+    ...new Set(
+      graph
+        .expandContainers(rootIds, Math.max(limit, rootIds.length * 2))
+        .map((neighbor) => neighbor.parent_id),
+    ),
+  ];
+  const inherited: string[] = [];
+  const seen = new Set(owners);
+  let frontier = owners;
+  for (let depth = 0; depth < 4 && frontier.length > 0; depth += 1) {
+    frontier = [
+      ...new Set(
+        graph
+          .outgoingEdges(frontier, ["INHERITS"], Math.max(limit * 4, 32))
+          .map((edge) => edge.dst),
+      ),
+    ].filter((id) => !seen.has(id));
+    for (const id of frontier) seen.add(id);
+    inherited.push(...frontier);
+  }
+
+  const contracts: string[] = [];
+  for (const ownerId of inherited)
+    for (const member of graph.members(ownerId)) {
+      if (!names.has(symbolName(graph, member.id)?.toLowerCase() ?? ""))
+        continue;
+      if (contracts.includes(member.id)) continue;
+      absorb(selected, member, false, 1);
+      contracts.push(member.id);
+      if (contracts.length >= limit) return contracts;
+    }
+  return contracts;
+}
+
 function glueContainers(
   graph: GraphReader,
   selected: Map<string, ScoredNode>,
@@ -1410,20 +2276,38 @@ function trimToMaxNodes(
   selected: Map<string, ScoredNode>,
   protectedIds: ReadonlySet<string>,
   maxNodes: number,
+  graph: GraphReader,
+  terms: readonly string[],
 ): void {
   if (selected.size <= maxNodes) {
     return;
   }
+  const insertionRank = new Map(
+    [...selected.keys()].map((id, index) => [id, index]),
+  );
+  const queryCoverage = new Map(
+    [...selected.keys()].map((id) => {
+      const entity = graph.getEntity(id);
+      const metadata = entity?.entity.metadata;
+      const identity =
+        metadata?.kind === "code"
+          ? `${metadata.symbolName ?? ""} ${metadata.scope ?? ""} ${entity?.file.relativePath ?? ""}`
+          : (entity?.file.relativePath ?? "");
+      return [id, semanticTermsCovered(identity, terms).size];
+    }),
+  );
   const ranked = [...selected.values()].sort((a, b) => {
+    if (a.isRoot !== b.isRoot) return Number(b.isRoot) - Number(a.isRoot);
     const ar = protectedIds.has(a.id) ? 0 : 1;
     const br = protectedIds.has(b.id) ? 0 : 1;
     if (ar !== br) {
       return ar - br;
     }
-    if (a.depth !== b.depth) {
-      return a.depth - b.depth;
-    }
-    return a.id.localeCompare(b.id);
+    if (a.depth !== b.depth) return a.depth - b.depth;
+    const coverageDifference =
+      queryCoverage.get(b.id)! - queryCoverage.get(a.id)!;
+    if (coverageDifference !== 0) return coverageDifference;
+    return insertionRank.get(a.id)! - insertionRank.get(b.id)!;
   });
   selected.clear();
   for (const node of ranked.slice(0, maxNodes)) {

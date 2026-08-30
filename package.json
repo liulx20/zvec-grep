@@ -36,6 +36,8 @@
   ],
   "scripts": {
     "benchmark:explore-quality": "npm run build && node benchmarks/explore-quality/run.mjs",
+    "benchmark:explore-holdout": "npm run build && node benchmarks/explore-quality/run-real.mjs --suite=holdout",
+    "benchmark:explore-agent-ab": "npm run build && node benchmarks/explore-quality/run-agent-ab.mjs",
     "benchmark:language-quality": "npm run build && node benchmarks/explore-quality/run-language-matrix.mjs",
     "build": "tsc -p tsconfig.json",
     "check": "npm run lint && npm run format:check && npm run typecheck && npm run test:coverage && npm run test:package",

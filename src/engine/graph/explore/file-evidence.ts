@@ -1,15 +1,18 @@
 import { semanticPathTokens } from "../counterpart-policy.js";
 import { isLowValuePath } from "../path-policy.js";
+import { escapeRegExp } from "../../utils/regex.js";
 import {
   isTypeishKind,
+  queryEvidenceTerms,
   queryTargetsPath,
-  queryTerms,
   semanticTermsCovered,
 } from "./policy.js";
 import type { ExploreCandidatePool } from "./candidate-pool.js";
+import type { GraphReader } from "../types.js";
 import type { ExploreCallPath, ExploreEdge, ExploreNode } from "./types.js";
 
 export function collectExploreFileEvidence(input: {
+  graph: GraphReader;
   pool: ExploreCandidatePool;
   edges: readonly ExploreEdge[];
   callPaths: readonly ExploreCallPath[];
@@ -28,13 +31,88 @@ export function collectExploreFileEvidence(input: {
   const nodeFiles = new Map(
     nodes.map((node) => [node.id, node.entity?.file.id] as const),
   );
+  const rootIds = new Set(
+    nodes.filter((node) => node.isRoot).map((node) => node.id),
+  );
+  const nodeById = new Map(nodes.map((node) => [node.id, node] as const));
+  const callPathNodeIds = new Set(input.callPaths[0]?.nodes ?? []);
+  const directCalls = new Map<string, number>();
+  const familyFileIds = new Set<string>();
+  const familySourcesByFile = new Map<string, Set<string>>();
+  const familyValueIds = new Set<string>();
+  for (const edge of input.edges) {
+    if (!rootIds.has(edge.dst) || edge.kind === "CONTAINS") continue;
+    const fileId = nodeFiles.get(edge.src);
+    if (fileId && !input.rootFileIds.has(fileId)) {
+      input.pool.addFileEvidence(fileId, `family:${edge.dst}`);
+      if (edge.kind === "CALLS")
+        directCalls.set(fileId, (directCalls.get(fileId) ?? 0) + edge.count);
+      familyFileIds.add(fileId);
+      const sources = familySourcesByFile.get(fileId) ?? new Set<string>();
+      sources.add(edge.src);
+      familySourcesByFile.set(fileId, sources);
+      const metadata = nodeById.get(edge.src)?.entity?.entity.metadata;
+      if (metadata?.kind === "code" && metadata.symbolType === "value")
+        familyValueIds.add(edge.src);
+      if (
+        metadata?.kind === "code" &&
+        /^(?:main|__main__|application)$/i.test(metadata.symbolName ?? "")
+      )
+        input.pool.addFileEvidence(fileId, "entrypoint");
+    }
+  }
+  for (const edge of input.edges) {
+    if (!familyValueIds.has(edge.dst) || edge.kind !== "REFS") continue;
+    const fileId = nodeFiles.get(edge.src);
+    if (fileId && !input.rootFileIds.has(fileId))
+      input.pool.addFileEvidence(fileId, "collaborator");
+  }
+  const importsByFile = new Map<string, Set<string>>();
+  for (const edge of input.graph.outgoingEdges(
+    [...familyFileIds],
+    ["IMPORTS"],
+    Math.min(4_096, Math.max(64, familyFileIds.size * 16)),
+  )) {
+    const targets = importsByFile.get(edge.src) ?? new Set<string>();
+    targets.add(edge.dst);
+    importsByFile.set(edge.src, targets);
+  }
+  for (const [fileId, imports] of importsByFile)
+    input.pool.addFileEvidence(fileId, "integration", imports.size);
+  for (const [fileId, sources] of familySourcesByFile)
+    input.pool.addFileEvidence(fileId, "integration", sources.size);
   for (const path of input.callPaths) {
-    if (path.derived) continue;
+    // A derived one-hop path is already represented by direct-call evidence.
+    // Reserving its target file as well would let any helper call bypass the
+    // shared selector and displace stronger structural context.
+    if (path.derived && path.nodes.length < 3) continue;
     for (const id of path.nodes) {
       const fileId = nodeFiles.get(id);
       if (fileId) input.pool.addFileEvidence(fileId, "call_path");
     }
   }
+  for (const edge of input.edges) {
+    if (edge.kind === "INSTANTIATES" && callPathNodeIds.has(edge.src)) {
+      const fileId = nodeFiles.get(edge.dst);
+      if (fileId) input.pool.addFileEvidence(fileId, "call_path");
+    }
+    if (!rootIds.has(edge.src)) continue;
+    const fileId = nodeFiles.get(edge.dst);
+    const targetMetadata = nodeById.get(edge.dst)?.entity?.entity.metadata;
+    if (!fileId || input.rootFileIds.has(fileId)) continue;
+    if (edge.kind === "INSTANTIATES")
+      input.pool.addFileEvidence(fileId, "collaborator");
+    else if (
+      edge.kind === "REFS" &&
+      targetMetadata?.kind === "code" &&
+      targetMetadata.symbolType === "value"
+    )
+      input.pool.addFileEvidence(fileId, "collaborator");
+    else if (edge.kind === "CALLS")
+      directCalls.set(fileId, (directCalls.get(fileId) ?? 0) + edge.count);
+  }
+  for (const [fileId, count] of directCalls)
+    input.pool.addFileEvidence(fileId, "direct_call", count);
   const integration = directIntegrationFiles(
     nodes,
     input.edges,
@@ -51,7 +129,7 @@ export function collectExploreFileEvidence(input: {
   ))
     input.pool.addFileEvidence(fileId, "hierarchy");
 
-  const terms = queryTerms(input.query);
+  const terms = queryEvidenceTerms(input.query);
   const changeSurface = new Set(input.pool.fileIds("change_surface"));
   for (const [fileId, fileNodes] of byFile) {
     const path = fileNodes[0]?.entity?.file.relativePath;
@@ -65,11 +143,10 @@ export function collectExploreFileEvidence(input: {
       input.pool.addFileEvidence(fileId, "low_value_path");
     const coveredTerms = fileSemanticTerms(fileNodes, terms);
     if (coveredTerms.size <= 0) continue;
-    const pathTerms = semanticTermsCovered(path ?? "", terms);
     input.pool.addFileEvidence(
       fileId,
       "query_alignment",
-      (coveredTerms.size + pathTerms.size) / terms.length,
+      coveredTerms.size / terms.length,
     );
     for (const term of coveredTerms)
       input.pool.addFileEvidence(fileId, `concept:${term}`);
@@ -98,6 +175,7 @@ function fileSemanticTerms(
       return [
         metadata?.kind === "code" ? metadata.symbolName : "",
         metadata?.kind === "code" ? metadata.scope : "",
+        metadata?.kind === "code" ? metadata.signature : "",
         node.entity?.file.relativePath ?? "",
       ];
     })
@@ -114,8 +192,32 @@ function hierarchyEvidenceFileIds(
     nodes.map((node) => [node.id, node.entity?.file.id] as const),
   );
   const roots = nodes.filter((node) => node.isRoot).map((node) => node.id);
+  const rootSet = new Set(roots);
+  const nodeById = new Map(nodes.map((node) => [node.id, node] as const));
   const related = new Map<string, Set<string>>();
+  const files = new Set<string>();
   for (const edge of edges) {
+    if (edge.kind === "REFS" && rootSet.has(edge.dst)) {
+      const source = nodeById.get(edge.src);
+      const metadata = source?.entity?.entity.metadata;
+      const targetMetadata = nodeById.get(edge.dst)?.entity?.entity.metadata;
+      const targetName =
+        targetMetadata?.kind === "code" ? targetMetadata.symbolName : undefined;
+      const fileId = source?.entity?.file.id;
+      if (
+        fileId &&
+        !rootFileIds.has(fileId) &&
+        metadata?.kind === "code" &&
+        ["field", "value"].includes(metadata.symbolType ?? "") &&
+        targetMetadata?.kind === "code" &&
+        targetName &&
+        !targetMetadata.nodeType?.includes("enum") &&
+        new RegExp(`:\\s*${escapeRegExp(targetName)}\\b`).test(
+          metadata.signature ?? "",
+        )
+      )
+        files.add(fileId);
+    }
     if (edge.kind !== "INHERITS") continue;
     const src = related.get(edge.src) ?? new Set<string>();
     const dst = related.get(edge.dst) ?? new Set<string>();
@@ -124,7 +226,6 @@ function hierarchyEvidenceFileIds(
     related.set(edge.src, src);
     related.set(edge.dst, dst);
   }
-  const files = new Set<string>();
   for (const root of roots) {
     const seen = new Set([root]);
     let frontier = [root];

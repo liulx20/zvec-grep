@@ -9,6 +9,14 @@ import {
 import { enrichTargetWithResolutionFact } from "./call-resolution-target.js";
 import { cFunctionPointerRegistration } from "./c-function-pointer-registration.js";
 
+const GENERAL_VALUE_CONTEXTS = new Set([
+  "for_in_statement",
+  "for_of_statement",
+  "object",
+  "object_expression",
+  "spread_element",
+  "subscript_expression",
+]);
 const VALUE_CONTEXTS = new Set([
   "argument_list",
   "arguments",
@@ -23,6 +31,7 @@ const VALUE_CONTEXTS = new Set([
   "method_reference",
   "pair",
   "return_statement",
+  ...GENERAL_VALUE_CONTEXTS,
 ]);
 
 /** Capture a known function name used as a value rather than invoked. */
@@ -82,7 +91,9 @@ export function collectFunctionRefSites(
               }
             : target,
           line: current.startPosition.row + 1,
-          kind: "function",
+          kind: GENERAL_VALUE_CONTEXTS.has(current.parent?.type ?? "")
+            ? "value"
+            : "function",
         });
       }
     }
@@ -143,12 +154,30 @@ function functionReference(
 function isFunctionValuePosition(node: TSNode): boolean {
   const parent = node.parent;
   if (!parent || isDeclarationName(node) || isCallCallee(node)) return false;
+  if (isBoundFunctionReceiver(node)) return true;
   if (node.type === "method_reference") return true;
   if (/type|annotation|parameter|declarator/.test(parent.type)) return false;
   if (VALUE_CONTEXTS.has(parent.type)) {
     return true;
   }
   return isAddressOf(node);
+}
+
+function isBoundFunctionReceiver(node: TSNode): boolean {
+  const member = node.parent;
+  if (!member || !/member|attribute/.test(member.type)) return false;
+  const receiver =
+    member.childForFieldName("object") ?? member.namedChildren.at(0);
+  const property =
+    member.childForFieldName("property") ?? member.namedChildren.at(-1);
+  if (!sameNode(node, receiver) || property?.text !== "bind") return false;
+  const call = member.parent;
+  if (!call || !/call|invocation/.test(call.type)) return false;
+  const callee =
+    call.childForFieldName("function") ??
+    call.childForFieldName("name") ??
+    call.childForFieldName("method");
+  return sameNode(member, callee);
 }
 
 function isAddressOf(node: TSNode): boolean {
@@ -201,7 +230,10 @@ function isDeclarationName(node: TSNode): boolean {
   return sameNode(node, declared);
 }
 
-function sameNode(left: TSNode | null, right: TSNode | null): boolean {
+function sameNode(
+  left: TSNode | null | undefined,
+  right: TSNode | null | undefined,
+): boolean {
   return Boolean(
     left &&
     right &&

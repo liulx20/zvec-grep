@@ -16,6 +16,8 @@ export type SemanticCandidateQuery = {
   expandImports?: boolean;
   /** Precomputed visibility-aware abstract-root result for batch resolvers. */
   abstractRootHint?: boolean;
+  /** Instantiation facts that must not narrow this source site's dispatch. */
+  excludedInstantiationFileIds?: readonly string[];
 };
 
 export type SemanticCandidate = {
@@ -184,6 +186,12 @@ export class SemanticCandidateRepository {
 
   private findDetailed(query: SemanticCandidateQuery): SemanticCandidate[] {
     const policy = candidatePolicy(query.sourceLanguage);
+    const structuralValues = [
+      "javascript",
+      "jsx",
+      "typescript",
+      "tsx",
+    ].includes(query.sourceLanguage ?? "");
     return this.database
       .all<{
         id: string;
@@ -214,12 +222,21 @@ export class SemanticCandidateRepository {
          WHERE inheritance.kind='INHERITS'
            AND inheritance.rel IN (SELECT value FROM json_each(?))
            AND inherited.kind IN (SELECT value FROM json_each(?))
-       ), containers(id) AS (
+       ), nominal_containers(id) AS (
          SELECT id FROM roots
          UNION
-         SELECT e.src_id FROM edges e JOIN containers c ON c.id=e.dst_id
+         SELECT e.src_id FROM edges e JOIN nominal_containers c ON c.id=e.dst_id
          WHERE e.kind='INHERITS'
            AND e.rel IN (SELECT value FROM json_each(?))
+       ), containers(id) AS (
+         SELECT id FROM nominal_containers
+         UNION
+         SELECT typed.src_id FROM edges typed
+         JOIN roots declared_type ON declared_type.id=typed.dst_id
+         JOIN symbols value ON value.id=typed.src_id
+         WHERE ?=1 AND typed.kind='REFS' AND typed.rel='type'
+           AND value.kind='value'
+           AND value.file_id IN (SELECT file_id FROM visible)
        ), provider_roots(id) AS (
          SELECT id FROM containers
          UNION
@@ -248,7 +265,7 @@ export class SemanticCandidateRepository {
          SELECT DISTINCT candidate.id
          FROM symbols candidate
          WHERE candidate.file_id IN (SELECT file_id FROM visible)
-           AND candidate.kind NOT IN ('interface','trait')
+           AND candidate.kind IN ('class','struct','enum','abstract_class','impl')
            AND EXISTS(
              SELECT 1 FROM roots
              WHERE kind IN (SELECT value FROM json_each(?))
@@ -289,6 +306,17 @@ export class SemanticCandidateRepository {
            ON member.qualified_name=provider_symbol.qualified_name || '::' || ?
           AND member.kind IN (${CALLABLE_SYMBOL_KINDS_SQL})
          WHERE (?<0 OR member.arity IS NULL OR member.arity=?)
+         UNION
+         SELECT DISTINCT member.id,scope.id,scope_symbol.kind,provider.depth,member.kind
+         FROM candidate_containers scope
+         JOIN symbols scope_symbol ON scope_symbol.id=scope.id
+         JOIN provider_closure provider ON provider.container_id=scope.id
+         JOIN edges binding ON binding.src_id=provider.provider_id
+         JOIN symbols member ON member.id=binding.dst_id
+         WHERE binding.kind='REFS' AND binding.rel IN ('function','value')
+           AND member.name=?
+           AND member.kind IN (${CALLABLE_SYMBOL_KINDS_SQL})
+           AND (?<0 OR member.arity IS NULL OR member.arity=?)
        ), nearest_depths(container_id,depth) AS (
          SELECT container_id,MIN(depth)
          FROM provider_members
@@ -305,6 +333,11 @@ export class SemanticCandidateRepository {
          FROM edges made
          JOIN candidate_members candidate ON candidate.container_id=made.dst_id
          WHERE made.kind='INSTANTIATES' AND made.dst_is_file=0
+           AND NOT EXISTS (
+             SELECT 1 FROM json_each(?) excluded
+             WHERE excluded.value=CASE WHEN made.src_is_file=1 THEN made.src_id
+               ELSE (SELECT file_id FROM symbols WHERE id=made.src_id) END
+           )
        ), rta_state(active) AS (
          SELECT EXISTS(SELECT 1 FROM instantiated_containers)
        ), resolved_candidates AS (
@@ -344,6 +377,7 @@ export class SemanticCandidateRepository {
         JSON.stringify(policy.inheritanceRelations),
         JSON.stringify(policy.structuralRootKinds),
         JSON.stringify(policy.inheritanceRelations),
+        structuralValues ? 1 : 0,
         query.workspaceVisible ? 1 : 0,
         JSON.stringify(policy.structuralRootKinds),
         JSON.stringify(policy.providerRelations),
@@ -354,6 +388,10 @@ export class SemanticCandidateRepository {
         query.memberName,
         query.callArity ?? -1,
         query.callArity ?? -1,
+        query.memberName,
+        query.callArity ?? -1,
+        query.callArity ?? -1,
+        JSON.stringify(query.excludedInstantiationFileIds ?? []),
         query.limit ?? 64,
       )
       .map((row) => ({
@@ -431,6 +469,12 @@ function candidatePolicy(language?: string): {
     return {
       inheritanceRelations: ["extends", "implements"],
       structuralRootKinds: [],
+      providerRelations: ["extends"],
+    };
+  if (language === "typescript" || language === "tsx")
+    return {
+      inheritanceRelations: ["extends", "implements"],
+      structuralRootKinds: ["interface"],
       providerRelations: ["extends"],
     };
   return {

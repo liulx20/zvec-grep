@@ -8,6 +8,8 @@ export type ImportSpec = {
   spec: string;
   line: number;
   bindings?: readonly ImportBinding[];
+  /** The source module exposes these bindings to its own importers. */
+  reexport?: boolean;
   /** Number of enclosing inline Rust `mod { ... }` scopes. */
   rustInlineModuleDepth?: number;
   /** true when #include <...> — always treated as external in v1 */
@@ -87,7 +89,7 @@ function importSpecKey(spec: ImportSpec): string {
     .map((binding) => `${binding.imported}\0${binding.local}`)
     .sort()
     .join("\0");
-  return `${spec.spec}\0${spec.line}\0${bindings}`;
+  return `${spec.spec}\0${spec.line}\0${bindings}\0${spec.reexport ? 1 : 0}`;
 }
 
 function pythonQualifiedModuleCandidates(
@@ -277,7 +279,14 @@ function extractSpecsFromNode(node: TSNode, language: string): ImportSpec[] {
     }
     const spec = stripQuotes(sourceNode.text);
     return spec
-      ? [{ spec, line, bindings: javascriptNamedBindings(node) }]
+      ? [
+          {
+            spec,
+            line,
+            bindings: javascriptNamedBindings(node),
+            ...(node.type === "export_statement" ? { reexport: true } : {}),
+          },
+        ]
       : [];
   }
 
@@ -521,7 +530,15 @@ function javascriptNamedBindings(node: TSNode): ImportBinding[] {
       return local ? [{ imported: "*", local }] : [];
     },
   );
-  return [...defaultImports, ...named, ...namespaces];
+  const namespaceExports = descendantsOfType(node, "namespace_export").flatMap(
+    (namespace) => {
+      const local = namespace.namedChildren
+        .find((child) => child.type === "identifier")
+        ?.text.trim();
+      return local ? [{ imported: "*", local }] : [];
+    },
+  );
+  return [...defaultImports, ...named, ...namespaces, ...namespaceExports];
 }
 
 function pythonFromBindings(

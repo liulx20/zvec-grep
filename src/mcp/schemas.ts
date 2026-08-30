@@ -603,14 +603,14 @@ export const zvecGrepServerStatusOutputSchema = z.object({
 export const zvecGrepExploreInputSchema = {
   root: absoluteRootSchema,
   query: boundedString(
-    "Symbol name or short query used to seed the code-graph explore pack.",
+    "Full structural question, or all known symbol/file endpoints to connect in one Explore pack.",
   ),
   seedId: z
     .string()
     .min(1)
     .max(256)
     .optional()
-    .describe("Disambiguate when multiple symbols match the query."),
+    .describe("Entity ID or exact symbol name used to anchor exploration."),
   limit: z
     .number()
     .int()

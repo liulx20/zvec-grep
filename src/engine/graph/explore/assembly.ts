@@ -1,6 +1,7 @@
 import type { Range } from "../../types.js";
-import type { GraphReader } from "../types.js";
-import type { DynamicBoundary } from "../types.js";
+import type { StoredEntity } from "../../storage/index.js";
+import type { DynamicBoundary, GraphReader } from "../types.js";
+import { isCallableSymbolKind } from "../symbol-kinds.js";
 import type {
   ExploreEdge,
   ExploreCallPath,
@@ -12,6 +13,7 @@ import { polymorphicSiblingSkeletonNodeIds } from "./adaptive-sizing.js";
 import type { ExploreCandidatePool } from "./candidate-pool.js";
 import { selectExploreFiles } from "./file-selection.js";
 import type { ExploreIntent } from "./intent.js";
+import { queryTerms, semanticTermsCovered } from "./policy.js";
 
 export function assembleExploreFiles(input: {
   intent: ExploreIntent;
@@ -25,10 +27,29 @@ export function assembleExploreFiles(input: {
   maxFiles: number;
   maxChars: number;
   rootFileIds: ReadonlySet<string>;
+  query: string;
+  structuralBridgeIds: readonly string[];
 }): ExploreFileBundle[] {
   const nodes = input.pool.nodes;
   const fileEvidence = input.pool.fileEvidence;
-  const pathNodeIds = new Set(input.callPaths.flatMap((path) => path.nodes));
+  const callPathNodeIds = new Set(
+    input.callPaths.flatMap((path) => path.nodes),
+  );
+  const pathNodeIds = new Set([
+    ...callPathNodeIds,
+    ...input.structuralBridgeIds,
+  ]);
+  const pathPriority = new Map<string, number>();
+  for (const [index, path] of input.callPaths.entries())
+    for (const id of path.nodes)
+      if (!pathPriority.has(id)) pathPriority.set(id, index);
+  const terms = queryTerms(input.query);
+  const flowFocusLines = collectFlowFocusLines(
+    input.callPaths,
+    input.edges,
+    input.dynamicBoundaries,
+    terms,
+  );
   const byFile = new Map<string, ExploreNode[]>();
   for (const node of nodes) {
     const file = node.entity?.file;
@@ -63,7 +84,7 @@ export function assembleExploreFiles(input: {
     rankedFileIds,
     nodes,
     input.edges,
-    pathNodeIds,
+    callPathNodeIds,
   );
 
   if (rankedFileIds.length === 0) {
@@ -73,10 +94,18 @@ export function assembleExploreFiles(input: {
   // Centrality is role-aware: keep the declaration root, prefer its matching
   // implementation unit, then fall back to the strongest integration file.
   const central = new Set<string>();
+  const rootFileRank = new Map(
+    [...input.rootFileIds].map((fileId, index) => [fileId, index]),
+  );
   const centralSeeds = rankedFileIds.filter((fileId) =>
     fileEvidence
       .get(fileId)
       ?.has(input.intent === "exact_symbol" ? "root" : "semantic_seed"),
+  );
+  centralSeeds.sort(
+    (left, right) =>
+      (rootFileRank.get(left) ?? Number.MAX_SAFE_INTEGER) -
+      (rootFileRank.get(right) ?? Number.MAX_SAFE_INTEGER),
   );
   for (const fileId of centralSeeds.slice(
     0,
@@ -89,6 +118,10 @@ export function assembleExploreFiles(input: {
     ) ??
     rankedFileIds.find(
       (fileId) => !central.has(fileId) && counterpartFileIds.has(fileId),
+    ) ??
+    rankedFileIds.find(
+      (fileId) =>
+        !central.has(fileId) && fileEvidence.get(fileId)?.has("direct_call"),
     ) ??
     rankedFileIds.find(
       (fileId) =>
@@ -108,16 +141,26 @@ export function assembleExploreFiles(input: {
     const sourceLines =
       input.storage.readFileText?.(file)?.split(/\r?\n/) ?? null;
     const retained = sourceLines
-      ? preferNestedSourceSymbols(symbols)
+      ? preferNestedSourceSymbols(
+          symbols,
+          new Set(
+            nodes
+              .filter((node) => node.isRoot || pathNodeIds.has(node.id))
+              .map((node) => node.id),
+          ),
+          terms,
+        )
       : removeContainedSymbols(symbols);
     const ranked = rankSymbols(
       retained,
-      nodes,
+      input.pool.nodes,
       input.edges,
       input.nodeScores,
       pathNodeIds,
+      pathPriority,
       skeletonNodeIds,
-      input.dynamicBoundaries,
+      flowFocusLines,
+      terms,
     );
     const clustered = clusterSymbols(ranked);
     return [
@@ -130,11 +173,17 @@ export function assembleExploreFiles(input: {
       },
     ];
   });
+  const ownerByFile = enclosingOwners(input.storage, prepared);
   const capacities = new Map(
     prepared.map(({ fileId, clustered, sourceLines }) => [
       fileId,
       Math.min(
-        renderFileText(clustered, input.maxChars, sourceLines).text.length +
+        renderFileText(
+          clustered,
+          input.maxChars,
+          sourceLines,
+          ownerByFile.get(fileId),
+        ).text.length +
           clustered.reduce(
             (count, cluster) => count + cluster.symbols.length,
             0,
@@ -144,7 +193,13 @@ export function assembleExploreFiles(input: {
         // Large API types often need several representative methods to convey
         // their usable surface. The global maxChars budget is still hard; this
         // only avoids an artificial 7k per-file ceiling leaving budget unused.
-        central.has(fileId) ? 9_000 : 4_000,
+        central.has(fileId)
+          ? input.intent === "exact_symbol"
+            ? rankedFileIds.length === 1
+              ? input.maxChars
+              : Math.floor(input.maxChars / 2)
+            : 9_000
+          : 4_000,
       ),
     ]),
   );
@@ -159,7 +214,12 @@ export function assembleExploreFiles(input: {
   for (const { fileId, file, nodes, clustered, sourceLines } of prepared) {
     const budget =
       budgets.get(fileId) ?? Math.floor(input.maxChars / rankedFileIds.length);
-    const rendered = renderFileText(clustered, budget, sourceLines);
+    const rendered = renderFileText(
+      clustered,
+      budget,
+      sourceLines,
+      ownerByFile.get(fileId),
+    );
     const text = rendered.text;
     if (!text.trim()) {
       continue;
@@ -169,7 +229,13 @@ export function assembleExploreFiles(input: {
       score: input.fileScores.get(fileId) ?? 0,
       isCentral: central.has(fileId),
       isChangeSurface: changeSurfaceFileIds.has(fileId),
-      reasons: fileReasons(fileId, nodes, input.edges, input.rootFileIds),
+      reasons: fileReasons(
+        fileId,
+        nodes,
+        rendered.symbols,
+        input.edges,
+        input.rootFileIds,
+      ),
       symbols: rendered.symbols,
       sourceOrigin: sourceLines ? "current_disk" : "indexed_fragment",
       text,
@@ -180,25 +246,66 @@ export function assembleExploreFiles(input: {
 
 function preferNestedSourceSymbols(
   symbols: readonly ExploreSymbolSnippet[],
+  preferredIds: ReadonlySet<string>,
+  terms: readonly string[],
 ): ExploreSymbolSnippet[] {
+  const replacements = new Set<string>();
+  const replaced = new Set<string>();
+  for (const parent of symbols) {
+    if (!preferredIds.has(parent.id) || symbolLineCount(parent) < 80) continue;
+    const covered = semanticTermsCovered(symbolIdentity(parent), terms);
+    const children = symbols.filter(
+      (candidate) =>
+        candidate.id !== parent.id &&
+        containsRange(parent.range, candidate.range) &&
+        [...semanticTermsCovered(symbolIdentity(candidate), terms)].some(
+          (term) => !covered.has(term),
+        ),
+    );
+    if (children.length === 0) continue;
+    replaced.add(parent.id);
+    for (const child of children) replacements.add(child.id);
+  }
   const withoutEnvelopes = symbols.filter((symbol) => {
-    if (!ENVELOPE_KINDS.has(symbol.kind ?? "")) return true;
-    return !symbols.some(
+    if (replaced.has(symbol.id)) return false;
+    const replacedParent = symbols.find(
+      (parent) =>
+        replaced.has(parent.id) && containsRange(parent.range, symbol.range),
+    );
+    if (replacedParent) return replacements.has(symbol.id);
+    const children = symbols.filter(
       (candidate) =>
         candidate.id !== symbol.id &&
         containsRange(symbol.range, candidate.range),
+    );
+    if (ENVELOPE_KINDS.has(symbol.kind ?? "")) return children.length === 0;
+    return (
+      preferredIds.has(symbol.id) ||
+      !children.some((candidate) => preferredIds.has(candidate.id))
     );
   });
   return removeContainedSymbols(withoutEnvelopes);
 }
 
+function symbolIdentity(symbol: ExploreSymbolSnippet): string {
+  return `${symbol.scope ?? ""} ${symbol.name} ${symbol.signature ?? ""}`;
+}
+
+function symbolLineCount(symbol: ExploreSymbolSnippet): number {
+  return endLine(symbol.range) - startLine(symbol.range) + 1;
+}
+
 function fileReasons(
   fileId: string,
   nodes: readonly ExploreNode[],
+  renderedSymbols: readonly ExploreSymbolSnippet[],
   edges: readonly ExploreEdge[],
   rootFileIds: ReadonlySet<string>,
 ): string[] {
-  const fileNodes = nodes.filter((node) => node.entity?.file.id === fileId);
+  const renderedIds = new Set(renderedSymbols.map((symbol) => symbol.id));
+  const fileNodes = nodes.filter(
+    (node) => node.entity?.file.id === fileId && renderedIds.has(node.id),
+  );
   const ids = new Set(fileNodes.map((node) => node.id));
   const reasons: string[] = [];
   const add = (value: string) => {
@@ -280,6 +387,7 @@ function toSymbolSnippet(node: ExploreNode): ExploreSymbolSnippet | null {
   return {
     id: node.id,
     name,
+    scope: meta?.kind === "code" ? (meta.scope ?? undefined) : undefined,
     kind: meta?.kind === "code" ? meta.symbolType : node.kind,
     range: entity.entity.range,
     content: entity.entity.content.text,
@@ -295,6 +403,9 @@ type RankedSymbol = {
   focusLines: number[];
   spine: boolean;
   skeleton: boolean;
+  flowFocus: boolean;
+  queryCoverage: number;
+  pathPriority: number;
 };
 
 type SymbolCluster = {
@@ -304,6 +415,9 @@ type SymbolCluster = {
   score: number;
   maxImportance: number;
   spine: boolean;
+  flowFocus: boolean;
+  maxQueryCoverage: number;
+  minPathPriority: number;
 };
 
 const MIN_FOCUSED_EXCERPT_CHARS = 700;
@@ -325,7 +439,16 @@ function clusterSymbols(symbols: readonly RankedSymbol[]): SymbolCluster[] {
       current.symbols.push(item);
       current.score += item.score;
       current.maxImportance = Math.max(current.maxImportance, item.importance);
+      current.maxQueryCoverage = Math.max(
+        current.maxQueryCoverage,
+        item.queryCoverage,
+      );
+      current.minPathPriority = Math.min(
+        current.minPathPriority,
+        item.pathPriority,
+      );
       current.spine ||= item.spine;
+      current.flowFocus ||= item.flowFocus;
     } else {
       clusters.push({
         start,
@@ -334,6 +457,9 @@ function clusterSymbols(symbols: readonly RankedSymbol[]): SymbolCluster[] {
         score: item.score,
         maxImportance: item.importance,
         spine: item.spine,
+        flowFocus: item.flowFocus,
+        maxQueryCoverage: item.queryCoverage,
+        minPathPriority: item.pathPriority,
       });
     }
   }
@@ -346,8 +472,10 @@ function rankSymbols(
   edges: readonly ExploreEdge[],
   nodeScores: ReadonlyMap<string, number>,
   pathNodeIds: ReadonlySet<string>,
+  pathPriority: ReadonlyMap<string, number>,
   skeletonNodeIds: ReadonlySet<string>,
-  dynamicBoundaries: readonly DynamicBoundary[],
+  flowFocusLines: ReadonlyMap<string, readonly number[]>,
+  terms: readonly string[],
 ): RankedSymbol[] {
   const nodeById = new Map(nodes.map((node) => [node.id, node]));
   const fileById = new Map(
@@ -355,15 +483,18 @@ function rankSymbols(
   );
   return symbols.map((symbol) => {
     const node = nodeById.get(symbol.id);
-    const focusLines: number[] = [];
-    for (const boundary of dynamicBoundaries) {
-      if (boundary.sourceId === symbol.id && boundary.line)
-        focusLines.push(boundary.line);
-    }
+    const queryFocusLine = bestQueryFocusLine(symbol, terms);
+    const flowLines = flowFocusLines.get(symbol.id) ?? [];
+    const edgeFocusLines: number[] = [];
     let importance = 1;
+    let directRootFlow = false;
     if (node?.isRoot) importance = 10;
     else if (pathNodeIds.has(symbol.id)) importance = 9;
     let relationScore = 0;
+    const queryCoverage = semanticTermsCovered(
+      `${symbol.name} ${symbol.signature ?? ""}`,
+      terms,
+    ).size;
     for (const edge of edges) {
       if (edge.src !== symbol.id && edge.dst !== symbol.id) continue;
       const other = edge.src === symbol.id ? edge.dst : edge.src;
@@ -381,13 +512,26 @@ function rankSymbols(
       relationScore += kindWeight * (crossFile ? 2 : 1);
       if (edge.provenance === "static") relationScore += 4;
       if (edge.src === symbol.id && edge.firstLine > 0) {
-        if (edge.kind === "CALLS" && pathNodeIds.has(edge.dst))
-          focusLines.unshift(edge.firstLine);
-        else focusLines.push(edge.firstLine);
+        edgeFocusLines.push(edge.firstLine);
       }
       if (crossFile && edge.kind === "CALLS" && edge.dst === symbol.id)
         importance = Math.max(importance, 6);
       else if (edge.kind !== "CONTAINS") importance = Math.max(importance, 3);
+      if (
+        edge.kind === "REFS" &&
+        nodeById.get(other)?.isRoot &&
+        !isCallableSymbolKind(symbol.kind ?? "")
+      )
+        importance = Math.max(importance, 7);
+      if (
+        edge.dst === symbol.id &&
+        nodeById.get(other)?.isRoot &&
+        (edge.kind === "CALLS" ||
+          (edge.kind === "REFS" && edge.rel === "function"))
+      ) {
+        directRootFlow = true;
+        importance = Math.max(importance, 9);
+      }
     }
     return {
       symbol,
@@ -396,20 +540,168 @@ function rankSymbols(
         importance * 100 +
         relationScore +
         (nodeScores.get(symbol.id) ?? 0) * 100,
-      focusLines: [...new Set(focusLines)],
-      spine: pathNodeIds.has(symbol.id),
-      skeleton:
-        skeletonNodeIds.has(symbol.id) &&
-        !node?.isRoot &&
-        !pathNodeIds.has(symbol.id),
+      focusLines: rankFocusLines(
+        symbol,
+        flowLines,
+        queryFocusLine,
+        edgeFocusLines,
+        terms,
+      ),
+      spine: pathNodeIds.has(symbol.id) || directRootFlow,
+      skeleton: skeletonNodeIds.has(symbol.id),
+      flowFocus: flowFocusLines.has(symbol.id),
+      queryCoverage,
+      pathPriority: pathPriority.get(symbol.id) ?? Number.POSITIVE_INFINITY,
     };
   });
+}
+
+function rankFocusLines(
+  symbol: ExploreSymbolSnippet,
+  flowLines: readonly number[],
+  queryLine: number | undefined,
+  edgeLines: readonly number[],
+  terms: readonly string[],
+): number[] {
+  const content = symbol.content.split(/\r?\n/);
+  const firstLine = startLine(symbol.range);
+  const concepts = (line: number) => {
+    const index = line - firstLine;
+    return semanticTermsCovered(
+      content
+        .slice(Math.max(0, index - 2), Math.min(content.length, index + 3))
+        .join(" "),
+      terms,
+    );
+  };
+  const flow = new Set(flowLines);
+  const ordered: number[] = [];
+  const covered = new Set<string>();
+  const candidates = [
+    ...new Set([...flowLines, ...edgeLines, ...(queryLine ? [queryLine] : [])]),
+  ];
+  while (candidates.length > 0) {
+    candidates.sort((left, right) => {
+      const leftTerms = concepts(left);
+      const rightTerms = concepts(right);
+      const leftNovel = [...leftTerms].filter(
+        (term) => !covered.has(term),
+      ).length;
+      const rightNovel = [...rightTerms].filter(
+        (term) => !covered.has(term),
+      ).length;
+      return (
+        rightNovel - leftNovel ||
+        rightTerms.size - leftTerms.size ||
+        Number(right === queryLine) - Number(left === queryLine) ||
+        Number(flow.has(right)) - Number(flow.has(left)) ||
+        left - right
+      );
+    });
+    const line = candidates.shift()!;
+    ordered.push(line);
+    for (const term of concepts(line)) covered.add(term);
+  }
+  return ordered;
+}
+
+function bestQueryFocusLine(
+  symbol: ExploreSymbolSnippet,
+  terms: readonly string[],
+): number | undefined {
+  const rows = symbol.content.split(/\r?\n/).map((line, index) => ({
+    index,
+    terms: semanticTermsCovered(line, terms),
+  }));
+  const frequency = new Map<string, number>();
+  for (const row of rows)
+    for (const term of row.terms)
+      frequency.set(term, (frequency.get(term) ?? 0) + 1);
+  const best = rows
+    .filter((row) => row.terms.size > 0)
+    .map((row) => ({
+      ...row,
+      score: [...row.terms].reduce(
+        (sum, term) => sum + 1 / (frequency.get(term) ?? 1),
+        0,
+      ),
+    }))
+    .sort(
+      (left, right) =>
+        right.terms.size - left.terms.size ||
+        right.score - left.score ||
+        left.index - right.index,
+    )[0];
+  return best ? startLine(symbol.range) + best.index : undefined;
+}
+
+function collectFlowFocusLines(
+  paths: readonly ExploreCallPath[],
+  edges: readonly ExploreEdge[],
+  boundaries: readonly DynamicBoundary[],
+  terms: readonly string[],
+): Map<string, number[]> {
+  const transitions = new Set<string>();
+  for (const path of paths)
+    for (let index = 0; index < path.nodes.length; index += 1) {
+      if (index + 1 >= path.nodes.length) continue;
+      transitions.add(`${path.nodes[index]}\0${path.nodes[index + 1]}`);
+    }
+  const lines = new Map<string, number[]>();
+  const add = (id: string, line: number | undefined) => {
+    if (!line || line <= 0) return;
+    const values = lines.get(id) ?? [];
+    if (!values.includes(line)) values.push(line);
+    lines.set(id, values);
+  };
+  for (const edge of edges)
+    if (transitions.has(`${edge.src}\0${edge.dst}`))
+      add(edge.src, edge.firstLine);
+  for (const boundary of [...boundaries].sort(
+    (left, right) =>
+      semanticTermsCovered(right.target.raw, terms).size -
+        semanticTermsCovered(left.target.raw, terms).size ||
+      Number(right.candidateDetails.length > 0) -
+        Number(left.candidateDetails.length > 0) ||
+      (left.line ?? Number.MAX_SAFE_INTEGER) -
+        (right.line ?? Number.MAX_SAFE_INTEGER),
+  ))
+    add(boundary.sourceId, boundary.line);
+  return lines;
+}
+
+function enclosingOwners(
+  storage: GraphReader,
+  files: readonly {
+    fileId: string;
+    clustered: readonly SymbolCluster[];
+  }[],
+): Map<string, StoredEntity> {
+  const fileBySymbol = new Map<string, string>();
+  for (const file of files) {
+    const representative = file.clustered
+      .flatMap((cluster) => cluster.symbols)
+      .filter(({ symbol }) => Boolean(symbol.scope))
+      .sort((left, right) => right.score - left.score)[0]?.symbol;
+    if (representative) fileBySymbol.set(representative.id, file.fileId);
+  }
+  const owners = new Map<string, StoredEntity>();
+  for (const neighbor of storage.expandContainers(
+    [...fileBySymbol.keys()],
+    1,
+  )) {
+    const fileId = fileBySymbol.get(neighbor.sid);
+    const owner = storage.getEntity(neighbor.parent_id);
+    if (fileId && owner?.file.id === fileId) owners.set(fileId, owner);
+  }
+  return owners;
 }
 
 function renderFileText(
   clusters: readonly SymbolCluster[],
   budget: number,
   sourceLines: readonly string[] | null,
+  owner?: StoredEntity,
 ): { text: string; symbols: ExploreSymbolSnippet[] } {
   if (budget <= 0 || clusters.length === 0) return { text: "", symbols: [] };
   const gap = "\n\n... (gap) ...\n\n";
@@ -417,9 +709,16 @@ function renderFileText(
   // discarded every lower tier before budgeting, which left large context
   // budgets unused and hid useful implementation details from dense files.
   const ranked = [...clusters].sort((a, b) => {
+    const rootDifference =
+      Number(b.maxImportance >= 10) - Number(a.maxImportance >= 10);
+    if (rootDifference !== 0) return rootDifference;
+    if (a.spine !== b.spine) return Number(b.spine) - Number(a.spine);
+    if (a.minPathPriority !== b.minPathPriority)
+      return a.minPathPriority - b.minPathPriority;
+    if (b.maxQueryCoverage !== a.maxQueryCoverage)
+      return b.maxQueryCoverage - a.maxQueryCoverage;
     if (b.maxImportance !== a.maxImportance)
       return b.maxImportance - a.maxImportance;
-    if (a.spine !== b.spine) return Number(b.spine) - Number(a.spine);
     if (b.score !== a.score) return b.score - a.score;
     const densityA = a.score / Math.max(1, a.end - a.start + 1);
     const densityB = b.score / Math.max(1, b.end - b.start + 1);
@@ -434,13 +733,14 @@ function renderFileText(
         : "",
     ]),
   );
+  const ownerContext = renderOwnerContext(owner, sourceLines, budget);
   const chosen = new Set<SymbolCluster>();
   const renderedByCluster = new Map<SymbolCluster, string>();
-  let projected = 0;
+  let projected = ownerContext.length;
   for (const [index, cluster] of ranked.entries()) {
     const remaining = Math.max(
       0,
-      budget - projected - (chosen.size ? gap.length : 0),
+      budget - projected - (chosen.size || ownerContext ? gap.length : 0),
     );
     if (remaining <= 0) continue;
     const complete = completeBlocks.get(cluster) ?? "";
@@ -462,22 +762,54 @@ function renderFileText(
     if (chosen.size === 0 || projected + gap.length + block.length <= budget) {
       chosen.add(cluster);
       renderedByCluster.set(cluster, block);
-      projected += block.length + (chosen.size > 1 ? gap.length : 0);
+      projected +=
+        block.length + (chosen.size > 1 || ownerContext ? gap.length : 0);
     }
   }
-  const ordered = [...chosen].sort((a, b) => a.start - b.start);
-  const parts: string[] = [];
+  const ordered = [...chosen];
+  const parts: string[] = ownerContext ? [ownerContext] : [];
   const selected: ExploreSymbolSnippet[] = [];
   for (const cluster of ordered) {
     const remaining =
       budget - parts.join(gap).length - (parts.length ? gap.length : 0);
     if (remaining <= 0) break;
-    const block = (renderedByCluster.get(cluster) ?? "").slice(0, remaining);
+    const block = truncateSource(
+      renderedByCluster.get(cluster) ?? "",
+      remaining,
+    );
     if (!block) continue;
     parts.push(block);
     selected.push(...cluster.symbols.map((item) => item.symbol));
   }
-  return { text: parts.join(gap).slice(0, budget), symbols: selected };
+  return { text: parts.join(gap), symbols: selected };
+}
+
+function renderOwnerContext(
+  owner: StoredEntity | undefined,
+  sourceLines: readonly string[] | null,
+  budget: number,
+): string {
+  if (!owner || !sourceLines || budget < 80) return "";
+  const line = startLine(owner.entity.range) - 1;
+  const start = leadingAnnotationStart(sourceLines, line);
+  let end = line + 1;
+  while (end < Math.min(sourceLines.length, line + 5)) {
+    const declaration = sourceLines.slice(line, end).join("\n");
+    if (declaration.includes("{") || declaration.trimEnd().endsWith(":")) break;
+    end += 1;
+  }
+  const annotations = sourceLines.slice(start, line);
+  const declaration = sourceLines.slice(line, end).join("\n");
+  const brace = declaration.indexOf("{");
+  const headerSource = [
+    ...annotations,
+    brace >= 0 ? declaration.slice(0, brace + 1) : declaration,
+  ].join("\n");
+  const metadata = owner.entity.metadata;
+  const name = metadata?.kind === "code" ? metadata.symbolName : "container";
+  const header = `// enclosing ${name} L${start + 1}-${end}`;
+  const source = numberSourceLines(headerSource, start + 1, end);
+  return truncateSource(`${header}\n${source}`, Math.min(700, budget));
 }
 
 function laterCompleteBodyCost(
@@ -509,7 +841,11 @@ function renderCluster(
     const symbol = item.symbol;
     const start = startLine(symbol.range);
     const end = endLine(symbol.range);
-    const header = `// ${symbol.kind ?? "sym"} ${symbol.name} L${start}-${end}`;
+    const label =
+      symbol.scope && symbol.scope !== symbol.name
+        ? `${symbol.scope}::${symbol.name}`
+        : symbol.name;
+    const header = `// ${symbol.kind ?? "sym"} ${label} L${start}-${end}`;
     const remaining = budget - blocks.join("\n").length - header.length - 2;
     if (remaining <= 8) continue;
     const body = item.skeleton
@@ -530,7 +866,7 @@ function renderCluster(
       continue;
     blocks.push(block);
   }
-  return blocks.join("\n").slice(0, budget);
+  return blocks.join("\n");
 }
 
 function renderSymbolSource(
@@ -540,39 +876,69 @@ function renderSymbolSource(
   allowTruncate: boolean,
   sourceLines: readonly string[] | null,
 ): string {
-  const content = sourceForSymbol(symbol, sourceLines);
+  const source = sourceForSymbol(symbol, sourceLines);
+  const content = source.text;
   const numbered = numberSourceLines(
     content,
-    startLine(symbol.range),
+    source.startLine,
     endLine(symbol.range),
   );
   if (numbered.length <= budget) return numbered;
   if (!allowTruncate) return "";
 
   const lines = content.split(/\r?\n/);
-  const focus = focusLines.find(
-    (line) => line >= startLine(symbol.range) && line <= endLine(symbol.range),
+  const symbolStart = source.startLine;
+  const hasFocusedCall = focusLines.some(
+    (line) => line >= symbolStart && line <= endLine(symbol.range),
   );
-  const headCount = Math.min(18, Math.max(6, Math.floor(lines.length / 3)));
+  const headCount = Math.min(
+    hasFocusedCall ? 24 : 18,
+    Math.max(hasFocusedCall ? 8 : 6, Math.floor(lines.length / 3)),
+  );
   const head = numberSourceLines(
     lines.slice(0, headCount).join("\n"),
-    startLine(symbol.range),
-    startLine(symbol.range) + headCount - 1,
-  );
-  const focusIndex = focus ? focus - startLine(symbol.range) : lines.length - 1;
-  const windowStart = Math.max(headCount, focusIndex - 14);
-  const windowEnd = Math.min(lines.length, focusIndex + 15);
-  const window = numberSourceLines(
-    lines.slice(windowStart, windowEnd).join("\n"),
-    startLine(symbol.range) + windowStart,
-    startLine(symbol.range) + windowEnd - 1,
+    symbolStart,
+    symbolStart + headCount - 1,
   );
   const marker = "\n... (focused call-site window) ...\n";
-  const combined = window ? `${head}${marker}${window}` : head;
-  if (combined.length <= budget) return combined;
-  const truncated = "// ... truncated";
-  return `${combined.slice(0, Math.max(0, budget - truncated.length))}${truncated}`.slice(
-    0,
+  const windows: Array<{ start: number; end: number }> = [];
+  const focusIndexes = focusLines
+    .filter((line) => line >= symbolStart && line <= endLine(symbol.range))
+    .map((line) => line - symbolStart)
+    .filter((index) => index >= headCount);
+  const indexes =
+    focusIndexes.length > 0
+      ? [...new Set([...focusIndexes, lines.length - 1])]
+      : [lines.length - 1];
+  for (const index of indexes) {
+    const contextBefore = index === lines.length - 1 ? 10 : 8;
+    const start = Math.max(headCount, index - contextBefore);
+    const end = Math.min(lines.length, index + 12);
+    if (windows.some((window) => start < window.end && end > window.start))
+      continue;
+    windows.push({ start, end });
+  }
+  const excerpts: Array<{ start: number; text: string }> = [];
+  let remaining = budget - head.length;
+  for (const window of windows) {
+    const block = numberSourceLines(
+      lines.slice(window.start, window.end).join("\n"),
+      symbolStart + window.start,
+      symbolStart + window.end - 1,
+    );
+    if (remaining <= marker.length) break;
+    const excerpt =
+      window.end === lines.length
+        ? sourceSuffix(block, remaining - marker.length)
+        : sourcePrefix(block, remaining - marker.length);
+    if (!excerpt) break;
+    excerpts.push({ start: window.start, text: excerpt });
+    remaining -= marker.length + excerpt.length;
+    if (excerpt.length < block.length) break;
+  }
+  excerpts.sort((left, right) => left.start - right.start);
+  return truncateSource(
+    [head, ...excerpts.map((excerpt) => excerpt.text)].join(marker),
     budget,
   );
 }
@@ -596,7 +962,35 @@ function renderSymbolSkeleton(
     startLine(symbol.range),
   );
   const marker = "\n// ... implementation body elided (polymorphic sibling)";
-  return `${numbered}${marker}`.slice(0, budget);
+  const rendered = `${numbered}${marker}`;
+  return rendered.length <= budget
+    ? rendered
+    : truncateSource(numbered, budget, marker);
+}
+
+function sourcePrefix(text: string, budget: number): string {
+  if (text.length <= budget) return text;
+  const prefix = text.slice(0, budget);
+  const newline = prefix.lastIndexOf("\n");
+  return (newline > 0 ? prefix.slice(0, newline) : "").trimEnd();
+}
+
+function sourceSuffix(text: string, budget: number): string {
+  if (text.length <= budget) return text;
+  const suffix = text.slice(-budget);
+  const newline = suffix.indexOf("\n");
+  return (newline >= 0 ? suffix.slice(newline + 1) : "").trimStart();
+}
+
+function truncateSource(
+  text: string,
+  budget: number,
+  marker = "\n// ... truncated",
+): string {
+  if (text.length <= budget) return text;
+  if (budget <= marker.length) return marker.slice(0, budget);
+  const prefix = sourcePrefix(text, budget - marker.length);
+  return `${prefix}${marker}`;
 }
 
 const ENVELOPE_KINDS = new Set([
@@ -612,14 +1006,44 @@ const ENVELOPE_KINDS = new Set([
 function sourceForSymbol(
   symbol: ExploreSymbolSnippet,
   sourceLines: readonly string[] | null,
-): string {
+): { text: string; startLine: number } {
+  const symbolStartLine = startLine(symbol.range);
   if (!sourceLines || ENVELOPE_KINDS.has(symbol.kind ?? "")) {
-    return symbol.content.trimEnd();
+    return { text: symbol.content.trimEnd(), startLine: symbolStartLine };
   }
-  const start = Math.max(0, startLine(symbol.range) - 1);
+  const start = leadingAnnotationStart(sourceLines, symbolStartLine - 1);
   const end = Math.min(sourceLines.length, endLine(symbol.range));
-  if (end <= start) return symbol.content.trimEnd();
-  return sourceLines.slice(start, end).join("\n").trimEnd();
+  if (end <= start)
+    return { text: symbol.content.trimEnd(), startLine: symbolStartLine };
+  return {
+    text: sourceLines.slice(start, end).join("\n").trimEnd(),
+    startLine: start + 1,
+  };
+}
+
+function leadingAnnotationStart(
+  lines: readonly string[],
+  declarationIndex: number,
+): number {
+  let start = declarationIndex;
+  while (start > 0) {
+    let balance = 0;
+    let annotation = -1;
+    for (let cursor = start - 1; cursor >= Math.max(0, start - 12); cursor--) {
+      const line = lines[cursor].trim();
+      balance +=
+        (line.match(/[)\]}]/g)?.length ?? 0) -
+        (line.match(/[([{]/g)?.length ?? 0);
+      if (line.startsWith("@") && balance <= 0) {
+        annotation = cursor;
+        break;
+      }
+      if (balance <= 0) break;
+    }
+    if (annotation < 0) break;
+    start = annotation;
+  }
+  return start;
 }
 
 function numberSourceLines(

@@ -25,11 +25,18 @@ export const INHERITABLE_SYMBOL_KIND_SET: ReadonlySet<string> = new Set(
   INHERITABLE_SYMBOL_KINDS,
 );
 
+/** Nominal types that may be selected by an explicit construction site. */
+export const CONSTRUCTIBLE_SYMBOL_KIND_SET: ReadonlySet<string> = new Set([
+  "class",
+  "struct",
+]);
+
 /** Type-like symbols used by Explore seed and impact policy. */
 export const TYPE_SYMBOL_KIND_SET: ReadonlySet<string> = new Set([
   ...INHERITABLE_SYMBOL_KINDS,
   "component",
   "enum",
+  "alias",
   "union",
 ]);
 

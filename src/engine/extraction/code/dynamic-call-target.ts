@@ -38,7 +38,7 @@ export function dynamicCallTarget(
       raw,
       receiver.text,
       "getattr",
-      stringLiteralValue(keyNode.text),
+      stringLiteralValue(keyNode.text) ?? stringPrefix(keyNode),
     );
   }
 
@@ -63,27 +63,13 @@ export function isReflectionHelperCall(node: TSNode): boolean {
 export function dynamicCallableAssignment(
   node: TSNode,
 ): DynamicCallableBinding | undefined {
-  if (node.type !== "assignment") return undefined;
-  const left = node.childForFieldName("left");
-  const right = node.childForFieldName("right");
-  if (
-    !left ||
-    !right ||
-    !IDENTIFIER.test(left.text) ||
-    !isCallExpression(right)
-  )
-    return undefined;
-  const fn = right.childForFieldName("function") ?? right.namedChildren[0];
-  const argsNode =
-    right.childForFieldName("arguments") ?? right.namedChildren[1];
-  const args = argsNode?.namedChildren ?? [];
-  if (fn?.text !== "getattr" || args.length < 2 || !args[0] || !args[1])
-    return undefined;
-  const key = stringLiteralValue(args[1].text) ?? stringPrefix(args[1]);
-  return {
-    name: left.text,
-    target: target(right.text, args[0].text, "getattr", key),
-  };
+  const left = node.childForFieldName("left") ?? node.childForFieldName("name");
+  const right =
+    node.childForFieldName("right") ?? node.childForFieldName("value");
+  if (!left || !right || !IDENTIFIER.test(left.text)) return undefined;
+  const computed = dynamicCallTarget(right, right.text);
+  if (computed) return { name: left.text, target: computed };
+  return undefined;
 }
 
 function reflectionCallTarget(

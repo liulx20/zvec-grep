@@ -80,7 +80,12 @@ export type DynamicBoundary = {
     targetId: string;
     displayName?: string;
     filePath?: string;
-    reason: "hierarchy" | "generic_bound" | "method_set" | "function_pointer";
+    reason:
+      | "hierarchy"
+      | "generic_bound"
+      | "method_set"
+      | "function_pointer"
+      | "namespace_export";
     confidence: number;
   }[];
 };
@@ -164,6 +169,7 @@ export type ImportRawRef = RawRefBase & {
   ref_kind: "import";
   source_language?: string;
   rust_inline_module_depth?: number;
+  reexport?: boolean;
 };
 
 export type ImportBindingRawRef = RawRefBase & {
@@ -173,6 +179,7 @@ export type ImportBindingRawRef = RawRefBase & {
   local_name: string;
   source_language: string;
   rust_inline_module_depth?: number;
+  reexport?: boolean;
 };
 
 export type RawRef = SymbolRawRef | ImportRawRef | ImportBindingRawRef;

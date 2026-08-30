@@ -228,9 +228,13 @@ export class SqliteGraphWriter {
         ref.type === "symbol" ? (ref.target.receiver?.name ?? null) : null,
         ref.type === "symbol" && ref.target.hints
           ? JSON.stringify(ref.target.hints)
-          : ref.type !== "symbol" && ref.rust_inline_module_depth
+          : ref.type !== "symbol" &&
+              (ref.rust_inline_module_depth || ref.reexport)
             ? JSON.stringify({
-                rustInlineModuleDepth: ref.rust_inline_module_depth,
+                ...(ref.rust_inline_module_depth
+                  ? { rustInlineModuleDepth: ref.rust_inline_module_depth }
+                  : {}),
+                ...(ref.reexport ? { reexport: true } : {}),
               })
             : null,
       );
@@ -321,6 +325,13 @@ export class SqliteGraphWriter {
              )) candidate_type
              WHERE candidate_type.value IN (SELECT value FROM json_each(?))
            )
+           OR EXISTS(
+             SELECT 1 FROM json_each(COALESCE(
+               json_extract(edge.resolution_hints,
+                            '$.resolutionDependencies'),'[]'
+             )) dependency
+             WHERE dependency.value IN (SELECT value FROM json_each(?))
+           )
            )
          )
        )
@@ -332,7 +343,33 @@ export class SqliteGraphWriter {
          ON unresolved_source.id=unresolved.owner_id AND unresolved.owner_is_file=0
        LEFT JOIN contains ownership ON ownership.child_id=candidate.target_id
        LEFT JOIN symbols container ON container.id=ownership.parent_id
-       WHERE target.file_id=? OR (?<>'[]' AND (
+       WHERE target.file_id=?
+         OR (unresolved.status='dynamic' AND EXISTS(
+           SELECT 1 FROM edges namespace_import
+           WHERE namespace_import.kind='IMPORTS'
+             AND namespace_import.src_is_file=1
+             AND namespace_import.dst_is_file=1
+             AND namespace_import.imported_name='*'
+             AND namespace_import.src_id=CASE
+               WHEN unresolved.owner_is_file=1 THEN unresolved.owner_id
+               ELSE unresolved_source.file_id
+             END
+             AND namespace_import.dst_id IN (
+               SELECT file_id FROM affected_importers
+             )
+             AND (
+               namespace_import.local_name=unresolved.receiver_name
+               OR namespace_import.local_name IN (
+                 SELECT value FROM json_each(COALESCE(
+                   json_extract(
+                     unresolved.resolution_hints,
+                     '$.dynamicDispatch.receiverSources'
+                   ),'[]'
+                 ))
+               )
+             )
+         ))
+         OR (?<>'[]' AND (
          container.name IN (SELECT value FROM json_each(?))
          OR ((unresolved.member_name IN (SELECT value FROM json_each(?))
               OR unresolved.ref_name IN (SELECT value FROM json_each(?)))
@@ -346,6 +383,13 @@ export class SqliteGraphWriter {
              json_extract(unresolved.resolution_hints,'$.candidateTypes'),'[]'
            )) candidate_type
            WHERE candidate_type.value IN (SELECT value FROM json_each(?))
+         )
+         OR EXISTS(
+           SELECT 1 FROM json_each(COALESCE(
+             json_extract(unresolved.resolution_hints,
+                          '$.resolutionDependencies'),'[]'
+           )) dependency
+           WHERE dependency.value IN (SELECT value FROM json_each(?))
          )
        ))`,
       fileId,
@@ -361,7 +405,9 @@ export class SqliteGraphWriter {
       names,
       names,
       names,
+      names,
       fileId,
+      names,
       names,
       names,
       names,

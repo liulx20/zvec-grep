@@ -177,9 +177,15 @@ test("explore formats one bounded global relationships section", () => {
       edge("f"),
       edge("g"),
       edge("a", "CONTAINS"),
+      { ...edge("b"), src: "a" },
     ],
     edgesTruncated: false,
-    callPaths: [],
+    callPaths: [
+      { from: "root", to: "a", nodes: ["root", "a"] },
+      { from: "root", to: "a", nodes: ["root", "a"] },
+      { from: "root", to: "b", nodes: ["root", "a", "b"] },
+      { from: "a", to: "b", nodes: ["a", "b"] },
+    ],
     blastRadius: [],
     changeSurface: [],
     dynamicBoundaries: [],
@@ -202,7 +208,10 @@ test("explore formats one bounded global relationships section", () => {
   assert.equal(output.includes("relations:"), false);
   assert.equal(output.includes("CONTAINS:"), false);
   assert.match(output, /do not re-read displayed ranges unless marked indexed/);
-  assert.match(output, /CALLS:\n(?:- .*\n){6}- \.\.\. and 1 more/);
+  assert.match(output, /flow:\n1\. root -CALLS-> a -CALLS-> b/);
+  assert.doesNotMatch(output, /^2\. root -CALLS-> a/m);
+  assert.doesNotMatch(output, /^2\. a -CALLS-> b/m);
+  assert.match(output, /CALLS:\n(?:- .*\n){6}- \.\.\. and 2 more/);
   assert.match(
     output,
     /src\/a\.ts \(central, score=1\.0000\)\nselected: root\(root\)\nsource:/,
@@ -920,6 +929,7 @@ test("relationship summary prioritizes root and call-path edges", () => {
   const nodes = [
     node("root", "root-file"),
     node("path", "path-file"),
+    node("hidden", "hidden-file"),
     ...Array.from({ length: 7 }, (_, index) => node(`noise-${index}`, null)),
   ];
   const output = formatExploreResult({
@@ -932,6 +942,7 @@ test("relationship summary prioritizes root and call-path edges", () => {
         edge(`noise-${index}`, `noise-${(index + 1) % 7}`),
       ),
       edge("root", "path"),
+      edge("root", "hidden"),
     ],
     edgesTruncated: false,
     callPaths: [{ from: "root", to: "path", nodes: ["root", "path"] }],
@@ -954,6 +965,7 @@ test("relationship summary prioritizes root and call-path edges", () => {
 
   assert.match(output, /flow:\n1\. root -CALLS-> path/);
   assert.match(output, /CALLS:\n- root -CALLS-> path/);
+  assert.match(output, /root -CALLS-> hidden/);
 });
 
 test("relationship summary qualifies constructors and omits hidden-file edges", () => {

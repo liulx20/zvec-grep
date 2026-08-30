@@ -1,6 +1,7 @@
 import type { NameIndex } from "./name-index.js";
 import {
   CALLABLE_SYMBOL_KIND_SET,
+  CONSTRUCTIBLE_SYMBOL_KIND_SET,
   INHERITABLE_SYMBOL_KIND_SET,
 } from "./symbol-kinds.js";
 import {
@@ -13,6 +14,10 @@ import type { PendingRef, RefResolveResult } from "./types.js";
 const CALL_TARGET_KINDS: ReadonlySet<string> = new Set([
   ...CALLABLE_SYMBOL_KIND_SET,
   ...INHERITABLE_SYMBOL_KIND_SET,
+]);
+const IMPORTED_CALL_TARGET_KINDS: ReadonlySet<string> = new Set([
+  ...CALL_TARGET_KINDS,
+  "value",
 ]);
 
 export function resolveRef(
@@ -39,6 +44,10 @@ export function resolveRef(
     ownerContainerName: sourceContainerName,
   });
   const plan = referenceResolutionPolicy.lookupPlan(context);
+  const targetKinds =
+    ref.ref_kind === "call" && binding?.kind === "exact"
+      ? IMPORTED_CALL_TARGET_KINDS
+      : allowedKinds(ref.ref_kind);
   const containerNames =
     plan.containerScope.kind === "named" ? [plan.containerScope.name] : [];
   const containerIds =
@@ -57,12 +66,12 @@ export function resolveRef(
       ? names.uniqueTopLevelCandidate(
           plan.lookupName,
           binding.fileId,
-          allowedKinds(ref.ref_kind),
+          targetKinds,
         )
       : null;
   const defaultExportHit =
     binding?.kind === "exact" && binding.importedName === "default"
-      ? names.defaultExport(binding.fileId, allowedKinds(ref.ref_kind))
+      ? names.defaultExport(binding.fileId, targetKinds)
       : null;
   if (defaultExportHit) {
     return {
@@ -84,14 +93,15 @@ export function resolveRef(
       evidence: "preferred_file",
     };
   }
+  const exactImport = binding?.kind === "exact";
   let hit = names.lookupWithEvidence(
     plan.lookupName,
-    ref.src_file,
+    exactImport ? binding.fileId : ref.src_file,
     plan.preferredFileIds,
     plan.allowBareFallback,
     containerNames,
     containerIds,
-    allowedKinds(ref.ref_kind),
+    targetKinds,
   );
   if (!hit && plan.containerScope.kind === "owner-preferred") {
     hit = names.lookupWithEvidence(
@@ -101,7 +111,7 @@ export function resolveRef(
       plan.allowBareFallback,
       containerNames,
       [],
-      allowedKinds(ref.ref_kind),
+      targetKinds,
     );
   }
   if (!hit)
@@ -119,7 +129,7 @@ export function resolveRef(
     status: "resolved",
     dst: hit.entry.id,
     edgeKind,
-    evidence: hit.evidence,
+    evidence: exactImport ? "preferred_file" : hit.evidence,
   };
 }
 
@@ -132,7 +142,7 @@ function allowedKinds(kind: string): ReadonlySet<string> | undefined {
   // call, while C-family `new` sites are tagged explicitly. A cross-file class
   // such as `Graphiti(...)` must therefore remain a valid call target.
   if (kind === "call") return CALL_TARGET_KINDS;
-  if (kind === "new") return INHERITABLE_SYMBOL_KIND_SET;
+  if (kind === "new") return CONSTRUCTIBLE_SYMBOL_KIND_SET;
   return undefined;
 }
 

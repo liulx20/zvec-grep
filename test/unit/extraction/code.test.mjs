@@ -100,6 +100,60 @@ test("code extractor preserves TypeScript metadata, scope, and source ranges", a
   );
 });
 
+test("code extractor attaches declaration decorators to the decorated member", async () => {
+  const analysis = await new CodeExtractor().analyzeForIndexing(
+    codeSource(
+      "typescript",
+      [
+        "class Controller {",
+        "  @Route('queue/:id')",
+        "  queue(@Param('id') id: string) { return id; }",
+        "}",
+      ].join("\n"),
+    ),
+  );
+  const queue = analysis.fragments.find(
+    ({ fragment }) => fragment.metadata?.symbolName === "queue",
+  );
+  assert.ok(queue);
+  assert.match(queue.embeddingText ?? "", /^@Route\('queue\/:id'\)/);
+
+  const decorated = analysis.refs.flatMap((owner) =>
+    owner.sites
+      .filter((site) => site.kind === "decorates")
+      .map((site) => ({ owner: owner.name, name: site.name })),
+  );
+  assert.deepEqual(decorated, [
+    { owner: "queue", name: "Param" },
+    { owner: "queue", name: "Route" },
+  ]);
+});
+
+test("code extractor indexes callable TypeScript class fields", async () => {
+  const fragments = await new CodeExtractor().extract(
+    codeSource(
+      "typescript",
+      `class Client {
+  #invoke(value: string) { return value; }
+  invoke: {
+    (value: string): string;
+    use(handler: () => void): void;
+  } = Object.assign(this.#invoke, { use(handler: () => void) { handler(); } });
+}`,
+      "client.ts",
+    ),
+  );
+  const invoke = fragments.find(
+    (fragment) =>
+      fragment.metadata?.kind === "code" &&
+      fragment.metadata.symbolName === "invoke",
+  );
+  assert.ok(invoke);
+  assert.equal(invoke.metadata.symbolType, "function");
+  assert.equal(invoke.metadata.scope, "Client");
+  assert.equal(invoke.metadata.nodeType, "public_field_definition");
+});
+
 test("code extractor finds actions returned by an exported object factory", async () => {
   const extractor = new CodeExtractor();
   const fragments = await extractor.extract(
@@ -170,6 +224,25 @@ test("code extractor finds actions returned by an exported object factory", asyn
     ["fetchMenu", "reset", "upperName"],
   );
 
+  const nestedFactory = await extractor.extract(
+    codeSource(
+      "typescript",
+      `export const api = createApi({
+  endpoints: build => ({
+    load: build.query({ queryFn: async () => fetchData() }),
+  }),
+});`,
+      "api.ts",
+    ),
+  );
+  const queryFn = nestedFactory.find(
+    (fragment) =>
+      fragment.metadata.kind === "code" &&
+      fragment.metadata.symbolName === "queryFn",
+  );
+  assert.ok(queryFn);
+  assert.equal(queryFn.metadata.scope, "api::endpoints::load");
+
   const exportedBindings = await extractor.extract(
     codeSource(
       "javascript",
@@ -200,7 +273,7 @@ export default { namespaced: true, mutations, commands: actions };`,
   const getList = async () => fetchList();
   function pushItem(item: string) { list.push(item); }
   const hidden = () => false;
-  return { list, getList, pushItem };
+  return { list, refresh: getList, getList, pushItem };
 });`,
       "setup-store.ts",
     ),
@@ -212,12 +285,34 @@ export default { namespaced: true, mutations, commands: actions };`,
   );
   assert.deepEqual(
     setupActions.map((fragment) => fragment.metadata.symbolName).sort(),
-    ["getList", "pushItem"],
+    ["getList", "pushItem", "refresh"],
   );
   assert.equal(
     setupActions.every(
       (fragment) => fragment.metadata.scope === "useChatStore",
     ),
+    true,
+  );
+});
+
+test("code extractor indexes destructured module bindings independently", async () => {
+  const fragments = await new CodeExtractor().extract(
+    codeSource(
+      "typescript",
+      "export const { useFooQuery, useBarQuery: useAlias } = api;",
+      "api.ts",
+    ),
+  );
+  const bindings = fragments.filter(
+    (fragment) => fragment.metadata?.symbolType === "value",
+  );
+
+  assert.deepEqual(
+    bindings.map((fragment) => fragment.metadata.symbolName).sort(),
+    ["useAlias", "useFooQuery"],
+  );
+  assert.equal(
+    bindings.every((fragment) => fragment.metadata.scope === null),
     true,
   );
 });

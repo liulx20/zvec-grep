@@ -246,6 +246,25 @@ test("collectImportSpecs ignores commas inside JS comments", async () => {
   ]);
 });
 
+test("collectImportSpecs preserves namespace re-export bindings", async () => {
+  const file = codeFile("barrel", "src/barrel.ts");
+  assert.deepEqual(
+    await collectImportSpecs({
+      kind: "text",
+      file,
+      text: 'export * as Api from "./api";\n',
+    }),
+    [
+      {
+        spec: "./api",
+        line: 1,
+        bindings: [{ imported: "*", local: "Api" }],
+        reexport: true,
+      },
+    ],
+  );
+});
+
 test("extractFileGraph + resolvePending builds IMPORTS edges", async () => {
   const a = codeFile("file-a", "src/a.ts");
   const b = codeFile("file-b", "src/utils.ts");

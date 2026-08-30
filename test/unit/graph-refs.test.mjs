@@ -83,6 +83,76 @@ export function run(obj: { field: number }) {
   );
 });
 
+test("imported registry values remain connected through object composition and lookup", async () => {
+  const file = codeFile("registry.ts");
+  const graphInput = await extractGraph(
+    file,
+    `import { api, execute, implementation } from "./providers";
+
+export const registry = {
+  primary: { ...implementation, ...api },
+  execute,
+};
+
+export function dispatch(key: string) {
+  const selected = registry[key];
+  return selected.run();
+}`,
+  );
+
+  const registry = graphInput.nodes.find((node) => node.name === "registry");
+  const dispatch = graphInput.nodes.find((node) => node.name === "dispatch");
+  assert.ok(registry && dispatch);
+  const refs = graphInput.refs.map((ref) => ({
+    owner: ref.owner,
+    name: ref.ref_name,
+    kind: ref.ref_kind,
+  }));
+  for (const name of ["api", "execute", "implementation"]) {
+    assert.ok(
+      refs.some(
+        (ref) =>
+          ref.owner === registry.id &&
+          ref.name === name &&
+          ref.kind === "value",
+      ),
+      `expected registry to reference ${name}`,
+    );
+  }
+  assert.ok(
+    graphInput.edges.some(
+      (edge) =>
+        edge.src === dispatch.id &&
+        edge.dst === registry.id &&
+        edge.kind === "REFS" &&
+        edge.rel === "value",
+    ),
+    "expected indexed registry reads to preserve the registry dependency",
+  );
+});
+
+test("imported registries remain connected when iterated", async () => {
+  const graphInput = await extractGraph(
+    codeFile("factory.ts"),
+    `import { handlers } from "./registry";
+
+export function install(target: object) {
+  for (const handler of handlers) target[handler] = () => handler;
+}`,
+  );
+
+  const install = graphInput.nodes.find((node) => node.name === "install");
+  assert.ok(install);
+  assert.ok(
+    graphInput.refs.some(
+      (ref) =>
+        ref.owner === install.id &&
+        ref.ref_name === "handlers" &&
+        ref.ref_kind === "value",
+    ),
+  );
+});
+
 test("qualified call callees do not emit detached bare member refs", async () => {
   const file = codeFile("qualified-call.ts");
   const source = {

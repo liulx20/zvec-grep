@@ -1,0 +1,394 @@
+{
+  "suites": {
+    "tuning": ["cpp", "python"],
+    "holdout": ["java", "go", "rust"]
+  },
+  "repositories": {
+    "cpp": {
+      "directory": "neug",
+      "url": "https://github.com/alibaba/neug.git",
+      "commit": "98f294c"
+    },
+    "python": {
+      "directory": "graphiti",
+      "url": "https://github.com/getzep/graphiti.git",
+      "commit": "96ef997"
+    },
+    "java": {
+      "directory": "bench-java-spring-petclinic",
+      "url": "https://github.com/spring-projects/spring-petclinic.git",
+      "commit": "88e37c1"
+    },
+    "go": {
+      "directory": "bench-go-chi",
+      "url": "https://github.com/go-chi/chi.git",
+      "commit": "735ae2b"
+    },
+    "rust": {
+      "directory": "bench-rust-mini-redis",
+      "url": "https://github.com/tokio-rs/mini-redis.git",
+      "commit": "3d93b42"
+    }
+  },
+  "cases": [
+    {
+      "id": "cpp-exact",
+      "repository": "cpp",
+      "query": "NeugDB",
+      "expectedSymbols": ["NeugDB", "Open", "Close"],
+      "required": ["include/neug/main/neug_db.h", "src/main/neug_db.cc"],
+      "requiredOutput": ["~NeugDB -CALLS-> Close"],
+      "optional": [
+        "include/neug/main/connection_manager.h",
+        "include/neug/server/neug_db_service.h"
+      ],
+      "forbidden": []
+    },
+    {
+      "id": "cpp-flow",
+      "repository": "cpp",
+      "query": "checkpoint recovery WAL",
+      "expectedSymbols": [
+        "CheckpointCoordinator",
+        "execute",
+        "invokeActivationHandler"
+      ],
+      "required": [
+        "include/neug/main/checkpoint_coordinator.h",
+        "src/main/checkpoint_coordinator.cc",
+        "include/neug/storages/checkpoint.h",
+        "src/main/neug_db.cc"
+      ],
+      "requiredOutput": ["execute -CALLS-> invokeActivationHandler"],
+      "optional": [
+        "include/neug/main/wal_writer_set.h",
+        "src/main/wal_writer_set.cc",
+        "src/main/execution_slot.cc"
+      ],
+      "forbidden": []
+    },
+    {
+      "id": "cpp-interface",
+      "repository": "cpp",
+      "query": "IOperator",
+      "expectedSymbols": ["IOperator", "Eval", "Pipeline"],
+      "required": [
+        "include/neug/execution/execute/operator.h",
+        "src/execution/execute/pipeline.cc"
+      ],
+      "requiredFilePatterns": ["^src/execution/execute/ops/"],
+      "requiredOutput": [
+        "dynamic boundaries:",
+        "Eval",
+        "-INHERITS-> IOperator"
+      ],
+      "minFiles": 4,
+      "maxFiles": 8,
+      "optional": [],
+      "forbidden": []
+    },
+    {
+      "id": "cpp-type-family",
+      "repository": "cpp",
+      "query": "Expr",
+      "expectedSymbols": ["ExprBase"],
+      "required": ["include/neug/execution/expression/expr.h"],
+      "requiredAny": [
+        [
+          "src/execution/expression/expr.cc",
+          "src/execution/expression/exprs/struct_expr.cc",
+          "src/execution/expression/exprs/path_expr.cc",
+          "src/execution/expression/exprs/arith_expr.cc"
+        ]
+      ],
+      "requiredFilePatterns": ["expression/(?:accessors|exprs)/"],
+      "requiredOutput": ["roots: ExprBase", "-INHERITS-> ExprBase"],
+      "minFiles": 4,
+      "maxFiles": 8,
+      "optional": [],
+      "forbidden": []
+    },
+    {
+      "id": "python-exact",
+      "repository": "python",
+      "query": "Graphiti",
+      "expectedSymbols": ["Graphiti", "initialize", "ZepGraphiti"],
+      "required": ["graphiti_core/graphiti.py"],
+      "requiredOutput": [
+        "initialize -CALLS-> Graphiti",
+        "ZepGraphiti -INHERITS-> Graphiti"
+      ],
+      "optional": [],
+      "forbidden": []
+    },
+    {
+      "id": "python-flow",
+      "repository": "python",
+      "query": "resolve edge contradictions",
+      "expectedSymbols": ["resolve_edge_contradictions"],
+      "required": [
+        "graphiti_core/utils/maintenance/edge_operations.py",
+        "graphiti_core/utils/bulk_utils.py"
+      ],
+      "optional": [
+        "graphiti_core/prompts/dedupe_edges.py",
+        "graphiti_core/edges.py"
+      ],
+      "forbidden": ["graphiti_core/utils/maintenance/node_operations.py"]
+    },
+    {
+      "id": "python-interface-family",
+      "repository": "python",
+      "query": "EmbedderClient",
+      "expectedSymbols": [
+        "EmbedderClient",
+        "OpenAIEmbedder",
+        "GeminiEmbedder",
+        "AzureOpenAIEmbedderClient"
+      ],
+      "required": [
+        "graphiti_core/embedder/client.py",
+        "graphiti_core/embedder/openai.py",
+        "graphiti_core/embedder/gemini.py",
+        "graphiti_core/embedder/azure_openai.py"
+      ],
+      "requiredOutput": [
+        "OpenAIEmbedder -INHERITS-> EmbedderClient",
+        "GeminiEmbedder -INHERITS-> EmbedderClient",
+        "AzureOpenAIEmbedderClient -INHERITS-> EmbedderClient"
+      ],
+      "forbiddenOutput": [
+        "create@L41 -CALLS? confidence=0.35-> create@L31",
+        "create@L54 -CALLS? confidence=0.35-> create@L31"
+      ],
+      "minFiles": 4,
+      "maxFiles": 8,
+      "optional": ["mcp_server/src/services/factories.py"],
+      "forbidden": []
+    },
+    {
+      "id": "java-exact",
+      "repository": "java",
+      "query": "OwnerController",
+      "expectedSymbols": [
+        "OwnerController",
+        "Owner",
+        "OwnerRepository",
+        "processFindForm",
+        "findPaginatedForOwnersLastName"
+      ],
+      "required": [
+        "src/main/java/org/springframework/samples/petclinic/owner/OwnerController.java",
+        "src/main/java/org/springframework/samples/petclinic/owner/Owner.java",
+        "src/main/java/org/springframework/samples/petclinic/owner/OwnerRepository.java"
+      ],
+      "requiredOutput": [
+        "processFindForm -CALLS-> findPaginatedForOwnersLastName",
+        "change surface:",
+        "OwnerController type -> Owner",
+        "OwnerController type -> OwnerRepository"
+      ],
+      "optional": [],
+      "forbidden": []
+    },
+    {
+      "id": "java-flow",
+      "repository": "java",
+      "query": "owner creation validation repository",
+      "expectedSymbols": ["PetController", "OwnerRepository", "PetValidator"],
+      "required": [
+        "src/main/java/org/springframework/samples/petclinic/owner/PetController.java",
+        "src/main/java/org/springframework/samples/petclinic/owner/OwnerRepository.java",
+        "src/main/java/org/springframework/samples/petclinic/owner/PetValidator.java"
+      ],
+      "optional": [
+        "src/main/java/org/springframework/samples/petclinic/owner/OwnerController.java",
+        "src/main/java/org/springframework/samples/petclinic/owner/Owner.java"
+      ],
+      "forbidden": [
+        "src/main/java/org/springframework/samples/petclinic/vet/VetRepository.java"
+      ]
+    },
+    {
+      "id": "go-exact",
+      "repository": "go",
+      "query": "Mux",
+      "expectedSymbols": ["Mux", "ServeHTTP", "NotFoundHandler"],
+      "required": ["mux.go"],
+      "requiredOutput": ["ServeHTTP -CALLS-> NotFoundHandler"],
+      "optional": ["tree.go", "chi.go"],
+      "forbidden": []
+    },
+    {
+      "id": "go-flow",
+      "repository": "go",
+      "query": "route matching middleware",
+      "expectedSymbols": ["RouteHeaders", "Mux"],
+      "required": ["middleware/route_headers.go", "mux.go"],
+      "optional": ["tree.go", "chi.go"],
+      "forbidden": ["CHANGELOG.md"]
+    },
+    {
+      "id": "go-clean-path",
+      "repository": "go",
+      "query": "CleanPath",
+      "expectedSymbols": ["CleanPath", "RouteContext"],
+      "required": ["middleware/clean_path.go", "context.go"],
+      "optional": [],
+      "forbidden": [],
+      "requiredOutput": ["CleanPath -CALLS-> RouteContext"],
+      "minFiles": 2,
+      "maxFiles": 3
+    },
+    {
+      "id": "rust-exact",
+      "repository": "rust",
+      "query": "Connection",
+      "expectedSymbols": ["Connection", "read_frame", "parse_frame"],
+      "required": ["src/connection.rs"],
+      "requiredOutput": ["read_frame -CALLS-> parse_frame"],
+      "forbiddenOutput": ["confidence=0.35-> new"],
+      "optional": ["src/server.rs"],
+      "forbidden": []
+    },
+    {
+      "id": "rust-flow",
+      "repository": "rust",
+      "query": "server run connection read frame",
+      "expectedSymbols": ["run", "Connection", "read_frame", "Frame"],
+      "required": ["src/server.rs", "src/connection.rs"],
+      "optional": [
+        "src/frame.rs",
+        "src/clients/client.rs",
+        "src/bin/server.rs"
+      ],
+      "forbidden": []
+    },
+    {
+      "id": "go-interface-family",
+      "repository": "go",
+      "query": "Router",
+      "expectedSymbols": ["Router", "Routes", "Mux", "With"],
+      "required": ["chi.go", "mux.go"],
+      "requiredOutput": [
+        "Router -INHERITS-> Routes",
+        "r := chi.NewRouter()",
+        "func (mx *Mux) With"
+      ],
+      "forbiddenOutput": ["Router type -> Router"],
+      "minFiles": 2,
+      "maxFiles": 4,
+      "optional": ["_examples/router-walk/main.go"],
+      "forbidden": []
+    },
+    {
+      "id": "python-impact",
+      "repository": "python",
+      "command": "impact",
+      "query": "Graphiti",
+      "required": [
+        "graphiti_core/graphiti.py",
+        "mcp_server/src/graphiti_mcp_server.py",
+        "server/graph_service/zep_graphiti.py"
+      ],
+      "requiredOutput": ["get_client", "ZepGraphiti"],
+      "optional": [],
+      "forbidden": []
+    },
+    {
+      "id": "java-impact",
+      "repository": "java",
+      "command": "impact",
+      "query": "OwnerRepository",
+      "required": [
+        "src/main/java/org/springframework/samples/petclinic/owner/OwnerRepository.java",
+        "src/main/java/org/springframework/samples/petclinic/owner/OwnerController.java",
+        "src/main/java/org/springframework/samples/petclinic/owner/PetController.java"
+      ],
+      "requiredOutput": ["VisitController", "OwnerController"],
+      "optional": [],
+      "forbidden": []
+    },
+    {
+      "id": "go-callees",
+      "repository": "go",
+      "command": "callees",
+      "query": "CleanPath",
+      "required": ["middleware/clean_path.go", "context.go"],
+      "requiredOutput": ["RouteContext"],
+      "optional": [],
+      "forbidden": []
+    },
+    {
+      "id": "rust-impact",
+      "repository": "rust",
+      "command": "impact",
+      "query": "Connection",
+      "required": [
+        "src/connection.rs",
+        "src/server.rs",
+        "src/clients/client.rs"
+      ],
+      "requiredOutput": ["run", "connect"],
+      "optional": [],
+      "forbidden": []
+    },
+    {
+      "id": "cpp-impact",
+      "repository": "cpp",
+      "command": "impact",
+      "query": "IOperator",
+      "required": [
+        "include/neug/execution/execute/operator.h",
+        "include/neug/execution/execute/pipeline.h",
+        "src/execution/execute/plan_parser.cc"
+      ],
+      "requiredFilePatterns": ["^src/execution/execute/ops/"],
+      "requiredOutput": ["Pipeline", "parse_execute_pipeline_with_meta"],
+      "optional": [],
+      "forbidden": []
+    },
+    {
+      "id": "query-go-symbol",
+      "repository": "go",
+      "command": "query",
+      "query": "CleanPath",
+      "required": ["middleware/clean_path.go"],
+      "requiredOutput": ["#1 matchedBy=fts+vector middleware/clean_path.go"],
+      "optional": ["context.go", "middleware/strip.go"],
+      "forbidden": ["CHANGELOG.md"]
+    },
+    {
+      "id": "query-cpp-type",
+      "repository": "cpp",
+      "command": "query",
+      "query": "IOperator",
+      "required": [
+        "include/neug/execution/execute/operator.h",
+        "include/neug/execution/execute/pipeline.h"
+      ],
+      "requiredOutput": [
+        "#1 matchedBy=fts+vector include/neug/execution/execute/operator.h:31-44",
+        "--INHERITS--> IOperator"
+      ],
+      "optional": ["src/execution/execute/ops/admin/checkpoint.cc"],
+      "forbidden": ["tests/execution/execution_test.cc"]
+    },
+    {
+      "id": "query-python-type",
+      "repository": "python",
+      "command": "query",
+      "query": "Graphiti",
+      "required": [
+        "graphiti_core/graphiti.py",
+        "mcp_server/src/graphiti_mcp_server.py"
+      ],
+      "requiredOutput": [
+        "#1 matchedBy=vector graphiti_core/graphiti.py",
+        "GraphitiService"
+      ],
+      "optional": ["server/graph_service/zep_graphiti.py"],
+      "forbidden": ["mcp_server/tests/test_core_parity.py"]
+    }
+  ]
+}

@@ -48,7 +48,7 @@ export function collectBlastRadius(
     // bounded per-file representative preserves the executable integration
     // point when a file contains both kinds.
     const directCallers = graph
-      .incomingEdges(groupRootIds, ["CALLS", "INSTANTIATES"], limit * 3)
+      .incomingEdges([...ownedIds], ["CALLS", "INSTANTIATES"], limit * 3)
       .map((edge) => ({ id: edge.src }))
       .sort((left, right) => {
         const leftPath = graph.getEntity(left.id)?.file.relativePath ?? "";
@@ -401,11 +401,12 @@ export function fileIdsForRoots(
   nodes: readonly ExploreNode[],
   rootIds: readonly string[],
 ): Set<string> {
-  const roots = new Set(rootIds);
+  const fileByNode = new Map(
+    nodes.map((node) => [node.id, node.entity?.file.id] as const),
+  );
   return new Set(
-    nodes
-      .filter((node) => roots.has(node.id))
-      .map((node) => node.entity?.file.id)
+    rootIds
+      .map((id) => fileByNode.get(id))
       .filter((id): id is string => Boolean(id)),
   );
 }

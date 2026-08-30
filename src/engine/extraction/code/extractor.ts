@@ -32,6 +32,7 @@ import {
 } from "./inheritance-sites.js";
 import {
   collectRefSites as collectRefSitesFromNode,
+  leadingAnnotations,
   type RefSite,
 } from "./ref-sites.js";
 import { collectImportSpecsFromNode, type ImportSpec } from "./import-sites.js";
@@ -344,6 +345,7 @@ type CodeEntity = {
   arity?: number;
   doc?: string;
   modifiers: readonly CodeEntityModifier[];
+  leadingAnnotations: readonly string[];
 };
 
 type CodeWindow = {
@@ -512,11 +514,16 @@ function refsFromEntities(
   imports: readonly ImportSpec[],
   resolutionFacts: ReadonlyMap<number, ReadonlyMap<string, CallResolutionFact>>,
 ): SymbolRefSites[] {
-  const valueNames = new Set(
-    entities
+  const valueNames = new Set([
+    ...entities
       .filter((entity) => entity.symbolType === "value" && entity.name)
       .map((entity) => entity.name!),
-  );
+    ...imports.flatMap((item) =>
+      (item.bindings ?? [])
+        .filter((binding) => binding.imported === "default")
+        .map((binding) => binding.local),
+    ),
+  ]);
   const functionNames = new Set([
     ...entities
       .filter((entity) => entity.symbolType === "function" && entity.name)
@@ -606,6 +613,9 @@ function walkCodeNode(
           arity: adapter.extractArity?.(entity),
           doc: adapter.extractDoc?.(entity),
           modifiers: adapter.extractModifiers?.(entity) ?? [],
+          leadingAnnotations: leadingAnnotations(entity).map(
+            (annotation) => annotation.text,
+          ),
         });
       }
     }
@@ -707,8 +717,16 @@ function codeEntityWindowToFragment(
       text: window.text,
     },
     metadata: codeEntityMetadata(entity),
-    embeddingText: window.embeddingText,
+    embeddingText: embeddingTextForEntity(entity, window),
   };
+}
+
+function embeddingTextForEntity(
+  entity: CodeEntity,
+  window: CodeWindow,
+): string | undefined {
+  if (entity.leadingAnnotations.length === 0) return window.embeddingText;
+  return `${entity.leadingAnnotations.join("\n")}\n${window.embeddingText ?? window.text}`;
 }
 
 function nodeToWindow(node: TSNode): CodeWindow {

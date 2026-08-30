@@ -68,15 +68,14 @@ function exploreLines(result: ExploreOutput): string[] {
   );
   if (result.files.some((file) => file.sourceOrigin === "current_disk")) {
     lines.push(
-      "source note: current blocks below are line-numbered source reads; do not re-read displayed ranges unless marked indexed.",
+      "source note: current blocks are verbatim, line-numbered disk reads, not summaries; do not re-read displayed ranges unless marked indexed.",
     );
   }
 
   if (result.callPaths.length > 0) {
     lines.push("", "flow:");
-    for (const [index, path] of result.callPaths.entries()) {
-      lines.push(`${index + 1}. ${formatCallPath(result, path.nodes)}`);
-    }
+    for (const [index, path] of visibleCallPaths(result).entries())
+      lines.push(`${index + 1}. ${path}`);
   }
 
   const blast = blastRadiusLines(result);
@@ -314,20 +313,22 @@ function relationshipLines(result: ExploreOutput): string[] {
     for (const edge of result.edges.filter(
       (edge) =>
         edge.kind === kind &&
-        endpointIsRepresented(
-          edge.src,
-          rootIds,
-          pathNodeIds,
-          displayedFileIds,
-          nodeFileIds,
-        ) &&
-        endpointIsRepresented(
-          edge.dst,
-          rootIds,
-          pathNodeIds,
-          displayedFileIds,
-          nodeFileIds,
-        ),
+        (rootIds.has(edge.src) ||
+          rootIds.has(edge.dst) ||
+          (endpointIsRepresented(
+            edge.src,
+            rootIds,
+            pathNodeIds,
+            displayedFileIds,
+            nodeFileIds,
+          ) &&
+            endpointIsRepresented(
+              edge.dst,
+              rootIds,
+              pathNodeIds,
+              displayedFileIds,
+              nodeFileIds,
+            ))),
     )) {
       const key = [
         edge.src,
@@ -375,11 +376,7 @@ function relationshipLines(result: ExploreOutput): string[] {
     if (edges.length === 0) continue;
     const displayedEdges = selectBoundedRelationships(
       edges,
-      selectedNodeIds,
-      containerOwners,
-      nodeFileIds,
       MAX_RELATIONSHIPS_PER_KIND,
-      new Set([...rootIds, ...rootContext.equivalents]),
     );
     lines.push(`${kind}:`);
     for (const edge of displayedEdges) {
@@ -417,80 +414,24 @@ function directContainerOwners(result: ExploreOutput): Map<string, string> {
 
 function selectBoundedRelationships<T extends { src: string; dst: string }>(
   ranked: readonly T[],
-  selectedNodeIds: ReadonlySet<string>,
-  containerOwners: ReadonlyMap<string, string>,
-  nodeFileIds: ReadonlyMap<string, string | undefined>,
   limit: number,
-  preferredNodeIds: ReadonlySet<string> = new Set(),
 ): T[] {
-  let displayed = ranked.slice(0, limit);
-  if (displayed.length < limit) return displayed;
-  const roleEdges: T[] = [];
-  const roleSources = new Set<string>();
-  const roleTargets = new Set<string>();
-  const selectedEdge =
-    ranked.find(
-      (edge) =>
-        (preferredNodeIds.has(edge.src) || preferredNodeIds.has(edge.dst)) &&
-        selectedNodeIds.has(edge.src) &&
-        selectedNodeIds.has(edge.dst) &&
-        nodeFileIds.get(edge.src) !== nodeFileIds.get(edge.dst),
-    ) ??
-    ranked.find(
-      (edge) =>
-        selectedNodeIds.has(edge.src) &&
-        selectedNodeIds.has(edge.dst) &&
-        nodeFileIds.get(edge.src) !== nodeFileIds.get(edge.dst),
-    ) ??
-    ranked.find(
-      (edge) => selectedNodeIds.has(edge.src) && selectedNodeIds.has(edge.dst),
-    );
-  if (selectedEdge) {
-    roleEdges.push(selectedEdge);
-    roleSources.add(selectedEdge.src);
-    roleTargets.add(selectedEdge.dst);
+  const selected: T[] = [];
+  const sources = new Set<string>();
+  const targets = new Set<string>();
+  for (const edge of ranked) {
+    if (sources.has(edge.src) || targets.has(edge.dst)) continue;
+    selected.push(edge);
+    sources.add(edge.src);
+    targets.add(edge.dst);
+    if (selected.length === limit) return selected;
   }
   for (const edge of ranked) {
-    if (
-      !selectedNodeIds.has(edge.src) ||
-      containerOwners.get(edge.src) === undefined ||
-      containerOwners.get(edge.src) !== containerOwners.get(edge.dst) ||
-      roleSources.has(edge.src) ||
-      roleTargets.has(edge.dst)
-    )
-      continue;
-    roleEdges.push(edge);
-    roleSources.add(edge.src);
-    roleTargets.add(edge.dst);
-    // Preserve a short execution chain rather than only its cross-file entry
-    // and first implementation hop. Distinct source/target guards keep this
-    // bounded reserve diverse; the global per-kind limit still applies.
-    if (roleEdges.length >= Math.min(3, limit)) break;
+    if (selected.includes(edge)) continue;
+    selected.push(edge);
+    if (selected.length === limit) break;
   }
-  if (roleEdges.length === 0) {
-    const fallback = ranked.find(
-      (edge) => selectedNodeIds.has(edge.src) && selectedNodeIds.has(edge.dst),
-    );
-    if (fallback) roleEdges.push(fallback);
-  }
-  const protectedEdges = new Set(roleEdges);
-  for (const roleEdge of roleEdges) {
-    if (displayed.includes(roleEdge)) continue;
-    let replacement = -1;
-    for (let index = displayed.length - 1; index >= 0; index--) {
-      if (!protectedEdges.has(displayed[index]!)) {
-        replacement = index;
-        break;
-      }
-    }
-    if (replacement < 0) break;
-    displayed = [...displayed];
-    displayed[replacement] = roleEdge;
-  }
-  const rank = new Map(ranked.map((edge, index) => [edge, index]));
-  return displayed.sort(
-    (left, right) => (rank.get(left) ?? 0) - (rank.get(right) ?? 0),
-  );
+  return selected;
 }
 
 function rootSemanticMemberOwners(
@@ -701,14 +642,22 @@ function formatCallPath(
     const source = nodeIds[index - 1]!;
     const target = nodeIds[index]!;
     const edge = result.edges.find(
-      (candidate) =>
-        candidate.kind === "CALLS" &&
-        candidate.src === source &&
-        candidate.dst === target,
+      (candidate) => candidate.src === source && candidate.dst === target,
     );
-    text += ` -CALLS${edge?.provenance === "heuristic" ? "?" : ""}-> ${shortName(result, target)}`;
+    text += ` -${edge?.kind ?? "CALLS"}${edge?.provenance === "heuristic" ? "?" : ""}-> ${shortName(result, target)}`;
   }
   return text;
+}
+
+function visibleCallPaths(result: ExploreOutput): string[] {
+  const paths = [
+    ...new Set(
+      result.callPaths.map((path) => formatCallPath(result, path.nodes)),
+    ),
+  ];
+  return paths.filter(
+    (path) => !paths.some((other) => other !== path && other.includes(path)),
+  );
 }
 
 function symbolLabel(

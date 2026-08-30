@@ -4,7 +4,7 @@ export type LanguageResolutionSemantics = {
   ownerFieldInference?: "python" | "javascript";
   declarationStyle: "default" | "java" | "go";
   parameterStyle: "default" | "go" | "rust";
-  genericBoundsStyle: "default" | "java" | "go" | "cpp";
+  genericBoundsStyle: "default" | "extends" | "go" | "cpp";
   packageVisibility: "file" | "directory";
   decoratedDefinitions: boolean;
   dynamicTraitObjects: boolean;
@@ -53,7 +53,7 @@ const LANGUAGE_SEMANTICS: Record<
   },
   java: {
     declarationStyle: "java",
-    genericBoundsStyle: "java",
+    genericBoundsStyle: "extends",
     packageVisibility: "directory",
     transitivePreferredFiles: true,
     virtualReturnDispatch: true,
@@ -70,9 +70,14 @@ const LANGUAGE_SEMANTICS: Record<
     dynamicTraitObjects: true,
     relativeImportMode: "rust",
   },
-  tsx: { ownerFieldInference: "javascript", virtualReturnDispatch: true },
+  tsx: {
+    ownerFieldInference: "javascript",
+    genericBoundsStyle: "extends",
+    virtualReturnDispatch: true,
+  },
   typescript: {
     ownerFieldInference: "javascript",
+    genericBoundsStyle: "extends",
     virtualReturnDispatch: true,
   },
   javascript: { ownerFieldInference: "javascript" },
