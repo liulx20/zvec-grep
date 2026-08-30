@@ -533,12 +533,13 @@ export function resolveExploreSeeds(
     (explicitReferences.length >= 2 &&
       nameTerms.length <= explicitReferences.length + 2) ||
     (nameTerms.length <= 4 && matchedQueryTerms.size >= 2);
-  if (!terseSymbolList && selected.length === 0 && softAnchorIds.size > 0) {
+  if (!terseSymbolList && !selected.some((id) => byId.get(id)?.callable)) {
+    const available = (candidate: ScoredSeed) =>
+      !selectedIds.has(candidate.id) && !softAnchorIds.has(candidate.id);
     const retrieved =
       scored.find(
-        (candidate) =>
-          candidate.retrievalRank === 0 && !softAnchorIds.has(candidate.id),
-      ) ?? scored.find((candidate) => !softAnchorIds.has(candidate.id));
+        (candidate) => available(candidate) && candidate.retrievalRank === 0,
+      ) ?? scored.find(available);
     const sameFileCallable =
       retrieved && !retrieved.callable
         ? scored
@@ -572,14 +573,12 @@ export function resolveExploreSeeds(
     selected.push(id);
     selectedIds.add(id);
   }
-  const connectedSeedIds = hasQualifiedAnchor
-    ? incomingExecutionCandidates(
-        storage,
-        flowSeedIds,
-        new Set(scored.map(({ id }) => id)),
-        limit,
-      )
-    : new Set<string>();
+  const connectedSeedIds = incomingExecutionCandidates(
+    storage,
+    flowSeedIds,
+    new Set(scored.map(({ id }) => id)),
+    limit,
+  );
   if (terseSymbolList) {
     for (const term of nameTerms) {
       if (
@@ -601,7 +600,10 @@ export function resolveExploreSeeds(
     }
     return selected.slice(0, limit);
   }
-  const conceptSlots = Math.min(4, Math.max(1, terms.length));
+  const conceptSlots = Math.min(
+    hasQualifiedAnchor ? 4 : limit,
+    Math.max(1, terms.length),
+  );
   const exactNameTarget = Math.min(
     limit,
     new Set(
