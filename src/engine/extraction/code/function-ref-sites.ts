@@ -67,11 +67,12 @@ export function collectFunctionRefSites(
     const qualified = reference
       ? referenceTargetFromSyntax(reference.raw).receiver?.kind === "qualified"
       : false;
+    const valueKind = functionValueKind(current);
     if (
       name &&
       (candidateNames.has(name) || qualified) &&
       !shadowed.has(name) &&
-      isFunctionValuePosition(current)
+      valueKind
     ) {
       const key = `${name}\0${current.startIndex}\0${current.endIndex}`;
       if (!seen.has(key)) {
@@ -95,9 +96,7 @@ export function collectFunctionRefSites(
               }
             : target,
           line: current.startPosition.row + 1,
-          kind: GENERAL_VALUE_CONTEXTS.has(current.parent?.type ?? "")
-            ? "value"
-            : "function",
+          kind: registration ? "function" : valueKind,
         });
       }
     }
@@ -159,16 +158,39 @@ function functionReference(
   return undefined;
 }
 
-function isFunctionValuePosition(node: TSNode): boolean {
+function functionValueKind(node: TSNode): "value" | "function" | undefined {
   const parent = node.parent;
-  if (!parent || isDeclarationName(node) || isCallCallee(node)) return false;
-  if (isBoundFunctionReceiver(node)) return true;
-  if (node.type === "method_reference") return true;
-  if (/type|annotation|parameter|declarator/.test(parent.type)) return false;
-  if (VALUE_CONTEXTS.has(parent.type)) {
-    return true;
+  if (!parent || isDeclarationName(node) || isCallCallee(node)) return;
+  if (isBoundFunctionReceiver(node) || node.type === "method_reference")
+    return "function";
+  if (/type|annotation|parameter|declarator/.test(parent.type)) return;
+  if (isAssignmentValue(node) || GENERAL_VALUE_CONTEXTS.has(parent.type))
+    return "value";
+  if (VALUE_CONTEXTS.has(parent.type) || isAddressOf(node)) return "function";
+}
+
+function isAssignmentValue(node: TSNode): boolean {
+  let parent = node.parent;
+  while (
+    parent &&
+    !/function|method|constructor|closure|lambda/.test(parent.type)
+  ) {
+    if (/assignment/.test(parent.type)) {
+      const value =
+        parent.childForFieldName("right") ?? parent.childForFieldName("value");
+      return contains(value, node);
+    }
+    parent = parent.parent;
   }
-  return isAddressOf(node);
+  return false;
+}
+
+function contains(parent: TSNode | null, child: TSNode): boolean {
+  return Boolean(
+    parent &&
+    parent.startIndex <= child.startIndex &&
+    parent.endIndex >= child.endIndex,
+  );
 }
 
 function isBoundFunctionReceiver(node: TSNode): boolean {

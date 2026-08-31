@@ -27,6 +27,7 @@ type ScoredSeed = {
   retrievalRank: number | undefined;
   nameMatch: boolean;
   callable: boolean;
+  typeish: boolean;
   structural: boolean;
 };
 const QUERY_STOP_WORDS = new Set([
@@ -227,6 +228,10 @@ export function resolveExploreSeeds(
   const retrievalTerms = queryTerms(query);
   let terms = queryEvidenceTerms(query);
   const explicitReferences = explicitSymbolReferences(query);
+  const asksForLowValue =
+    /\b(?:test|tests|testing|spec|specs|docs?|documentation|example|benchmark|vendor|third[- ]party)\b/i.test(
+      query,
+    );
   const combinedRetrieval =
     symbolSearch?.(retrievalTerms.join(" ") || query, limit * 4) ?? [];
   const workspaceNames = new Set(
@@ -251,7 +256,7 @@ export function resolveExploreSeeds(
       for (const term of referenceTerms) workspaceTerms.add(term);
       continue;
     }
-    const matched = qualified
+    const allMatched = qualified
       ? named.filter((entity) => matchesExactSymbolQuery(entity, reference))
       : preferExactSymbolCase(
           named.filter(
@@ -259,6 +264,13 @@ export function resolveExploreSeeds(
           ),
           reference,
         );
+    const productionMatched = allMatched.filter(
+      (entity) => !isLowValuePath(entity.file.relativePath),
+    );
+    const matched =
+      !asksForLowValue && productionMatched.length > 0
+        ? productionMatched
+        : allMatched;
     const hardReference = qualified || matched.length === 1;
     const qualifiedFallbacks =
       matched.length === 0 && qualified
@@ -292,8 +304,7 @@ export function resolveExploreSeeds(
         softAnchorGroups.push(
           qualifiedOwners.map((entity) => entity.entity.id),
         );
-    } else if (approximate && hardReference)
-      anchorGroups.push([approximate.entity.id]);
+    } else if (approximate) anchorGroups.push([approximate.entity.id]);
     if (
       qualified &&
       matched.length === 0 &&
@@ -317,7 +328,8 @@ export function resolveExploreSeeds(
       pushEntity(
         entity,
         matched.length === 1 ||
-          (hardReference && (matched.length > 0 || entity === approximate)),
+          (hardReference && matched.length > 0) ||
+          entity === approximate,
       );
   }
   for (const reference of explicitTypeReferences(query)) {
@@ -374,10 +386,6 @@ export function resolveExploreSeeds(
     }
   }
 
-  const asksForLowValue =
-    /\b(?:test|tests|testing|spec|specs|docs?|documentation|example|benchmark|vendor|third[- ]party)\b/i.test(
-      query,
-    );
   const candidateValues = [...candidates.values()].filter(
     ({ entity, exact }) => exact || !scopeMismatchIds.has(entity.entity.id),
   );
@@ -478,6 +486,7 @@ export function resolveExploreSeeds(
       retrievalRank,
       nameMatch,
       callable,
+      typeish: TYPEISH_KINDS.has(kind),
       structural: structuralIds.has(entity.entity.id),
       coverage: coveredTerms.size,
       coveredTerms,
@@ -485,6 +494,15 @@ export function resolveExploreSeeds(
     };
   });
   scored.sort((a, b) => b.score - a.score || a.id.localeCompare(b.id));
+  const containerIds = new Map<string, boolean>();
+  const isSemanticOwner = (candidate: ScoredSeed) => {
+    if (!candidate.typeish || candidate.coveredNameTerms.size < 2) return false;
+    const known = containerIds.get(candidate.id);
+    if (known !== undefined) return known;
+    const result = (storage.members?.(candidate.id).length ?? 0) > 0;
+    containerIds.set(candidate.id, result);
+    return result;
+  };
 
   // Explicit code-shaped identifiers are stable anchors. Natural-language
   // words remain retrieval evidence; they do not each reserve a graph root.
@@ -569,6 +587,12 @@ export function resolveExploreSeeds(
       scored.find(
         (candidate) => available(candidate) && candidate.retrievalRank === 0,
       ) ?? scored.find(available);
+    const semanticOwner = scored.find(
+      (candidate) =>
+        available(candidate) &&
+        isSemanticOwner(candidate) &&
+        candidate.retrievalRank !== undefined,
+    );
     const sameFileCallable =
       retrieved && !retrieved.callable
         ? scored
@@ -590,6 +614,7 @@ export function resolveExploreSeeds(
             )[0]
         : undefined;
     const primary =
+      semanticOwner ??
       anchorFileCallable ??
       sameFileCallable ??
       scored.find(
@@ -753,7 +778,13 @@ export function resolveExploreSeeds(
     ...new Set(
       selected.map((id) => {
         const candidate = byId.get(id);
-        if (!candidate || candidate.callable || candidate.exact) return id;
+        if (
+          !candidate ||
+          candidate.callable ||
+          candidate.exact ||
+          isSemanticOwner(candidate)
+        )
+          return id;
         return (
           scored.find(
             (item) =>

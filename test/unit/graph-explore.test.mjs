@@ -205,6 +205,27 @@ test("natural-language flow queries reserve code identifiers, not prose words", 
     "an exact callable in the retrieved value's file should anchor the flow",
   );
 
+  const booksScreen = entity("books-screen", "BooksScreen", "books.dart", {
+    symbolType: "class",
+  });
+  const updateBooks = entity("update-books", "didUpdateWidget", "books.dart", {
+    symbolType: "function",
+  });
+  const booksStorage = entityStorage([booksScreen, updateBooks]);
+  booksStorage.findSymbolsByQuery = () => [updateBooks, booksScreen];
+  booksStorage.members = (id) =>
+    id === "books-screen" ? [{ id: "update-books" }] : [];
+  assert.equal(
+    resolveExploreSeeds(
+      booksStorage,
+      "books UI build child widgets books screen",
+      undefined,
+      8,
+    )[0],
+    "books-screen",
+    "a type covering multiple query concepts should remain the flow owner",
+  );
+
   const rates = entity("rates", "getTradeRates", "swapper.ts", {
     symbolType: "function",
   });

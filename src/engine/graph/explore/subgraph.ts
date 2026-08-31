@@ -145,7 +145,7 @@ export function exploreGraph(
     exactGroups?.[0]?.ids ??
     (seedEntity
       ? [...new Set([seedEntity.entity.id, ...contextualSeedIds])]
-      : !symbolSearch || hasQueryAlignedLiteral(graph, graphSeedIds, query)
+      : !symbolSearch || hasQueryAlignedIdentity(graph, graphSeedIds, query)
         ? graphSeedIds
         : resolveExploreSeeds(
             graph,
@@ -494,19 +494,21 @@ function collectSemanticCandidates(
     pool.add(entity, 0.2 * (1 - rank / limit));
 }
 
-function hasQueryAlignedLiteral(
+function hasQueryAlignedIdentity(
   graph: GraphReader,
   seedIds: readonly string[],
   query: string,
 ): boolean {
-  const terms = new Set(queryEvidenceTerms(query));
+  const terms = queryEvidenceTerms(query);
   return seedIds.some((id) => {
     const metadata = graph.getEntity(id)?.entity.metadata;
-    if (metadata?.kind !== "code" || !metadata.signature) return false;
-    const literals = [
-      ...metadata.signature.matchAll(/(['"`])([^'"`]+)\1/g),
-    ].flatMap((match) => queryEvidenceTerms(match[2] ?? ""));
-    return new Set(literals.filter((term) => terms.has(term))).size >= 2;
+    return (
+      metadata?.kind === "code" &&
+      semanticTermsCovered(
+        `${metadata.symbolName ?? ""} ${metadata.scope ?? ""}`,
+        terms,
+      ).size >= 2
+    );
   });
 }
 

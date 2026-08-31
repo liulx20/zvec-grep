@@ -676,18 +676,27 @@ function enclosingOwners(
   storage: GraphReader,
   files: readonly {
     fileId: string;
+    nodes: readonly ExploreNode[];
     clustered: readonly SymbolCluster[];
   }[],
 ): Map<string, StoredEntity> {
   const fileBySymbol = new Map<string, string>();
+  const owners = new Map<string, StoredEntity>();
   for (const file of files) {
+    const rootOwner = file.nodes.find(
+      (node) =>
+        node.isRoot && node.entity && ENVELOPE_KINDS.has(node.kind ?? ""),
+    )?.entity;
+    if (rootOwner) {
+      owners.set(file.fileId, rootOwner);
+      continue;
+    }
     const representative = file.clustered
       .flatMap((cluster) => cluster.symbols)
       .filter(({ symbol }) => Boolean(symbol.scope))
       .sort((left, right) => right.score - left.score)[0]?.symbol;
     if (representative) fileBySymbol.set(representative.id, file.fileId);
   }
-  const owners = new Map<string, StoredEntity>();
   for (const neighbor of storage.expandContainers(
     [...fileBySymbol.keys()],
     1,
@@ -735,7 +744,25 @@ function renderFileText(
         : "",
     ]),
   );
-  const ownerContext = renderOwnerContext(owner, sourceLines, budget);
+  const firstMemberLine = owner
+    ? clusters
+        .flatMap((cluster) => cluster.symbols.map(({ symbol }) => symbol))
+        .filter(
+          (symbol) =>
+            symbol.id !== owner.entity.id &&
+            containsRange(owner.entity.range, symbol.range),
+        )
+        .reduce(
+          (first, symbol) => Math.min(first, startLine(symbol.range)),
+          Infinity,
+        )
+    : Infinity;
+  const ownerContext = renderOwnerContext(
+    owner,
+    sourceLines,
+    budget,
+    firstMemberLine,
+  );
   const chosen = new Set<SymbolCluster>();
   const renderedByCluster = new Map<SymbolCluster, string>();
   let projected = ownerContext.length;
@@ -791,6 +818,7 @@ function renderOwnerContext(
   owner: StoredEntity | undefined,
   sourceLines: readonly string[] | null,
   budget: number,
+  firstMemberLine: number,
 ): string {
   if (!owner || !sourceLines || budget < 80) return "";
   const line = startLine(owner.entity.range) - 1;
@@ -801,6 +829,7 @@ function renderOwnerContext(
     if (declaration.includes("{") || declaration.trimEnd().endsWith(":")) break;
     end += 1;
   }
+  end = Math.min(end + 4, firstMemberLine - 1, sourceLines.length);
   const annotations = sourceLines.slice(start, line);
   const declaration = sourceLines.slice(line, end).join("\n");
   const brace = declaration.indexOf("{");

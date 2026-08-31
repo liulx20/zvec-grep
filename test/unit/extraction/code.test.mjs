@@ -547,6 +547,28 @@ router.post("/login", validate, async (request, response) => {
   );
 });
 
+test("Python class configuration preserves imported symbol references", async () => {
+  const analysis = await new CodeExtractor().analyzeForIndexing(
+    codeSource(
+      "python",
+      `from .serializers import LoginSerializer
+from .renderers import UserJSONRenderer
+
+class LoginAPIView(APIView):
+    renderer_classes = (UserJSONRenderer,)
+    serializer_class = LoginSerializer`,
+      "views.py",
+    ),
+  );
+  const refs = analysis.refs
+    .find((owner) => owner.name === "LoginAPIView")
+    ?.sites.map((site) => [site.name, site.kind]);
+  assert.deepEqual(refs?.sort(), [
+    ["LoginSerializer", "value"],
+    ["UserJSONRenderer", "value"],
+  ]);
+});
+
 test("C field-shaped API declarations with pointer parameters remain functions", async () => {
   const fragments = await new CodeExtractor().extract(
     codeSource(
