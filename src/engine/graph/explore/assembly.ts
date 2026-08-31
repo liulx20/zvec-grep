@@ -195,7 +195,7 @@ export function assembleExploreFiles(input: {
         // Large API types often need several representative methods to convey
         // their usable surface. The global maxChars budget is still hard; this
         // only avoids an artificial 7k per-file ceiling leaving budget unused.
-        central.has(fileId)
+        central.has(fileId) || fileEvidence.get(fileId)?.has("call_path")
           ? input.intent === "exact_symbol"
             ? rankedFileIds.length === 1
               ? input.maxChars
@@ -754,6 +754,7 @@ function renderFileText(
             index,
             remaining,
             gap.length,
+            cluster.maxImportance,
           )
         : 0;
     const block =
@@ -820,9 +821,10 @@ function laterCompleteBodyCost(
   index: number,
   remaining: number,
   gapLength: number,
+  currentImportance: number,
 ): number {
   for (const candidate of ranked.slice(index + 1)) {
-    if (!candidate.spine && candidate.maxImportance < 3) continue;
+    if (candidate.maxImportance < currentImportance) continue;
     const cost = (completeBlocks.get(candidate)?.length ?? 0) + gapLength;
     if (cost > gapLength && cost + MIN_FOCUSED_EXCERPT_CHARS <= remaining)
       return cost;

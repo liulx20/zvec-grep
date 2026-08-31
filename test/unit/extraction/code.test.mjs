@@ -511,6 +511,42 @@ test("Dart, C#, and Swift expose structured symbols and calls", async () => {
   }
 });
 
+test("file-scope call statements preserve registration callbacks", async () => {
+  const analysis = await new CodeExtractor().analyzeForIndexing(
+    codeSource(
+      "typescript",
+      `import { login, validate } from "./service";
+const router = Router();
+router.post("/login", validate, async (request, response) => {
+  response.json(await login(request.body));
+});`,
+      "routes.ts",
+    ),
+  );
+  const registration = fragmentNamed(
+    analysis.fragments.map(({ fragment }) => fragment),
+    "router.post",
+  );
+  assert.equal(registration.range.startLine, 3);
+  assert.equal(registration.range.endLine, 5);
+  assert.ok(
+    analysis.calls.some(
+      (owner) =>
+        owner.name === "router.post" &&
+        owner.sites.some((site) => site.name === "login"),
+    ),
+  );
+  assert.ok(
+    analysis.refs.some(
+      (owner) =>
+        owner.name === "router.post" &&
+        owner.sites.some(
+          (site) => site.kind === "function" && site.name === "validate",
+        ),
+    ),
+  );
+});
+
 test("C field-shaped API declarations with pointer parameters remain functions", async () => {
   const fragments = await new CodeExtractor().extract(
     codeSource(

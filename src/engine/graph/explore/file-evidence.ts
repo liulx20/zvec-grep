@@ -35,7 +35,9 @@ export function collectExploreFileEvidence(input: {
     nodes.filter((node) => node.isRoot).map((node) => node.id),
   );
   const nodeById = new Map(nodes.map((node) => [node.id, node] as const));
-  const callPathNodeIds = new Set(input.callPaths[0]?.nodes ?? []);
+  const callPathNodeIds = new Set(
+    input.callPaths.flatMap((path) => path.nodes),
+  );
   const directCalls = new Map<string, number>();
   const familyFileIds = new Set<string>();
   const familySourcesByFile = new Map<string, Set<string>>();

@@ -479,9 +479,10 @@ function rolesForPath(
   for (let index = 1; index < nodes.length; index += 1) {
     const edge = edges.find(
       (candidate) =>
-        candidate.kind === "CALLS" &&
         candidate.src === nodes[index - 1] &&
-        candidate.dst === nodes[index],
+        candidate.dst === nodes[index] &&
+        (candidate.kind === "CALLS" ||
+          (candidate.kind === "REFS" && candidate.rel === "function")),
     );
     if (edge) addEdgeRoles(roles, edge);
   }
@@ -490,6 +491,8 @@ function rolesForPath(
 
 function addEdgeRoles(roles: Set<string>, edge: ExploreEdge): void {
   if (edge.kind === "CALLS") roles.add("invocation");
+  if (edge.kind === "REFS" && edge.rel === "function")
+    roles.add("callable_reference");
   if (edge.rel === "new") roles.add("construction");
   if (edge.provenance === "heuristic")
     roles.add(`dynamic_dispatch:${edge.evidence ?? edge.rel}`);

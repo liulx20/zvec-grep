@@ -162,6 +162,7 @@ export function resolveExploreSeeds(
   query: string,
   seedId: string | undefined,
   limit: number,
+  symbolSearch = storage.findSymbolsByQuery?.bind(storage),
 ): string[] {
   if (seedId) {
     return storage.getEntity(seedId) ? [seedId] : [];
@@ -227,10 +228,7 @@ export function resolveExploreSeeds(
   let terms = queryEvidenceTerms(query);
   const explicitReferences = explicitSymbolReferences(query);
   const combinedRetrieval =
-    storage.findSymbolsByQuery?.(
-      retrievalTerms.join(" ") || query,
-      limit * 4,
-    ) ?? [];
+    symbolSearch?.(retrievalTerms.join(" ") || query, limit * 4) ?? [];
   const workspaceNames = new Set(
     combinedRetrieval.map((entity) =>
       (entity.file.rootPath.replaceAll("\\", "/").split("/").at(-1) ?? "")
@@ -272,7 +270,7 @@ export function resolveExploreSeeds(
         : [];
     const approximate =
       matched.length === 0 && !qualified && /^[a-z]/.test(reference)
-        ? closestCallableReference(storage, reference, limit)
+        ? closestCallableReference(symbolSearch, reference, limit)
         : undefined;
     const resolvedQualifiedAnchor =
       qualified &&
@@ -362,11 +360,11 @@ export function resolveExploreSeeds(
       pushEntity(entity);
     }
   }
-  if (storage.findSymbolsByQuery) {
+  if (symbolSearch) {
     for (const term of retrievalTerms) {
       const termLimit = limit * (acronymTerms.has(term) ? 32 : 8);
       for (const variant of semanticTermVariants(term))
-        for (const entity of storage.findSymbolsByQuery(variant, termLimit)) {
+        for (const entity of symbolSearch(variant, termLimit)) {
           if (
             semanticIdentityTerms(symbolName(entity)).includes(lower(variant))
           )
@@ -1096,18 +1094,17 @@ function normalizeSymbolReference(reference: string): string {
 }
 
 function closestCallableReference(
-  storage: GraphReader,
+  symbolSearch: ((query: string, limit: number) => StoredEntity[]) | undefined,
   reference: string,
   limit: number,
 ): StoredEntity | undefined {
-  if (!storage.findSymbolsByQuery) return undefined;
+  if (!symbolSearch) return undefined;
   const terms = queryTerms(reference);
   if (terms.length < 2) return undefined;
   const retrieval = terms
     .map((term) => (term.length >= 7 ? term.slice(0, 6) : term))
     .join(" ");
-  return storage
-    .findSymbolsByQuery(retrieval, limit * 8)
+  return symbolSearch(retrieval, limit * 8)
     .filter((entity) => {
       const metadata = entity.entity.metadata;
       const nameCoverage = semanticTermsCovered(symbolName(entity), terms);

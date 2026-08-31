@@ -207,13 +207,18 @@ export function openWorkspaceGraphReadSession(
     resolveWorkspaceIndexLayout(info.path).graphPath,
     { readOnly: true },
   );
+  let lexicalIndex: WorkspaceIndex | undefined;
+  const symbolSearch = (query: string, limit: number) =>
+    (lexicalIndex ??= new WorkspaceIndex(info, {
+      mode: "read",
+    })).findSymbolsByQuery(query, limit);
   let closed = false;
   return {
     root: location.root,
     async explore(options) {
       assertReadSessionOpen(closed);
       return await withHomeReadLock(location.home, "daemon.explore", () =>
-        exploreOpenWorkspaceIndex(location.root, graph, options),
+        exploreOpenWorkspaceIndex(location.root, graph, options, symbolSearch),
       );
     },
     async graphNeighborhood(options) {
@@ -227,6 +232,7 @@ export function openWorkspaceGraphReadSession(
     },
     async close() {
       if (closed) return;
+      lexicalIndex?.close();
       graph.close();
       closed = true;
     },
@@ -495,7 +501,9 @@ class ZvecGrepService implements ZvecGrep {
     return await this.withGraphWorkspace(
       options.root ?? this.root,
       "explore",
-      (root, graph) => exploreOpenWorkspaceIndex(root, graph, options),
+      (root, graph, symbolSearch) =>
+        exploreOpenWorkspaceIndex(root, graph, options, symbolSearch),
+      true,
     );
   }
 
@@ -516,8 +524,10 @@ class ZvecGrepService implements ZvecGrep {
     operation: string,
     fn: (
       root: string,
-      graph: ReturnType<typeof openGraphStorage>,
+      graph: GraphReader,
+      symbolSearch?: (query: string, limit: number) => StoredEntity[],
     ) => T | Promise<T>,
+    includeLexicalIndex = false,
   ): Promise<T> {
     const start = resolveZvecGrepRoot(startRoot);
     assertNearestWorkspaceHomeUnlocked(start, operation);
@@ -532,14 +542,24 @@ class ZvecGrepService implements ZvecGrep {
         info.indexPolicy ?? "enabled",
       );
     return await withHomeReadLock(location.home, operation, async () => {
-      const graph = openGraphStorage(
-        resolveWorkspaceIndexLayout(info.path).graphPath,
-        { readOnly: true },
-      );
+      const lexicalIndex = includeLexicalIndex
+        ? new WorkspaceIndex(info, { mode: "read" })
+        : undefined;
+      const directGraph = lexicalIndex
+        ? undefined
+        : openGraphStorage(resolveWorkspaceIndexLayout(info.path).graphPath, {
+            readOnly: true,
+          });
+      const graph = lexicalIndex?.graph ?? directGraph!;
       try {
-        return await fn(location.root, graph);
+        return await fn(
+          location.root,
+          graph,
+          lexicalIndex?.findSymbolsByQuery.bind(lexicalIndex),
+        );
       } finally {
-        graph.close();
+        lexicalIndex?.close();
+        directGraph?.close();
       }
     });
   }
@@ -1141,8 +1161,9 @@ async function exploreOpenWorkspaceIndex(
   root: string,
   graph: GraphReader,
   options: ZvecGrepExploreOptions,
+  symbolSearch?: (query: string, limit: number) => StoredEntity[],
 ): Promise<ZvecGrepExploreResult> {
-  const result = exploreGraph(graph, options);
+  const result = exploreGraph(graph, options, symbolSearch);
   return {
     root,
     available: result.available,

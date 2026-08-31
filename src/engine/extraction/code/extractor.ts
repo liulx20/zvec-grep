@@ -105,6 +105,7 @@ export class CodeExtractor {
       (tree) => {
         const collected: CodeEntity[] = [];
         walkCodeNode(tree.rootNode, adapter, [], undefined, collected);
+        collectStandaloneCallEntities(tree.rootNode, adapter, collected);
 
         const output: PreparedCodeFragment[] = [];
         let entityIdIndex = 0;
@@ -644,6 +645,52 @@ function walkCodeNode(
       walkCodeNode(child, adapter, breadcrumb, ownerStartOffset, out);
     }
   }
+}
+
+/**
+ * Preserve executable file-scope registrations that are not declarations.
+ * Their nested callbacks and callable arguments can then reuse the ordinary
+ * CALLS/REFS extraction instead of requiring framework-specific handling.
+ */
+function collectStandaloneCallEntities(
+  root: TSNode,
+  adapter: LanguageAdapter,
+  out: CodeEntity[],
+): void {
+  for (const statement of root.namedChildren) {
+    if (
+      statement.type !== "expression_statement" ||
+      adapter.entityTypes.has(statement.type) ||
+      adapter.scopeTypes.has(statement.type) ||
+      out.some(
+        (entity) =>
+          entity.node.startIndex >= statement.startIndex &&
+          entity.node.endIndex <= statement.endIndex,
+      )
+    )
+      continue;
+    const call = firstCallNode(statement);
+    const name = call ? extractCallName(call) : undefined;
+    if (!name) continue;
+    out.push({
+      node: statement,
+      name,
+      symbolType: "value",
+      breadcrumb: [],
+      signature: statement.text.split(/\r?\n/, 1)[0]?.trim(),
+      modifiers: [],
+      leadingAnnotations: [],
+    });
+  }
+}
+
+function firstCallNode(node: TSNode): TSNode | undefined {
+  if (isCallNode(node)) return node;
+  for (const child of node.namedChildren) {
+    const found = firstCallNode(child);
+    if (found) return found;
+  }
+  return undefined;
 }
 
 function ownershipFromEntities(

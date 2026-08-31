@@ -81,6 +81,7 @@ type ExploreHierarchyReader = GraphReader & {
 export function exploreGraph(
   graph: GraphReader,
   options: ExploreOptions,
+  symbolSearch?: (query: string, limit: number) => StoredEntity[],
 ): ExploreResult {
   const query = options.query.trim();
   const searchLimit = clampInt(
@@ -136,11 +137,23 @@ export function exploreGraph(
     seedEntity && hasExplicitQualifiedSymbolReference(query)
       ? resolveExploreSeeds(graph, query, undefined, searchLimit)
       : [];
+  const graphSeedIds =
+    seedEntity || exactGroups?.[0]
+      ? []
+      : resolveExploreSeeds(graph, query, undefined, searchLimit);
   const rootIds =
     exactGroups?.[0]?.ids ??
     (seedEntity
       ? [...new Set([seedEntity.entity.id, ...contextualSeedIds])]
-      : resolveExploreSeeds(graph, query, undefined, searchLimit));
+      : !symbolSearch || hasQueryAlignedLiteral(graph, graphSeedIds, query)
+        ? graphSeedIds
+        : resolveExploreSeeds(
+            graph,
+            query,
+            undefined,
+            searchLimit,
+            symbolSearch,
+          ));
   if (rootIds.length === 0) {
     return emptyResult(query, "no_seeds");
   }
@@ -173,7 +186,12 @@ export function exploreGraph(
   const nodeScores = new Map(subgraph.nodeScores);
   const candidates = new ExploreCandidatePool(subgraph.nodes, nodeScores);
   if (intent === "concept")
-    collectSemanticCandidates(candidates, graph, query, searchLimit);
+    collectSemanticCandidates(
+      candidates,
+      query,
+      searchLimit,
+      symbolSearch ?? graph.findSymbolsByQuery?.bind(graph),
+    );
   for (const fileId of subgraph.impactExpansionFileIds)
     candidates.addFileEvidence(fileId, "impact_summary");
   for (const fileId of subgraph.directImpactFileIds)
@@ -446,11 +464,11 @@ export function exploreGraph(
 
 function collectSemanticCandidates(
   pool: ExploreCandidatePool,
-  graph: GraphReader,
   query: string,
   limit: number,
+  symbolSearch: ((query: string, limit: number) => StoredEntity[]) | undefined,
 ): void {
-  const retrieved = graph.findSymbolsByQuery?.(query, limit * 2) ?? [];
+  const retrieved = symbolSearch?.(query, limit * 2) ?? [];
   const representedNames = new Set(
     pool.nodes
       .map((node) => node.entity?.entity.metadata)
@@ -474,6 +492,22 @@ function collectSemanticCandidates(
     .slice(0, limit)
     .entries())
     pool.add(entity, 0.2 * (1 - rank / limit));
+}
+
+function hasQueryAlignedLiteral(
+  graph: GraphReader,
+  seedIds: readonly string[],
+  query: string,
+): boolean {
+  const terms = new Set(queryEvidenceTerms(query));
+  return seedIds.some((id) => {
+    const metadata = graph.getEntity(id)?.entity.metadata;
+    if (metadata?.kind !== "code" || !metadata.signature) return false;
+    const literals = [
+      ...metadata.signature.matchAll(/(['"`])([^'"`]+)\1/g),
+    ].flatMap((match) => queryEvidenceTerms(match[2] ?? ""));
+    return new Set(literals.filter((term) => terms.has(term))).size >= 2;
+  });
 }
 
 function exclusiveFileIds(
