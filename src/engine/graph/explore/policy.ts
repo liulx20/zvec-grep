@@ -30,6 +30,33 @@ type ScoredSeed = {
   typeish: boolean;
   structural: boolean;
 };
+type SymbolSearch = (query: string, limit: number) => StoredEntity[];
+type SeedCandidate = {
+  entity: StoredEntity;
+  exact: boolean;
+  retrievalRank?: number;
+};
+type CollectedSeeds = {
+  candidates: Map<string, SeedCandidate>;
+  anchorGroups: string[][];
+  softAnchorGroups: string[][];
+  nameMatchedIds: Set<string>;
+  scopeMismatchIds: Set<string>;
+  explicitReferences: string[];
+  nameTerms: string[];
+  terms: string[];
+  asksForLowValue: boolean;
+  hasQualifiedAnchor: boolean;
+};
+type SeedSelection = {
+  selected: string[];
+  selectedIds: Set<string>;
+  byId: Map<string, ScoredSeed>;
+  isSemanticOwner: (candidate: ScoredSeed) => boolean;
+  hardAnchorCount: number;
+  terseSymbolList: boolean;
+  flowSeedIds: string[];
+};
 const QUERY_STOP_WORDS = new Set([
   "about",
   "after",
@@ -165,25 +192,63 @@ export function resolveExploreSeeds(
   limit: number,
   symbolSearch = storage.findSymbolsByQuery?.bind(storage),
 ): string[] {
-  if (seedId) {
-    return storage.getEntity(seedId) ? [seedId] : [];
-  }
+  if (seedId) return storage.getEntity(seedId) ? [seedId] : [];
+  const exact = exactSeedIds(storage, query, limit);
+  if (exact) return exact;
+  const collected = collectSeedCandidates(storage, query, limit, symbolSearch);
+  const scored = scoreSeedCandidates(storage, query, limit, collected);
+  const selection = selectInitialSeeds(storage, limit, collected, scored);
+  return completeSeedSelection(storage, limit, collected, scored, selection);
+}
 
-  const candidates = new Map<
-    string,
-    { entity: StoredEntity; exact: boolean; retrievalRank?: number }
-  >();
+function exactSeedIds(
+  storage: GraphReader,
+  query: string,
+  limit: number,
+): string[] | undefined {
+  const normalizedQuery = query.trim().toLowerCase();
+  const exact = preferExactSymbolCase(
+    storage
+      .findSymbolsByName(query, limit * 4)
+      .filter(
+        (entity) => symbolName(entity).trim().toLowerCase() === normalizedQuery,
+      ),
+    query,
+  );
+  if (exact.length === 0) return undefined;
+  const completeTypes = exact.filter(isCompleteTypeDefinition);
+  const definitions = completeTypes.length > 0 ? completeTypes : exact;
+  const production = definitions.filter(
+    (entity) => !isLowValuePath(entity.file.relativePath),
+  );
+  return [...(production.length > 0 ? production : definitions)]
+    .sort((a, b) => {
+      const testDiff =
+        Number(isTestPath(a.file.relativePath)) -
+        Number(isTestPath(b.file.relativePath));
+      return testDiff || a.entity.id.localeCompare(b.entity.id);
+    })
+    .slice(0, limit)
+    .map((entity) => entity.entity.id);
+}
+
+function collectSeedCandidates(
+  storage: GraphReader,
+  query: string,
+  limit: number,
+  symbolSearch: SymbolSearch | undefined,
+): CollectedSeeds {
+  const candidates = new Map<string, SeedCandidate>();
   const anchorGroups: string[][] = [];
   const softAnchorGroups: string[][] = [];
   const nameMatchedIds = new Set<string>();
   const scopeMismatchIds = new Set<string>();
-  const seen = new Set<string>();
   const pushEntity = (
     entity: StoredEntity,
     exact = false,
     retrievalRank?: number,
   ) => {
-    if (seen.has(entity.entity.id)) {
+    if (candidates.has(entity.entity.id)) {
       const existing = candidates.get(entity.entity.id)!;
       if (exact) existing.exact = true;
       if (
@@ -194,39 +259,10 @@ export function resolveExploreSeeds(
         existing.retrievalRank = retrievalRank;
       return;
     }
-    seen.add(entity.entity.id);
     candidates.set(entity.entity.id, { entity, exact, retrievalRank });
   };
-
-  const normalizedQuery = query.trim().toLowerCase();
-  const exact = preferExactSymbolCase(
-    storage
-      .findSymbolsByName(query, limit * 4)
-      .filter(
-        (entity) => symbolName(entity).trim().toLowerCase() === normalizedQuery,
-      ),
-    query,
-  );
-  if (exact.length > 0) {
-    const completeTypes = exact.filter(isCompleteTypeDefinition);
-    const definitions = completeTypes.length > 0 ? completeTypes : exact;
-    const production = definitions.filter(
-      (entity) => !isLowValuePath(entity.file.relativePath),
-    );
-    const preferred = production.length > 0 ? production : definitions;
-    return [...preferred]
-      .sort((a, b) => {
-        const testDiff =
-          Number(isTestPath(a.file.relativePath)) -
-          Number(isTestPath(b.file.relativePath));
-        return testDiff || a.entity.id.localeCompare(b.entity.id);
-      })
-      .slice(0, limit)
-      .map((entity) => entity.entity.id);
-  }
-
   const retrievalTerms = queryTerms(query);
-  let terms = queryEvidenceTerms(query);
+  const terms = queryEvidenceTerms(query);
   const explicitReferences = explicitSymbolReferences(query);
   const asksForLowValue =
     /\b(?:test|tests|testing|spec|specs|docs?|documentation|example|benchmark|vendor|third[- ]party)\b/i.test(
@@ -386,6 +422,38 @@ export function resolveExploreSeeds(
     }
   }
 
+  return {
+    candidates,
+    anchorGroups,
+    softAnchorGroups,
+    nameMatchedIds,
+    scopeMismatchIds,
+    explicitReferences,
+    nameTerms,
+    terms: terms.filter(
+      (term) =>
+        !workspaceTerms.has(term) &&
+        !(hasQualifiedAnchor && qualifiedAnchorTerms.has(term)),
+    ),
+    asksForLowValue,
+    hasQualifiedAnchor,
+  };
+}
+
+function scoreSeedCandidates(
+  storage: GraphReader,
+  query: string,
+  limit: number,
+  collected: CollectedSeeds,
+): ScoredSeed[] {
+  const {
+    candidates,
+    nameMatchedIds,
+    scopeMismatchIds,
+    terms,
+    asksForLowValue,
+  } = collected;
+
   const candidateValues = [...candidates.values()].filter(
     ({ entity, exact }) => exact || !scopeMismatchIds.has(entity.entity.id),
   );
@@ -406,11 +474,6 @@ export function resolveExploreSeeds(
       : !asksForLowValue && explicitlyTargetedLowValue.length > 0
         ? [...productionValues, ...explicitlyTargetedLowValue]
         : candidateValues;
-  terms = terms.filter(
-    (term) =>
-      !workspaceTerms.has(term) &&
-      !(hasQualifiedAnchor && qualifiedAnchorTerms.has(term)),
-  );
   const namedTypeIds = valuesToScore
     .filter(({ entity }) => {
       const metadata = entity.entity.metadata;
@@ -494,6 +557,25 @@ export function resolveExploreSeeds(
     };
   });
   scored.sort((a, b) => b.score - a.score || a.id.localeCompare(b.id));
+  return scored;
+}
+
+function selectInitialSeeds(
+  storage: GraphReader,
+  limit: number,
+  collected: CollectedSeeds,
+  scored: ScoredSeed[],
+): SeedSelection {
+  const {
+    candidates,
+    anchorGroups,
+    softAnchorGroups,
+    nameMatchedIds,
+    explicitReferences,
+    nameTerms,
+    terms,
+    hasQualifiedAnchor,
+  } = collected;
   const containerIds = new Map<string, boolean>();
   const isSemanticOwner = (candidate: ScoredSeed) => {
     if (!candidate.typeish || candidate.coveredNameTerms.size < 2) return false;
@@ -637,6 +719,34 @@ export function resolveExploreSeeds(
     selected.push(id);
     selectedIds.add(id);
   }
+  return {
+    selected,
+    selectedIds,
+    byId,
+    isSemanticOwner,
+    hardAnchorCount,
+    terseSymbolList,
+    flowSeedIds,
+  };
+}
+
+function completeSeedSelection(
+  storage: GraphReader,
+  limit: number,
+  collected: CollectedSeeds,
+  scored: ScoredSeed[],
+  selection: SeedSelection,
+): string[] {
+  const { nameTerms, terms, hasQualifiedAnchor } = collected;
+  const {
+    selected,
+    selectedIds,
+    byId,
+    isSemanticOwner,
+    hardAnchorCount,
+    terseSymbolList,
+    flowSeedIds,
+  } = selection;
   const connectedSeedIds = incomingExecutionCandidates(
     storage,
     flowSeedIds,
