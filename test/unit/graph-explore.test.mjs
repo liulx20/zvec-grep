@@ -15,6 +15,8 @@ import {
   deriveExecutionPaths,
 } from "../../dist/engine/graph/explore/paths.js";
 import {
+  explainExploreSeedResolution,
+  parseExploreSeedQuery,
   resolveExactExploreSeedGroups,
   resolveExploreSeeds,
 } from "../../dist/engine/graph/explore/policy.js";
@@ -122,6 +124,48 @@ test("explicit file paths disambiguate exact explore symbols", () => {
       8,
     ).slice(0, 2),
     ["private-send", "writer"],
+  );
+});
+
+test("seed planning exposes parsed references and selection evidence", () => {
+  const method = entity("place", "placeOrder", "checkout/service.ts", {
+    symbolType: "function",
+  });
+  method.entity.metadata.scope = "CheckoutService";
+  const gateway = entity("gateway", "PaymentGateway", "payment/gateway.ts", {
+    symbolType: "class",
+  });
+  const query = "Trace CheckoutService::placeOrder and PaymentGateway";
+
+  assert.deepEqual(
+    parseExploreSeedQuery(query).references.map(({ raw, leaf, qualified }) => ({
+      raw,
+      leaf,
+      qualified,
+    })),
+    [
+      {
+        raw: "CheckoutService::placeOrder",
+        leaf: "placeOrder",
+        qualified: true,
+      },
+      { raw: "PaymentGateway", leaf: "PaymentGateway", qualified: false },
+    ],
+  );
+
+  const trace = explainExploreSeedResolution(
+    entityStorage([method, gateway]),
+    query,
+  );
+  assert.deepEqual(trace.selected, ["place", "gateway"]);
+  assert.deepEqual(
+    trace.candidates
+      .filter(({ selected }) => selected)
+      .map(({ id, evidence }) => [id, evidence[0]?.kind]),
+    [
+      ["place", "qualified"],
+      ["gateway", "exact"],
+    ],
   );
 });
 
