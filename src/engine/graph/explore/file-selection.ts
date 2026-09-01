@@ -34,11 +34,18 @@ export type ExploreFileCandidate = {
   evidence: ReadonlyMap<ExploreFileEvidenceKind, number>;
 };
 
+export type ExploreFileRole = "central" | "supporting";
+
+export type SelectedExploreFile = ExploreFileCandidate & {
+  role: ExploreFileRole;
+};
+
 export type ExploreFileSelectionInput = {
   ordered: readonly [string, number][];
   maxFiles: number;
   intent: ExploreIntent;
   evidence: ReadonlyMap<string, ReadonlyMap<ExploreFileEvidenceKind, number>>;
+  rootFileIds?: readonly string[];
 };
 
 const EXACT_WEIGHTS: Readonly<Record<ExploreFileRoleEvidenceKind, number>> = {
@@ -100,7 +107,7 @@ const NOVELTY_EVIDENCE = new Set<ExploreFileRoleEvidenceKind>([
  */
 export function selectExploreFiles(
   input: ExploreFileSelectionInput,
-): ExploreFileCandidate[] {
+): SelectedExploreFile[] {
   if (input.maxFiles <= 0 || input.ordered.length === 0) return [];
   const strongestBase = Math.max(...input.ordered.map(([, score]) => score), 0);
   const weights = evidenceWeights(input.intent);
@@ -150,7 +157,50 @@ export function selectExploreFiles(
     if (!next || marginalGain(next, selected, input.intent) <= 0) break;
     take(next);
   }
-  return selected;
+  return assignFileRoles(selected, input);
+}
+
+function assignFileRoles(
+  selected: readonly ExploreFileCandidate[],
+  input: ExploreFileSelectionInput,
+): SelectedExploreFile[] {
+  const central = new Set<string>();
+  const rootRank = new Map(
+    (input.rootFileIds ?? []).map((fileId, index) => [fileId, index]),
+  );
+  const seedKind = input.intent === "exact_symbol" ? "root" : "semantic_seed";
+  const seeds = selected
+    .filter((candidate) => candidate.evidence.has(seedKind))
+    .sort(
+      (left, right) =>
+        (rootRank.get(left.fileId) ?? Number.MAX_SAFE_INTEGER) -
+        (rootRank.get(right.fileId) ?? Number.MAX_SAFE_INTEGER),
+    );
+  for (const candidate of seeds.slice(0, input.intent === "concept" ? 1 : 2))
+    central.add(candidate.fileId);
+
+  const coCentral = (
+    [
+      ["root_counterpart"],
+      ["counterpart"],
+      ["direct_caller", "direct_call"],
+      ["integration"],
+    ] as const
+  )
+    .map((kinds) =>
+      selected.find(
+        (candidate) =>
+          !central.has(candidate.fileId) &&
+          kinds.some((kind) => candidate.evidence.has(kind)),
+      ),
+    )
+    .find((candidate) => candidate !== undefined);
+  if (coCentral && central.size < 2) central.add(coCentral.fileId);
+
+  return selected.map((candidate) => ({
+    ...candidate,
+    role: central.has(candidate.fileId) ? "central" : "supporting",
+  }));
 }
 
 function isEligibleSourceCandidate(candidate: ExploreFileCandidate): boolean {

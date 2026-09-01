@@ -1,6 +1,6 @@
 import type { Range } from "../../types.js";
 import type { StoredEntity } from "../../storage/index.js";
-import type { DynamicBoundary, GraphReader } from "../types.js";
+import type { GraphReader } from "../types.js";
 import { isCallableSymbolKind } from "../symbol-kinds.js";
 import type {
   ExploreEdge,
@@ -11,9 +11,13 @@ import type {
 } from "./types.js";
 import { polymorphicSiblingSkeletonNodeIds } from "./adaptive-sizing.js";
 import type { ExploreCandidatePool } from "./candidate-pool.js";
-import { selectExploreFiles } from "./file-selection.js";
+import {
+  selectExploreFiles,
+  type SelectedExploreFile,
+} from "./file-selection.js";
 import type { ExploreIntent } from "./intent.js";
 import { queryTerms, semanticTermsCovered } from "./policy.js";
+import { sourceFocusLines, type SourceFocus } from "./source-focus.js";
 
 export function assembleExploreFiles(input: {
   intent: ExploreIntent;
@@ -21,7 +25,7 @@ export function assembleExploreFiles(input: {
   pool: ExploreCandidatePool;
   edges: readonly ExploreEdge[];
   callPaths: readonly ExploreCallPath[];
-  dynamicBoundaries: readonly DynamicBoundary[];
+  sourceFocus: readonly SourceFocus[];
   fileScores: Map<string, number>;
   nodeScores: ReadonlyMap<string, number>;
   maxFiles: number;
@@ -44,12 +48,7 @@ export function assembleExploreFiles(input: {
     for (const id of path.nodes)
       if (!pathPriority.has(id)) pathPriority.set(id, index);
   const terms = queryTerms(input.query);
-  const flowFocusLines = collectFlowFocusLines(
-    input.callPaths,
-    input.edges,
-    input.dynamicBoundaries,
-    terms,
-  );
+  const flowFocusLines = sourceFocusLines(input.sourceFocus);
   const byFile = new Map<string, ExploreNode[]>();
   for (const node of nodes) {
     const file = node.entity?.file;
@@ -69,17 +68,15 @@ export function assembleExploreFiles(input: {
       }
       return a[0].localeCompare(b[0]);
     });
-  const counterpartFileIds = new Set(input.pool.fileIds("counterpart"));
-  const rootCounterpartFileIds = new Set(
-    input.pool.fileIds("root_counterpart"),
-  );
   const changeSurfaceFileIds = new Set(input.pool.fileIds("change_surface"));
-  const rankedFileIds = selectExploreFiles({
+  const selectedFiles = selectExploreFiles({
     ordered: orderedCandidates,
     maxFiles: input.maxFiles,
     intent: input.intent,
     evidence: fileEvidence,
-  }).map((candidate) => candidate.fileId);
+    rootFileIds: [...input.rootFileIds],
+  });
+  const rankedFileIds = selectedFiles.map((candidate) => candidate.fileId);
   const skeletonNodeIds = polymorphicSiblingSkeletonNodeIds(
     rankedFileIds,
     nodes,
@@ -91,117 +88,39 @@ export function assembleExploreFiles(input: {
     return [];
   }
 
-  // Centrality is role-aware: keep the declaration root, prefer its matching
-  // implementation unit, then fall back to the strongest integration file.
-  const central = new Set<string>();
-  const rootFileRank = new Map(
-    [...input.rootFileIds].map((fileId, index) => [fileId, index]),
+  const central = new Set(
+    selectedFiles
+      .filter((candidate) => candidate.role === "central")
+      .map((candidate) => candidate.fileId),
   );
-  const centralSeeds = rankedFileIds.filter((fileId) =>
-    fileEvidence
-      .get(fileId)
-      ?.has(input.intent === "exact_symbol" ? "root" : "semantic_seed"),
-  );
-  centralSeeds.sort(
-    (left, right) =>
-      (rootFileRank.get(left) ?? Number.MAX_SAFE_INTEGER) -
-      (rootFileRank.get(right) ?? Number.MAX_SAFE_INTEGER),
-  );
-  for (const fileId of centralSeeds.slice(
-    0,
-    input.intent === "concept" ? 1 : 2,
-  ))
-    central.add(fileId);
-  const coCentral =
-    rankedFileIds.find(
-      (fileId) => !central.has(fileId) && rootCounterpartFileIds.has(fileId),
-    ) ??
-    rankedFileIds.find(
-      (fileId) => !central.has(fileId) && counterpartFileIds.has(fileId),
-    ) ??
-    rankedFileIds.find(
-      (fileId) =>
-        !central.has(fileId) &&
-        (fileEvidence.get(fileId)?.has("direct_caller") ||
-          fileEvidence.get(fileId)?.has("direct_call")),
-    ) ??
-    rankedFileIds.find(
-      (fileId) =>
-        !central.has(fileId) && fileEvidence.get(fileId)?.has("integration"),
-    );
-  if (coCentral && central.size < 2) central.add(coCentral);
-
-  const prepared = rankedFileIds.flatMap((fileId) => {
-    const nodes = byFile.get(fileId) ?? [];
-    const file = nodes[0]?.entity?.file;
-    if (!file) {
-      return [];
-    }
-    const symbols = nodes
-      .map((node) => toSymbolSnippet(node))
-      .filter((s): s is ExploreSymbolSnippet => s !== null);
-    const sourceLines =
-      input.storage.readFileText?.(file)?.split(/\r?\n/) ?? null;
-    const retained = sourceLines
-      ? preferNestedSourceSymbols(
-          symbols,
-          new Set(
-            nodes
-              .filter((node) => node.isRoot || pathNodeIds.has(node.id))
-              .map((node) => node.id),
-          ),
-          terms,
-        )
-      : removeContainedSymbols(symbols);
-    const ranked = rankSymbols(
-      retained,
-      input.pool.nodes,
-      input.edges,
-      input.nodeScores,
+  const prepared = selectedFiles.flatMap((selection) => {
+    const file = prepareExploreFile({
+      selection,
+      nodes: byFile.get(selection.fileId) ?? [],
+      storage: input.storage,
+      allNodes: input.pool.nodes,
+      edges: input.edges,
+      nodeScores: input.nodeScores,
       pathNodeIds,
       pathPriority,
       skeletonNodeIds,
       flowFocusLines,
       terms,
-    );
-    const clustered = clusterSymbols(ranked);
-    return [
-      {
-        fileId,
-        file,
-        nodes,
-        clustered,
-        sourceLines,
-      },
-    ];
+    });
+    return file ? [file] : [];
   });
   const ownerByFile = enclosingOwners(input.storage, prepared);
+  const plans = prepared.map((file) =>
+    createRenderPlan(file, ownerByFile.get(file.fileId)),
+  );
   const capacities = new Map(
-    prepared.map(({ fileId, clustered, sourceLines }) => [
-      fileId,
-      Math.min(
-        renderFileText(
-          clustered,
-          input.maxChars,
-          sourceLines,
-          ownerByFile.get(fileId),
-        ).text.length +
-          clustered.reduce(
-            (count, cluster) => count + cluster.symbols.length,
-            0,
-          ) *
-            64,
+    plans.map((plan) => [
+      plan.fileId,
+      fileRenderCapacity(
+        plan,
+        input.intent,
+        rankedFileIds.length,
         input.maxChars,
-        // Large API types often need several representative methods to convey
-        // their usable surface. The global maxChars budget is still hard; this
-        // only avoids an artificial 7k per-file ceiling leaving budget unused.
-        central.has(fileId) || fileEvidence.get(fileId)?.has("call_path")
-          ? input.intent === "exact_symbol"
-            ? rankedFileIds.length === 1
-              ? input.maxChars
-              : Math.floor(input.maxChars / 2)
-            : 9_000
-          : 4_000,
       ),
     ]),
   );
@@ -211,17 +130,14 @@ export function assembleExploreFiles(input: {
     input.maxChars,
     capacities,
   );
+  const renderedPlans = plans.map((plan) => ({
+    plan,
+    rendered: plan.render(budgets.get(plan.fileId) ?? 0),
+  }));
 
   const bundles: ExploreFileBundle[] = [];
-  for (const { fileId, file, nodes, clustered, sourceLines } of prepared) {
-    const budget =
-      budgets.get(fileId) ?? Math.floor(input.maxChars / rankedFileIds.length);
-    const rendered = renderFileText(
-      clustered,
-      budget,
-      sourceLines,
-      ownerByFile.get(fileId),
-    );
+  for (const { plan, rendered } of renderedPlans) {
+    const { fileId, file, nodes, sourceLines, selection } = plan;
     const text = rendered.text;
     if (!text.trim()) {
       continue;
@@ -229,7 +145,7 @@ export function assembleExploreFiles(input: {
     bundles.push({
       file,
       score: input.fileScores.get(fileId) ?? 0,
-      isCentral: central.has(fileId),
+      isCentral: selection.role === "central",
       isChangeSurface: changeSurfaceFileIds.has(fileId),
       reasons: fileReasons(
         fileId,
@@ -244,6 +160,118 @@ export function assembleExploreFiles(input: {
     });
   }
   return bundles;
+}
+
+type PreparedExploreFile = {
+  selection: SelectedExploreFile;
+  fileId: string;
+  file: StoredEntity["file"];
+  nodes: readonly ExploreNode[];
+  clustered: readonly SymbolCluster[];
+  sourceLines: readonly string[] | null;
+};
+
+type ExploreRenderPlan = PreparedExploreFile & {
+  render: (budget: number) => ReturnType<typeof renderFileText>;
+};
+
+function prepareExploreFile(input: {
+  selection: SelectedExploreFile;
+  nodes: readonly ExploreNode[];
+  storage: GraphReader;
+  allNodes: readonly ExploreNode[];
+  edges: readonly ExploreEdge[];
+  nodeScores: ReadonlyMap<string, number>;
+  pathNodeIds: ReadonlySet<string>;
+  pathPriority: ReadonlyMap<string, number>;
+  skeletonNodeIds: ReadonlySet<string>;
+  flowFocusLines: ReadonlyMap<string, readonly number[]>;
+  terms: readonly string[];
+}): PreparedExploreFile | null {
+  const file = input.nodes[0]?.entity?.file;
+  if (!file) return null;
+
+  const sourceText = input.storage.readFileText?.(file);
+  const sourceLines = sourceText == null ? null : sourceText.split(/\r?\n/);
+  const symbols = input.nodes
+    .map((node) => toSymbolSnippet(node))
+    .filter((symbol): symbol is ExploreSymbolSnippet => symbol !== null);
+  const preferredIds = new Set(
+    input.nodes
+      .filter((node) => node.isRoot || input.pathNodeIds.has(node.id))
+      .map((node) => node.id),
+  );
+  const retained = sourceLines
+    ? preferNestedSourceSymbols(symbols, preferredIds, input.terms)
+    : removeContainedSymbols(symbols);
+  const ranked = rankSymbols(
+    retained,
+    input.allNodes,
+    input.edges,
+    input.nodeScores,
+    input.pathNodeIds,
+    input.pathPriority,
+    input.skeletonNodeIds,
+    input.flowFocusLines,
+    input.terms,
+  );
+  return {
+    selection: input.selection,
+    fileId: input.selection.fileId,
+    file,
+    nodes: input.nodes,
+    clustered: clusterSymbols(ranked),
+    sourceLines,
+  };
+}
+
+function fileRenderCapacity(
+  plan: ExploreRenderPlan,
+  intent: ExploreIntent,
+  fileCount: number,
+  maxChars: number,
+): number {
+  const renderedChars =
+    plan.render(maxChars).text.length +
+    plan.clustered.reduce(
+      (count, cluster) => count + cluster.symbols.length,
+      0,
+    ) *
+      64;
+  if (
+    plan.selection.role === "supporting" &&
+    !plan.selection.evidence.has("call_path")
+  )
+    return Math.min(renderedChars, maxChars, 4_000);
+  if (intent === "concept") return Math.min(renderedChars, maxChars, 9_000);
+  return Math.min(
+    renderedChars,
+    maxChars,
+    fileCount === 1 ? maxChars : Math.floor(maxChars / 2),
+  );
+}
+
+function createRenderPlan(
+  file: PreparedExploreFile,
+  owner: StoredEntity | undefined,
+): ExploreRenderPlan {
+  const cache = new Map<number, ReturnType<typeof renderFileText>>();
+  return {
+    ...file,
+    render(budget) {
+      const bounded = Math.max(0, budget);
+      const cached = cache.get(bounded);
+      if (cached) return cached;
+      const rendered = renderFileText(
+        file.clustered,
+        bounded,
+        file.sourceLines,
+        owner,
+      );
+      cache.set(bounded, rendered);
+      return rendered;
+    },
+  };
 }
 
 function preferNestedSourceSymbols(
@@ -635,41 +663,6 @@ function bestQueryFocusLine(
         left.index - right.index,
     )[0];
   return best ? startLine(symbol.range) + best.index : undefined;
-}
-
-function collectFlowFocusLines(
-  paths: readonly ExploreCallPath[],
-  edges: readonly ExploreEdge[],
-  boundaries: readonly DynamicBoundary[],
-  terms: readonly string[],
-): Map<string, number[]> {
-  const transitions = new Set<string>();
-  for (const path of paths)
-    for (let index = 0; index < path.nodes.length; index += 1) {
-      if (index + 1 >= path.nodes.length) continue;
-      transitions.add(`${path.nodes[index]}\0${path.nodes[index + 1]}`);
-    }
-  const lines = new Map<string, number[]>();
-  const add = (id: string, line: number | undefined) => {
-    if (!line || line <= 0) return;
-    const values = lines.get(id) ?? [];
-    if (!values.includes(line)) values.push(line);
-    lines.set(id, values);
-  };
-  for (const edge of edges)
-    if (transitions.has(`${edge.src}\0${edge.dst}`))
-      add(edge.src, edge.firstLine);
-  for (const boundary of [...boundaries].sort(
-    (left, right) =>
-      semanticTermsCovered(right.target.raw, terms).size -
-        semanticTermsCovered(left.target.raw, terms).size ||
-      Number(right.candidateDetails.length > 0) -
-        Number(left.candidateDetails.length > 0) ||
-      (left.line ?? Number.MAX_SAFE_INTEGER) -
-        (right.line ?? Number.MAX_SAFE_INTEGER),
-  ))
-    add(boundary.sourceId, boundary.line);
-  return lines;
 }
 
 function enclosingOwners(

@@ -35,6 +35,7 @@ import {
   resolveExploreSeeds,
 } from "./policy.js";
 import { rankExploreFiles, rankExploreNodes } from "./ranking.js";
+import { collectSourceFocus } from "./source-focus.js";
 import type {
   ExploreCallPath,
   ExploreEdge,
@@ -403,7 +404,12 @@ export function exploreGraph(
     pool: impactCandidates,
     edges,
     callPaths,
-    dynamicBoundaries: dynamicBoundaryRows,
+    sourceFocus: collectSourceFocus(
+      callPaths,
+      edges,
+      dynamicBoundaryRows,
+      queryTerms(query),
+    ),
     fileScores,
     nodeScores,
     maxFiles,

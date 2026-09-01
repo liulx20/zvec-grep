@@ -742,6 +742,7 @@ test("file selection uses symbol overlap rather than role labels for redundancy"
     ],
     maxFiles: 2,
     intent: "exact_symbol",
+    rootFileIds: ["root"],
     evidence: new Map([
       [
         "root",
@@ -758,6 +759,13 @@ test("file selection uses symbol overlap rather than role labels for redundancy"
   assert.deepEqual(
     selected.map(({ fileId }) => fileId),
     ["root", "distinct"],
+  );
+  assert.deepEqual(
+    selected.map(({ fileId, role }) => [fileId, role]),
+    [
+      ["root", "central"],
+      ["distinct", "supporting"],
+    ],
   );
 });
 
