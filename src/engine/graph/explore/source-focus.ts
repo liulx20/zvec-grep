@@ -5,7 +5,6 @@ import type { ExploreCallPath, ExploreEdge } from "./types.js";
 export type SourceFocus = {
   symbolId: string;
   line: number;
-  kind: "call_path" | "dynamic_boundary";
 };
 
 export function collectSourceFocus(
@@ -21,18 +20,14 @@ export function collectSourceFocus(
 
   const focus: SourceFocus[] = [];
   const seen = new Set<string>();
-  const add = (
-    symbolId: string,
-    line: number | undefined,
-    kind: SourceFocus["kind"],
-  ) => {
+  const add = (symbolId: string, line: number | undefined) => {
     if (!line || line <= 0 || seen.has(`${symbolId}\0${line}`)) return;
     seen.add(`${symbolId}\0${line}`);
-    focus.push({ symbolId, line, kind });
+    focus.push({ symbolId, line });
   };
   for (const edge of edges)
     if (transitions.has(`${edge.src}\0${edge.dst}`))
-      add(edge.src, edge.firstLine, "call_path");
+      add(edge.src, edge.firstLine);
   for (const boundary of [...boundaries].sort(
     (left, right) =>
       semanticTermsCovered(right.target.raw, terms).size -
@@ -42,7 +37,7 @@ export function collectSourceFocus(
       (left.line ?? Number.MAX_SAFE_INTEGER) -
         (right.line ?? Number.MAX_SAFE_INTEGER),
   ))
-    add(boundary.sourceId, boundary.line, "dynamic_boundary");
+    add(boundary.sourceId, boundary.line);
   return focus;
 }
 

@@ -12,7 +12,6 @@ import { collectComponentImportEvidence } from "./component-imports.js";
 import { ExploreCandidatePool } from "./candidate-pool.js";
 import { SubgraphCandidatePool } from "./subgraph-candidate-pool.js";
 import { assembleExploreFiles } from "./assembly.js";
-import { resolveExploreIntent } from "./intent.js";
 import { collectExploreFileEvidence } from "./file-evidence.js";
 import { semanticPathAffinity } from "../counterpart-policy.js";
 import {
@@ -24,17 +23,15 @@ import {
 import {
   EXPLORE_POLICY,
   exploreEdgeBudget,
-  hasExplicitQualifiedSymbolReference,
   isTypeishKind,
   qualifiedReferenceNames,
   queryEvidenceTerms,
   queryTargetsPath,
   queryTerms,
   semanticTermsCovered,
-  resolveExactExploreSeedGroups,
-  resolveExploreSeeds,
 } from "./policy.js";
 import { rankExploreFiles, rankExploreNodes } from "./ranking.js";
+import { resolveExploreRequest } from "./request-plan.js";
 import { collectSourceFocus } from "./source-focus.js";
 import type {
   ExploreCallPath,
@@ -47,11 +44,8 @@ import type {
   ExploreSubgraphResult,
 } from "./types.js";
 
-const DEFAULT_SEARCH_LIMIT = EXPLORE_POLICY.searchLimit;
 const DEFAULT_TRAVERSAL_DEPTH = EXPLORE_POLICY.traversalDepth;
 const DEFAULT_MAX_NODES = EXPLORE_POLICY.maxNodes;
-const DEFAULT_MAX_FILES = EXPLORE_POLICY.maxFiles;
-const DEFAULT_MAX_CHARS = EXPLORE_POLICY.maxChars;
 const DEFAULT_GLUE_LIMIT = EXPLORE_POLICY.glueLimit;
 const DEFAULT_CONTAINER_GLUE_LIMIT = EXPLORE_POLICY.containerGlueLimit;
 const DEFAULT_PATH_LIMIT = EXPLORE_POLICY.pathLimit;
@@ -79,96 +73,30 @@ export function exploreGraph(
   options: ExploreOptions,
   symbolSearch?: (query: string, limit: number) => StoredEntity[],
 ): ExploreResult {
-  const query = options.query.trim();
-  const searchLimit = clampInt(
-    options.searchLimit ?? DEFAULT_SEARCH_LIMIT,
-    1,
-    32,
-  );
-  const traversalDepth = clampInt(
-    options.traversalDepth ?? DEFAULT_TRAVERSAL_DEPTH,
-    1,
-    8,
-  );
-  const requestedMaxNodes = options.maxNodes;
-  const maxFiles = clampInt(options.maxFiles ?? DEFAULT_MAX_FILES, 1, 32);
-  const maxChars = clampInt(
-    options.maxChars ?? DEFAULT_MAX_CHARS,
-    1_000,
-    200_000,
-  );
-
-  if (!graph.available) {
-    return emptyResult(query, "graph_unavailable");
-  }
-  if (!query && !options.seedId) {
-    throw new Error("explore requires a query or seedId");
-  }
-
-  const seedEntity = options.seedId ? graph.getEntity(options.seedId) : null;
-  const exactGroups = seedEntity
-    ? null
-    : resolveExactExploreSeedGroups(
-        graph,
-        options.seedId ?? query,
-        searchLimit,
-      );
-  if (exactGroups && exactGroups.length > 1) {
+  const request = resolveExploreRequest(graph, options, symbolSearch);
+  if (request.kind === "graph_unavailable")
+    return emptyResult(request.query, "graph_unavailable");
+  if (request.kind === "no_seeds")
+    return emptyResult(request.query, "no_seeds");
+  if (request.kind === "ambiguous") {
     return {
-      ...emptyResult(query, "no_context"),
+      ...emptyResult(request.query, "no_context"),
       ambiguous: true,
-      seedCandidates: exactGroups.map(({ representative }) => ({
-        id: representative.entity.id,
-        kind:
-          representative.entity.metadata?.kind === "code"
-            ? representative.entity.metadata.symbolType
-            : undefined,
-        isRoot: true,
-        entity: representative,
-      })),
+      seedCandidates: request.candidates,
       emptyReason: undefined,
     };
   }
-  const contextualSeedIds =
-    seedEntity && hasExplicitQualifiedSymbolReference(query)
-      ? resolveExploreSeeds(graph, query, undefined, searchLimit)
-      : [];
-  const graphSeedIds =
-    seedEntity || exactGroups?.[0]
-      ? []
-      : resolveExploreSeeds(graph, query, undefined, searchLimit);
-  const rootIds =
-    exactGroups?.[0]?.ids ??
-    (seedEntity
-      ? [...new Set([seedEntity.entity.id, ...contextualSeedIds])]
-      : !symbolSearch || hasQueryAlignedIdentity(graph, graphSeedIds, query)
-        ? graphSeedIds
-        : resolveExploreSeeds(
-            graph,
-            query,
-            undefined,
-            searchLimit,
-            symbolSearch,
-          ));
-  if (rootIds.length === 0) {
-    return emptyResult(query, "no_seeds");
-  }
-  const intent = resolveExploreIntent({
-    seedId: options.seedId,
-    hasExactSymbolGroup: Boolean(exactGroups?.[0]),
-  });
-
-  // Exact lookups can stay compact because the root is already known. Concept
-  // exploration needs the full candidate budget; maxFiles/maxChars selection
-  // is responsible for precision and final output size.
-  const maxNodes = clampInt(
-    requestedMaxNodes ??
-      (intent === "concept" || contextualSeedIds.length > 0
-        ? DEFAULT_MAX_NODES
-        : adaptiveNodeBudget(rootIds.length)),
-    16,
-    2_000,
-  );
+  const {
+    query,
+    searchLimit,
+    traversalDepth,
+    maxFiles,
+    maxChars,
+    maxNodes,
+    rootIds,
+    rootRepresentativeId,
+    intent,
+  } = request.plan;
 
   const subgraph = exploreSubgraph(graph, {
     seedIds: rootIds,
@@ -215,10 +143,8 @@ export function exploreGraph(
     : subgraph.edges;
   let edgesTruncated = counterpartEdges?.truncated ?? subgraph.edgesTruncated;
   addCounterpartEvidence(candidates, edges);
-  const roots = exactGroups?.[0]
-    ? nodes.filter(
-        (node) => node.id === exactGroups[0]!.representative.entity.id,
-      )
+  const roots = rootRepresentativeId
+    ? nodes.filter((node) => node.id === rootRepresentativeId)
     : nodes.filter((node) => node.isRoot);
   const dynamicBoundaryLimit = Math.min(
     DYNAMIC_BOUNDARY_BUDGET.maximum,
@@ -495,24 +421,6 @@ function collectSemanticCandidates(
     pool.add(entity, 0.2 * (1 - rank / limit));
 }
 
-function hasQueryAlignedIdentity(
-  graph: GraphReader,
-  seedIds: readonly string[],
-  query: string,
-): boolean {
-  const terms = queryEvidenceTerms(query);
-  return seedIds.some((id) => {
-    const metadata = graph.getEntity(id)?.entity.metadata;
-    return (
-      metadata?.kind === "code" &&
-      semanticTermsCovered(
-        `${metadata.symbolName ?? ""} ${metadata.scope ?? ""}`,
-        terms,
-      ).size >= 2
-    );
-  });
-}
-
 function exclusiveFileIds(
   nodes: readonly ExploreNode[],
   selectedNodeIds: readonly string[],
@@ -704,10 +612,6 @@ function addCounterpartEvidence(
       if (fileId) pool.addFileEvidence(fileId, "counterpart");
     }
   }
-}
-
-function adaptiveNodeBudget(rootCount: number): number {
-  return Math.min(DEFAULT_MAX_NODES, Math.max(64, rootCount * 16));
 }
 
 /** Explore surfaces actionable dispatch choices; raw unknowns remain queryable from the graph. */
