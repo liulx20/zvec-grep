@@ -913,6 +913,9 @@ test("exploreSubgraph expands and RWR-scores multiple seeds without context asse
     (result.nodeScores.get("left") ?? 0) >
       (result.nodeScores.get("right") ?? 0),
   );
+  const traversalEvidence = result.nodeEvidence.get("bridge")?.get("traversal");
+  assert.equal(traversalEvidence?.minDepth, 1);
+  assert.deepEqual([...traversalEvidence.sources].sort(), ["left", "right"]);
   graph.close();
 });
 
@@ -971,6 +974,11 @@ test("exploreSubgraph retains direct value collaborators within its node budget"
 
   assert.equal(result.nodes.length, 16);
   assert.ok(result.nodes.some((node) => node.id === "zz-client"));
+  assert.equal(
+    result.nodeEvidence.get("zz-client")?.get("root_value_dependency")
+      ?.protected,
+    true,
+  );
   graph.close();
 });
 

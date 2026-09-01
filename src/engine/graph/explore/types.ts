@@ -29,6 +29,31 @@ export type ExploreNode = {
   entity: StoredEntity | null;
 };
 
+export type ExploreNodeEvidenceKind =
+  | "root"
+  | "counterpart"
+  | "hierarchy"
+  | "container"
+  | "representative_member"
+  | "member_dependency"
+  | "inherited_contract"
+  | "component_import"
+  | "root_value_dependency"
+  | "traversal"
+  | "instantiation"
+  | "call_neighbor"
+  | "impact"
+  | "structural_bridge"
+  | "dynamic_boundary"
+  | "call_path";
+
+export type ExploreNodeEvidence = {
+  strength: number;
+  minDepth: number;
+  protected: boolean;
+  sources: ReadonlySet<string>;
+};
+
 export type ExploreEdge = {
   src: string;
   dst: string;
@@ -120,6 +145,11 @@ export type ExploreSubgraphResult = {
   available: boolean;
   rootIds: string[];
   nodes: ExploreNode[];
+  /** Retrieval reasons retained for ranking, diagnostics and later projection. */
+  nodeEvidence: ReadonlyMap<
+    string,
+    ReadonlyMap<ExploreNodeEvidenceKind, ExploreNodeEvidence>
+  >;
   /** Construction or injection sites that wire a root to its collaborator. */
   structuralBridgeIds: string[];
   /** Files represented only by reverse impact expansion. */

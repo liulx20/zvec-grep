@@ -1145,6 +1145,21 @@ test("raw incoming/outgoing edge queries are batch-capable and drive traversal",
       .map((item) => item.id),
     ["b", "c"],
   );
+  assert.deepEqual(
+    graph
+      .traverse("a", {
+        edgeKinds: ["CALLS", "REFS"],
+        direction: "outgoing",
+        maxDepth: 2,
+        limit: 10,
+        includeDepth: true,
+      })
+      .map(({ id, depth }) => [id, depth]),
+    [
+      ["b", 1],
+      ["c", 2],
+    ],
+  );
   assert.ok(graph.outgoingCalls > outgoingBefore);
   assert.ok(graph.incomingCalls > incomingBefore);
   graph.close();

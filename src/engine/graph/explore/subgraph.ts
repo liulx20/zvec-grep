@@ -10,6 +10,7 @@ import type {
 import { collectCallPaths, deriveExecutionPaths } from "./paths.js";
 import { collectComponentImportEvidence } from "./component-imports.js";
 import { ExploreCandidatePool } from "./candidate-pool.js";
+import { SubgraphCandidatePool } from "./subgraph-candidate-pool.js";
 import { assembleExploreFiles } from "./assembly.js";
 import { resolveExploreIntent } from "./intent.js";
 import { collectExploreFileEvidence } from "./file-evidence.js";
@@ -38,6 +39,7 @@ import type {
   ExploreCallPath,
   ExploreEdge,
   ExploreNode,
+  ExploreNodeEvidenceKind,
   ExploreOptions,
   ExploreResult,
   ExploreSubgraphOptions,
@@ -58,13 +60,6 @@ const DYNAMIC_BOUNDARY_BUDGET = EXPLORE_POLICY.dynamicBoundaryBudget;
 const COMPONENT_IMPORT_POLICY = EXPLORE_POLICY.componentImport;
 const TRAVERSE_EDGE_KINDS: readonly GraphEdgeKind[] =
   EXPLORE_POLICY.traverseEdgeKinds;
-
-type ScoredNode = {
-  id: string;
-  kind?: string;
-  isRoot: boolean;
-  depth: number;
-};
 
 type ExploreHierarchyReader = GraphReader & {
   hierarchyDiverse?: (
@@ -572,7 +567,7 @@ function collectDirectCallCollaborators(
 
   const existingIds = new Set(pool.nodes.map((node) => node.id));
   const initialSize = pool.size;
-  const candidates = graph
+  const dependencies = graph
     .outgoingEdges(
       sources.map((source) => source.id),
       ["CALLS"],
@@ -607,7 +602,7 @@ function collectDirectCallCollaborators(
         left.edge.dst.localeCompare(right.edge.dst),
     );
 
-  for (const { edge, entity } of candidates) {
+  for (const { edge, entity } of dependencies) {
     if (!entity || existingIds.has(edge.dst)) continue;
     existingIds.add(edge.dst);
     pool.addFileEvidence(entity.file.id, "collaborator");
@@ -1090,13 +1085,12 @@ export function exploreSubgraph(
     return emptySubgraph(true);
   }
 
-  const selected = new Map<string, ScoredNode>();
+  const candidates = new SubgraphCandidatePool();
   for (const id of rootIds) {
-    selected.set(id, {
-      id,
-      kind: undefined,
-      isRoot: true,
+    candidates.add({ id }, "root", {
       depth: 0,
+      isRoot: true,
+      protect: true,
     });
   }
   const rootCounterpartIds = [
@@ -1105,20 +1099,22 @@ export function exploreSubgraph(
   ]
     .flatMap((edge) => [edge.src, edge.dst])
     .filter((id) => !rootIds.includes(id));
-  for (const id of rootCounterpartIds) absorb(selected, { id }, false, 0);
+  for (const id of rootCounterpartIds)
+    absorb(candidates, { id }, 0, "counterpart");
+  candidates.protect(rootCounterpartIds, "counterpart");
   const hierarchyBudget = Math.max(
     8,
     Math.floor(maxNodes * HIERARCHY_BUDGET_RATIO),
   );
   const hierarchyGlueIds = expandHierarchy(
     graph,
-    selected,
+    candidates,
     rootIds,
     hierarchyBudget,
   );
   glueContainers(
     graph,
-    selected,
+    candidates,
     rootIds,
     Math.min(DEFAULT_CONTAINER_GLUE_LIMIT, maxNodes),
     rootIds.some((id) => {
@@ -1141,7 +1137,7 @@ export function exploreSubgraph(
   const representativeMemberIds = representativeSelectionEnabled
     ? glueRepresentativeMembers(
         graph,
-        selected,
+        candidates,
         [...new Set([...rootIds, ...hierarchyGlueIds])],
         Math.max(8, Math.min(32, Math.floor(maxNodes * 0.3))),
         memberQueryTerms,
@@ -1149,14 +1145,14 @@ export function exploreSubgraph(
     : [];
   const representativeDependencies = glueRepresentativeMemberDependencies(
     graph,
-    selected,
+    candidates,
     representativeMemberIds,
     Math.max(8, Math.min(24, Math.floor(maxNodes * 0.12))),
     memberQueryTerms,
   );
   const inheritedContractIds = glueInheritedContracts(
     graph,
-    selected,
+    candidates,
     rootIds,
     Math.min(16, Math.max(4, rootIds.length * 2)),
   );
@@ -1167,10 +1163,11 @@ export function exploreSubgraph(
     Math.max(4, Math.min(24, Math.floor(maxNodes * 0.2))),
     COMPONENT_IMPORT_POLICY.rankingWeight,
   );
-  for (const id of componentImports.nodeIds) absorb(selected, { id }, false, 1);
+  for (const id of componentImports.nodeIds)
+    absorb(candidates, { id }, 1, "component_import");
   const rootValueDependencies = glueRootValueDependencies(
     graph,
-    selected,
+    candidates,
     rootIds,
     memberQueryTerms,
     COMPONENT_IMPORT_POLICY.protectedNodes,
@@ -1180,8 +1177,8 @@ export function exploreSubgraph(
     8,
     Math.ceil(maxNodes / Math.max(1, rootIds.length)),
   );
-  for (const rootId of [...selected.keys()].filter(
-    (id) => selected.get(id)?.isRoot,
+  for (const rootId of [...candidates.keys()].filter(
+    (id) => candidates.get(id)?.isRoot,
   )) {
     const rootMetadata = graph.getEntity(rootId)?.entity.metadata;
     const rootKind =
@@ -1204,9 +1201,17 @@ export function exploreSubgraph(
       maxDepth: 1,
       limit: perRootBudget,
       includeStart: true,
+      includeDepth: true,
     });
     for (const ref of direct) {
-      absorb(selected, ref, false, ref.id === rootId ? 0 : 1);
+      absorb(
+        candidates,
+        ref,
+        ref.id === rootId ? 0 : (ref.depth ?? 1),
+        "traversal",
+        2,
+        rootId,
+      );
     }
     const walked = graph.traverse(rootId, {
       edgeKinds: traversalKinds,
@@ -1216,16 +1221,24 @@ export function exploreSubgraph(
       maxDepth: traversalDepth,
       limit: perRootBudget,
       includeStart: true,
+      includeDepth: true,
     });
     for (const ref of walked) {
-      absorb(selected, ref, false, ref.id === rootId ? 0 : traversalDepth);
+      absorb(
+        candidates,
+        ref,
+        ref.id === rootId ? 0 : (ref.depth ?? traversalDepth),
+        "traversal",
+        1,
+        rootId,
+      );
     }
   }
 
   const instantiationEdges = graph.outgoingEdges(
-    [...selected.keys()],
+    [...candidates.keys()],
     ["INSTANTIATES"],
-    Math.min(256, Math.max(32, selected.size * 2)),
+    Math.min(256, Math.max(32, candidates.size * 2)),
   );
   const rootInstantiatedTypes = new Set(
     instantiationEdges
@@ -1238,7 +1251,7 @@ export function exploreSubgraph(
     const metadata = graph.getEntity(id)?.entity.metadata;
     if (metadata?.kind !== "code" || !isTypeishKind(metadata.symbolType ?? ""))
       return false;
-    absorb(selected, { id }, false, 1);
+    absorb(candidates, { id }, 1, "instantiation");
     return true;
   });
   const instantiatedProviders = new Set<string>();
@@ -1248,12 +1261,19 @@ export function exploreSubgraph(
       instantiatedProviders.add(edge.dst);
       if (rootInstantiatedTypes.has(typeId))
         rootInstantiatedProviders.add(edge.dst);
-      absorb(selected, { id: edge.dst }, false, 1);
+      absorb(
+        candidates,
+        { id: edge.dst },
+        1,
+        "instantiation",
+        edge.confidence,
+        typeId,
+      );
     }
   representativeMemberIds.push(
     ...glueRepresentativeMembers(
       graph,
-      selected,
+      candidates,
       [...instantiatedTypes, ...instantiatedProviders],
       Math.min(
         DEFAULT_CONTAINER_GLUE_LIMIT,
@@ -1264,13 +1284,13 @@ export function exploreSubgraph(
     ),
   );
 
-  glueCallNeighbors(graph, selected, rootIds, DEFAULT_GLUE_LIMIT);
+  glueCallNeighbors(graph, candidates, rootIds, DEFAULT_GLUE_LIMIT);
   const structuralBridgeIds = new Set(inheritedContractIds);
   const directImpactIds = new Set<string>();
   const incomingCallPaths: ExploreCallPath[] = [];
   const impactGlueIds = glueImpactNeighbors(
     graph,
-    selected,
+    candidates,
     rootIds,
     DEFAULT_GLUE_LIMIT,
     structuralBridgeIds,
@@ -1281,7 +1301,7 @@ export function exploreSubgraph(
   impactGlueIds.push(
     ...glueImpactNeighbors(
       graph,
-      selected,
+      candidates,
       hierarchyGlueIds,
       DEFAULT_GLUE_LIMIT - impactGlueIds.length,
       structuralBridgeIds,
@@ -1293,7 +1313,7 @@ export function exploreSubgraph(
   );
   extendStructuralBridges(
     graph,
-    selected,
+    candidates,
     structuralBridgeIds,
     memberQueryTerms,
     Math.max(4, traversalDepth * 2),
@@ -1314,7 +1334,7 @@ export function exploreSubgraph(
   );
   for (const path of focusedBoundaryPaths)
     for (const [depth, id] of path.nodes.entries())
-      absorb(selected, { id }, false, depth);
+      absorb(candidates, { id }, depth, "dynamic_boundary");
   const pathResult =
     options.includeCallPaths === false
       ? { paths: [], refs: [] }
@@ -1326,7 +1346,8 @@ export function exploreSubgraph(
           memberQueryTerms,
           focusNames,
         );
-  for (const ref of pathResult.refs) absorb(selected, ref, false, 1);
+  for (const ref of pathResult.refs)
+    absorb(candidates, ref, ref.depth ?? 1, "call_path");
   const pairCallPaths = [
     ...new Map(
       [...focusedBoundaryPaths, ...incomingCallPaths, ...pathResult.paths].map(
@@ -1334,31 +1355,34 @@ export function exploreSubgraph(
       ),
     ).values(),
   ];
-  const protectedIds = new Set([
-    ...rootIds,
-    ...representativeMemberIds,
-    ...representativeDependencies,
-    ...pairCallPaths.flatMap((path) => path.nodes),
-    ...hierarchyGlueIds,
-    ...rootValueDependencies,
-    ...structuralBridgeIds,
-    ...componentImports.rankingLinks.map((dependency) => dependency.dst),
-    ...impactGlueIds,
-    ...focusedBoundaryIds,
-  ]);
+  candidates.protect(rootIds, "root");
+  candidates.protect(representativeMemberIds, "representative_member");
+  candidates.protect(representativeDependencies, "member_dependency");
+  candidates.protect(
+    pairCallPaths.flatMap((path) => path.nodes),
+    "call_path",
+  );
+  candidates.protect(hierarchyGlueIds, "hierarchy");
+  candidates.protect(rootValueDependencies, "root_value_dependency");
+  candidates.protect(structuralBridgeIds, "structural_bridge");
+  candidates.protect(
+    componentImports.rankingLinks.map((dependency) => dependency.dst),
+    "component_import",
+  );
+  candidates.protect(impactGlueIds, "impact");
+  candidates.protect(focusedBoundaryIds, "dynamic_boundary");
   trimToMaxNodes(
-    selected,
-    protectedIds,
+    candidates,
     maxNodes,
     graph,
     queryEvidenceTerms(options.query ?? ""),
   );
   const retainedPairCallPaths = pairCallPaths.filter((path) =>
-    path.nodes.every((id) => selected.has(id)),
+    path.nodes.every((id) => candidates.has(id)),
   );
 
   const nodes: ExploreNode[] = [];
-  for (const scored of selected.values()) {
+  for (const scored of candidates.values()) {
     const entity = graph.getEntity(scored.id);
     const metaKind =
       entity?.entity.metadata?.kind === "code"
@@ -1373,11 +1397,11 @@ export function exploreSubgraph(
   }
 
   const edgeBudget = exploreEdgeBudget(maxNodes);
-  const induced = collectExploreEdges(graph, selected, edgeBudget);
+  const induced = collectExploreEdges(graph, candidates, edgeBudget);
   const edges = induced.edges;
   const rankingLinks = componentImports.rankingLinks.filter(
     (dependency) =>
-      selected.has(dependency.src) && selected.has(dependency.dst),
+      candidates.has(dependency.src) && candidates.has(dependency.dst),
   );
   const nodeScores = rankExploreNodes(
     nodes,
@@ -1419,8 +1443,9 @@ export function exploreSubgraph(
     available: true,
     rootIds,
     nodes,
+    nodeEvidence: candidates.evidence(),
     structuralBridgeIds: [...structuralBridgeIds].filter((id) =>
-      selected.has(id),
+      candidates.has(id),
     ),
     impactExpansionFileIds: exclusiveFileIds(nodes, impactGlueIds),
     directImpactFileIds: [...fileIdsForRoots(nodes, [...directImpactIds])],
@@ -1502,7 +1527,7 @@ function focusedDynamicBoundaryPaths(
 
 function glueRootValueDependencies(
   graph: GraphReader,
-  selected: Map<string, ScoredNode>,
+  candidates: SubgraphCandidatePool,
   rootIds: readonly string[],
   terms: readonly string[],
   limit: number,
@@ -1539,7 +1564,7 @@ function glueRootValueDependencies(
     )
     .slice(0, limit)
     .map(({ id }) => {
-      absorb(selected, { id }, false, 1);
+      absorb(candidates, { id }, 1, "root_value_dependency");
       return id;
     });
 }
@@ -1569,7 +1594,7 @@ function shouldSelectRepresentativeMembers(
 
 function glueRepresentativeMembers(
   graph: GraphReader,
-  selected: Map<string, ScoredNode>,
+  candidates: SubgraphCandidatePool,
   rootIds: readonly string[],
   limit: number,
   terms: readonly string[],
@@ -1679,7 +1704,7 @@ function glueRepresentativeMembers(
       }
     }
     for (const member of representative) {
-      absorb(selected, member, false, 1);
+      absorb(candidates, member, 1, "representative_member");
       addedIds.push(member.id);
       if (addedIds.length >= limit) break;
     }
@@ -1689,7 +1714,7 @@ function glueRepresentativeMembers(
 
 function glueRepresentativeMemberDependencies(
   graph: GraphReader,
-  selected: Map<string, ScoredNode>,
+  candidates: SubgraphCandidatePool,
   memberIds: readonly string[],
   limit: number,
   terms: readonly string[],
@@ -1699,7 +1724,7 @@ function glueRepresentativeMemberDependencies(
   // Directional storage queries round-robin their result window by seed, so a
   // single batched read preserves member coverage without N per-member SQL
   // round trips.
-  const candidates = graph
+  const dependencies = graph
     .outgoingEdges(
       memberIds,
       ["INSTANTIATES", "CALLS", "REFS"],
@@ -1734,10 +1759,19 @@ function glueRepresentativeMemberDependencies(
     });
   const added: string[] = [];
   const seen = new Set<string>();
-  for (const { edge } of candidates) {
+  for (const { edge } of dependencies) {
     if (seen.has(edge.dst)) continue;
     seen.add(edge.dst);
-    if (absorb(selected, { id: edge.dst, kind: undefined }, false, 2))
+    if (
+      absorb(
+        candidates,
+        { id: edge.dst, kind: undefined },
+        2,
+        "member_dependency",
+        edge.confidence,
+        edge.src,
+      )
+    )
       added.push(edge.dst);
     if (added.length >= limit) break;
   }
@@ -1746,7 +1780,7 @@ function glueRepresentativeMemberDependencies(
 
 function glueImpactNeighbors(
   graph: GraphReader,
-  selected: Map<string, ScoredNode>,
+  candidates: SubgraphCandidatePool,
   rootIds: readonly string[],
   limit: number,
   structuralBridgeIds: Set<string>,
@@ -1808,7 +1842,8 @@ function glueImpactNeighbors(
         )
           directImpactIds.add(source.id);
         const retained =
-          selected.has(source.id) || absorb(selected, source, false, 1);
+          candidates.has(source.id) ||
+          absorb(candidates, source, 1, "impact", 1, rootId);
         if (retained) {
           added += 1;
           rootAdded += 1;
@@ -1863,7 +1898,9 @@ function glueImpactNeighbors(
       if (directCallSourceIds.has(ref.id) || dynamicSourceIds.has(ref.id))
         directImpactIds.add(ref.id);
       if (bridgeIds.has(ref.id)) structuralBridgeIds.add(ref.id);
-      const retained = selected.has(ref.id) || absorb(selected, ref, false, 2);
+      const retained =
+        candidates.has(ref.id) ||
+        absorb(candidates, ref, 2, "impact", 1, rootId);
       if (retained) {
         added += 1;
         rootAdded += 1;
@@ -1883,7 +1920,7 @@ function glueImpactNeighbors(
         const path = graph.pathBetween(ref.id, rootId, 2, 256);
         if (!path || path.length < 3) continue;
         for (const item of path) {
-          absorb(selected, item, false, 2);
+          absorb(candidates, item, item.depth ?? 2, "call_path", 1, rootId);
           structuralBridgeIds.add(item.id);
         }
         incomingCallPaths.push({
@@ -1928,7 +1965,7 @@ function constructionBridgeSources(
 
 function extendStructuralBridges(
   graph: GraphReader,
-  selected: Map<string, ScoredNode>,
+  candidates: SubgraphCandidatePool,
   bridgeIds: Set<string>,
   terms: readonly string[],
   maxDepth: number,
@@ -2005,10 +2042,10 @@ function extendStructuralBridges(
       ["CALLS", "REFS"],
       Math.min(256, remaining * 16),
     );
-    let candidates = rankedCandidates(outgoing);
-    if (candidates.length === 0)
-      candidates = rankedCandidates(outgoing, `bridge:${depth}`);
-    if (candidates.length === 0) {
+    let bridgeCandidates = rankedCandidates(outgoing);
+    if (bridgeCandidates.length === 0)
+      bridgeCandidates = rankedCandidates(outgoing, `bridge:${depth}`);
+    if (bridgeCandidates.length === 0) {
       const containers = [
         ...new Set(
           frontier.flatMap((id) =>
@@ -2016,7 +2053,7 @@ function extendStructuralBridges(
           ),
         ),
       ];
-      candidates = rankedCandidates(
+      bridgeCandidates = rankedCandidates(
         graph
           .outgoingEdges(containers, ["REFS"], Math.min(128, remaining * 8))
           .filter((edge) => edge.rel === "function"),
@@ -2024,11 +2061,18 @@ function extendStructuralBridges(
     }
     const next: string[] = [];
     const coveredAtDepth = new Set<string>();
-    for (const { edge, coveredTerms } of candidates) {
+    for (const { edge, coveredTerms } of bridgeCandidates) {
       if (bridgeIds.has(edge.dst)) continue;
       if ([...coveredTerms].every((term) => coveredAtDepth.has(term))) continue;
       for (const term of coveredTerms) coveredAtDepth.add(term);
-      absorb(selected, { id: edge.dst }, false, depth + 2);
+      absorb(
+        candidates,
+        { id: edge.dst },
+        depth + 2,
+        "structural_bridge",
+        edge.confidence,
+        edge.src,
+      );
       bridgeIds.add(edge.dst);
       next.push(edge.dst);
       remaining -= 1;
@@ -2098,6 +2142,7 @@ function emptySubgraph(available: boolean): ExploreSubgraphResult {
     available,
     rootIds: [],
     nodes: [],
+    nodeEvidence: new Map(),
     structuralBridgeIds: [],
     impactExpansionFileIds: [],
     directImpactFileIds: [],
@@ -2110,7 +2155,7 @@ function emptySubgraph(available: boolean): ExploreSubgraphResult {
 
 function expandHierarchy(
   graph: GraphReader,
-  selected: Map<string, ScoredNode>,
+  candidates: SubgraphCandidatePool,
   rootIds: readonly string[],
   budget: number,
 ): string[] {
@@ -2126,7 +2171,7 @@ function expandHierarchy(
       "bases",
       Math.min(10, remaining),
     )) {
-      if (absorb(selected, ref, false, 1)) {
+      if (absorb(candidates, ref, 1, "hierarchy", 1, rootId)) {
         remaining -= 1;
         addedIds.push(ref.id);
       }
@@ -2134,7 +2179,7 @@ function expandHierarchy(
     const derivedLimit = Math.min(10, remaining);
     const derived = hierarchySample(graph, rootId, "derived", derivedLimit);
     for (const ref of derived) {
-      if (absorb(selected, ref, false, 1)) {
+      if (absorb(candidates, ref, 1, "hierarchy", 1, rootId)) {
         remaining -= 1;
         addedIds.push(ref.id);
       }
@@ -2143,10 +2188,11 @@ function expandHierarchy(
 
   // Sibling types: other derived types of the same bases.
   const baseIds = new Set<string>();
-  for (const id of [...selected.keys()]) {
+  for (const id of [...candidates.keys()]) {
     for (const base of graph.hierarchy(id, "bases", 5)) {
       baseIds.add(base.id);
-      if (absorb(selected, base, false, 1)) addedIds.push(base.id);
+      if (absorb(candidates, base, 1, "hierarchy", 1, id))
+        addedIds.push(base.id);
     }
   }
   for (const baseId of baseIds) {
@@ -2160,7 +2206,7 @@ function expandHierarchy(
       Math.min(12, remaining),
     );
     for (const sib of siblings) {
-      if (absorb(selected, sib, false, 2)) {
+      if (absorb(candidates, sib, 2, "hierarchy", 1, baseId)) {
         remaining -= 1;
         addedIds.push(sib.id);
         if (remaining <= 0) {
@@ -2243,7 +2289,7 @@ function diverseRefsByFile(
 
 function glueCallNeighbors(
   graph: GraphReader,
-  selected: Map<string, ScoredNode>,
+  candidates: SubgraphCandidatePool,
   rootIds: readonly string[],
   limit: number,
 ): void {
@@ -2256,7 +2302,7 @@ function glueCallNeighbors(
       ...graph.callers(rootId, 1, 20),
       ...graph.callees(rootId, 1, 20),
     ]) {
-      if (absorb(selected, ref, false, 1)) {
+      if (absorb(candidates, ref, ref.depth ?? 1, "call_neighbor", 1, rootId)) {
         added += 1;
         if (added >= limit) {
           break;
@@ -2282,7 +2328,17 @@ function glueCallNeighbors(
       ["CALLS"],
       Math.max(1, limit - added),
     )) {
-      if (absorb(selected, { id: edge.src }, false, 2)) added += 1;
+      if (
+        absorb(
+          candidates,
+          { id: edge.src },
+          2,
+          "call_neighbor",
+          edge.confidence,
+          edge.dst,
+        )
+      )
+        added += 1;
       if (added >= limit) break;
     }
     if (added >= limit) continue;
@@ -2319,7 +2375,8 @@ function glueCallNeighbors(
       2,
     );
     for (const source of dynamicSources) {
-      if (absorb(selected, source, false, 2)) added += 1;
+      if (absorb(candidates, source, 2, "dynamic_boundary", 1, rootId))
+        added += 1;
       if (added >= limit) break;
     }
   }
@@ -2364,7 +2421,7 @@ function symbolName(storage: GraphReader, id: string): string | undefined {
 
 function glueInheritedContracts(
   graph: GraphReader,
-  selected: Map<string, ScoredNode>,
+  candidates: SubgraphCandidatePool,
   rootIds: readonly string[],
   limit: number,
 ): string[] {
@@ -2410,7 +2467,7 @@ function glueInheritedContracts(
       if (!names.has(symbolName(graph, member.id)?.toLowerCase() ?? ""))
         continue;
       if (contracts.includes(member.id)) continue;
-      absorb(selected, member, false, 1);
+      absorb(candidates, member, 1, "inherited_contract", 1, ownerId);
       contracts.push(member.id);
       if (contracts.length >= limit) return contracts;
     }
@@ -2419,7 +2476,7 @@ function glueInheritedContracts(
 
 function glueContainers(
   graph: GraphReader,
-  selected: Map<string, ScoredNode>,
+  candidates: SubgraphCandidatePool,
   rootIds: readonly string[],
   limit: number,
   includeSiblings: boolean,
@@ -2431,26 +2488,22 @@ function glueContainers(
       : [neighbor.parent_id];
     for (const id of ids) {
       if (!id || added >= limit) continue;
-      if (absorb(selected, { id }, false, 1)) added += 1;
+      if (absorb(candidates, { id }, 1, "container")) added += 1;
     }
   }
 }
 
 function trimToMaxNodes(
-  selected: Map<string, ScoredNode>,
-  protectedIds: ReadonlySet<string>,
+  candidates: SubgraphCandidatePool,
   maxNodes: number,
   graph: GraphReader,
   terms: readonly string[],
 ): void {
-  if (selected.size <= maxNodes) {
+  if (candidates.size <= maxNodes) {
     return;
   }
-  const insertionRank = new Map(
-    [...selected.keys()].map((id, index) => [id, index]),
-  );
   const queryCoverage = new Map(
-    [...selected.keys()].map((id) => {
+    [...candidates.keys()].map((id) => {
       const entity = graph.getEntity(id);
       const metadata = entity?.entity.metadata;
       const identity =
@@ -2460,31 +2513,31 @@ function trimToMaxNodes(
       return [id, semanticTermsCovered(identity, terms).size];
     }),
   );
-  const ranked = [...selected.values()].sort((a, b) => {
+  const ranked = [...candidates.values()].sort((a, b) => {
     if (a.isRoot !== b.isRoot) return Number(b.isRoot) - Number(a.isRoot);
-    const ar = protectedIds.has(a.id) ? 0 : 1;
-    const br = protectedIds.has(b.id) ? 0 : 1;
+    const ar = candidates.isProtected(a.id) ? 0 : 1;
+    const br = candidates.isProtected(b.id) ? 0 : 1;
     if (ar !== br) {
       return ar - br;
     }
-    if (a.depth !== b.depth) return a.depth - b.depth;
+    if (a.minDepth !== b.minDepth) return a.minDepth - b.minDepth;
     const coverageDifference =
       queryCoverage.get(b.id)! - queryCoverage.get(a.id)!;
     if (coverageDifference !== 0) return coverageDifference;
-    return insertionRank.get(a.id)! - insertionRank.get(b.id)!;
+    const evidenceDifference =
+      candidates.evidenceStrength(b.id) - candidates.evidenceStrength(a.id);
+    if (evidenceDifference !== 0) return evidenceDifference;
+    return a.id.localeCompare(b.id);
   });
-  selected.clear();
-  for (const node of ranked.slice(0, maxNodes)) {
-    selected.set(node.id, node);
-  }
+  candidates.retain(new Set(ranked.slice(0, maxNodes).map((node) => node.id)));
 }
 
 function collectExploreEdges(
   graph: GraphReader,
-  selected: Map<string, ScoredNode>,
+  candidates: SubgraphCandidatePool,
   limit: number,
 ): { edges: ExploreEdge[]; truncated: boolean } {
-  const ids = [...selected.keys()];
+  const ids = [...candidates.keys()];
   const result = graph.edges(ids, TRAVERSE_EDGE_KINDS, limit);
   return {
     edges: result.edges.map(toExploreEdge),
@@ -2510,29 +2563,18 @@ function toExploreEdge(
 }
 
 function absorb(
-  selected: Map<string, ScoredNode>,
+  candidates: SubgraphCandidatePool,
   ref: SymRef,
-  isRoot: boolean,
   depth: number,
+  evidence: ExploreNodeEvidenceKind,
+  strength = 1,
+  sourceId?: string,
 ): boolean {
-  const existing = selected.get(ref.id);
-  if (existing) {
-    if (isRoot) {
-      existing.isRoot = true;
-    }
-    existing.depth = Math.min(existing.depth, depth);
-    if (ref.kind) {
-      existing.kind = ref.kind;
-    }
-    return false;
-  }
-  selected.set(ref.id, {
-    id: ref.id,
-    kind: ref.kind,
-    isRoot,
+  return candidates.add(ref, evidence, {
     depth,
+    strength,
+    sourceId,
   });
-  return true;
 }
 
 function emptyResult(

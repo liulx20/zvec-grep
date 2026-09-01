@@ -8,6 +8,8 @@ export type SymRef = {
   id: string;
   kind?: string;
   count?: number;
+  /** Exact BFS distance when requested by a traversal consumer. */
+  depth?: number;
 };
 
 export type UsageRef = {
@@ -101,6 +103,7 @@ export type TraverseOpts = {
   maxDepth: number;
   limit: number;
   includeStart?: boolean;
+  includeDepth?: boolean;
 };
 
 export type GraphStats = {

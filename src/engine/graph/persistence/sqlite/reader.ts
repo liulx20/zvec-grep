@@ -1052,9 +1052,17 @@ export class SqliteGraphReader {
       opts.direction,
       opts.maxDepth,
       opts.limit,
+      opts.includeDepth,
     );
     return opts.includeStart
-      ? [{ id, kind: this.symbolKind(id) }, ...found].slice(0, opts.limit)
+      ? [
+          {
+            id,
+            kind: this.symbolKind(id),
+            ...(opts.includeDepth ? { depth: 0 } : {}),
+          },
+          ...found,
+        ].slice(0, opts.limit)
       : found;
   }
 
@@ -1126,10 +1134,16 @@ export class SqliteGraphReader {
     direction: "outgoing" | "incoming" | "both",
     maxDepth: number,
     limit: number,
+    includeDepth = false,
   ): SymRef[] {
     if (limit <= 0) return [];
     const seen = new Set([start]),
       ordered: string[] = [];
+    const depths = new Map<string, number>();
+    const refs = () =>
+      this.refsForIds(ordered).map((ref) =>
+        includeDepth ? { ...ref, depth: depths.get(ref.id) } : ref,
+      );
     let frontier = [start];
     for (
       let depth = 0;
@@ -1156,9 +1170,9 @@ export class SqliteGraphReader {
             if (seen.has(id)) continue;
             seen.add(id);
             ordered.push(id);
+            depths.set(id, depth + 1);
             next.push(id);
-            if (ordered.length >= Math.max(0, limit))
-              return this.refsForIds(ordered);
+            if (ordered.length >= Math.max(0, limit)) return refs();
           }
         const exhausted =
           direction === "both"
@@ -1170,7 +1184,7 @@ export class SqliteGraphReader {
       }
       frontier = next;
     }
-    return this.refsForIds(ordered);
+    return refs();
   }
 
   private expandImpactScope(
