@@ -20,6 +20,7 @@ import {
   resolveExactExploreSeedGroups,
   resolveExploreSeeds,
 } from "../../dist/engine/graph/explore/policy.js";
+import { resolveExploreRequest } from "../../dist/engine/graph/explore/request-plan.js";
 import { entityStorage, graphEntity as entity } from "../helpers/graph.mjs";
 
 test("named-root flows prefer the most complete connecting chain", () => {
@@ -124,6 +125,70 @@ test("explicit file paths disambiguate exact explore symbols", () => {
       8,
     ).slice(0, 2),
     ["private-send", "writer"],
+  );
+});
+
+test("explore seed planning prefers indexed search and falls back on weak recall", () => {
+  const indexed = entity(
+    "indexed",
+    "OrderQueueWorkflow",
+    "orders/workflow.ts",
+    { symbolType: "function" },
+  );
+  const graph = { ...entityStorage([indexed]), available: true };
+  let graphScans = 0;
+  graph.findSymbolsByQuery = () => {
+    graphScans += 1;
+    return [];
+  };
+
+  const indexedRequest = resolveExploreRequest(
+    graph,
+    { query: "order queue workflow" },
+    () => [indexed],
+  );
+  assert.equal(indexedRequest.kind, "ready");
+  assert.deepEqual(indexedRequest.plan.rootIds, ["indexed"]);
+  assert.equal(graphScans, 0);
+
+  const fallback = entity(
+    "fallback",
+    "CheckpointRecovery",
+    "storage/recovery.ts",
+    { symbolType: "function" },
+  );
+  const fallbackGraph = { ...entityStorage([fallback]), available: true };
+  fallbackGraph.findSymbolsByQuery = () => {
+    graphScans += 1;
+    return [fallback];
+  };
+  const fallbackRequest = resolveExploreRequest(
+    fallbackGraph,
+    { query: "checkpoint recovery" },
+    () => [indexed],
+  );
+  assert.equal(fallbackRequest.kind, "ready");
+  assert.deepEqual(fallbackRequest.plan.rootIds, ["fallback"]);
+  assert.ok(graphScans > 0);
+});
+
+test("generic exact seeds use file-scoped fragment lookup", () => {
+  const declaration = entity("router", "Router", "src/router.rs", {
+    symbolType: "class",
+  });
+  const implementation = entity("router-impl", "Router<S>", "src/router.rs", {
+    symbolType: "class",
+  });
+  const storage = entityStorage([declaration, implementation]);
+  storage.findSymbolsByFileStems = () =>
+    new Map([["router", [declaration, implementation]]]);
+  storage.findSymbolsByQuery = () => {
+    throw new Error("generic grouping must not scan all graph symbols");
+  };
+
+  assert.deepEqual(
+    resolveExactExploreSeedGroups(storage, "Router", 8)?.[0]?.ids,
+    ["router", "router-impl"],
   );
 });
 

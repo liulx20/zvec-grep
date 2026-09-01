@@ -71,25 +71,17 @@ export function resolveExploreRequest(
 
   const contextualSeedIds =
     seedEntity && hasExplicitQualifiedSymbolReference(query)
-      ? resolveExploreSeeds(graph, query, undefined, searchLimit)
+      ? resolvePreferredSeeds(graph, query, searchLimit, symbolSearch)
       : [];
-  const graphSeedIds =
+  const discoveredSeedIds =
     seedEntity || exactGroups?.[0]
       ? []
-      : resolveExploreSeeds(graph, query, undefined, searchLimit);
+      : resolvePreferredSeeds(graph, query, searchLimit, symbolSearch);
   const rootIds =
     exactGroups?.[0]?.ids ??
     (seedEntity
       ? [...new Set([seedEntity.entity.id, ...contextualSeedIds])]
-      : !symbolSearch || hasQueryAlignedIdentity(graph, graphSeedIds, query)
-        ? graphSeedIds
-        : resolveExploreSeeds(
-            graph,
-            query,
-            undefined,
-            searchLimit,
-            symbolSearch,
-          ));
+      : discoveredSeedIds);
   if (rootIds.length === 0) return { kind: "no_seeds", query };
 
   const intent = resolveExploreIntent({
@@ -128,22 +120,52 @@ export function resolveExploreRequest(
   };
 }
 
+function resolvePreferredSeeds(
+  graph: GraphReader,
+  query: string,
+  limit: number,
+  symbolSearch?: SymbolSearch,
+): string[] {
+  if (!symbolSearch) return resolveExploreSeeds(graph, query, undefined, limit);
+
+  const preferred = resolveExploreSeeds(
+    graph,
+    query,
+    undefined,
+    limit,
+    symbolSearch,
+  );
+  if (hasQueryAlignedIdentity(graph, preferred, query)) return preferred;
+
+  const fallback = resolveExploreSeeds(graph, query, undefined, limit);
+  return preferred.length > 0 &&
+    !hasQueryAlignedIdentity(graph, fallback, query)
+    ? preferred
+    : fallback;
+}
+
 function hasQueryAlignedIdentity(
   graph: GraphReader,
   seedIds: readonly string[],
   query: string,
 ): boolean {
   const terms = queryEvidenceTerms(query);
-  return seedIds.some((id) => {
+  if (terms.length === 0) return false;
+  const covered = new Set<string>();
+  for (const id of seedIds) {
     const metadata = graph.getEntity(id)?.entity.metadata;
-    return (
-      metadata?.kind === "code" &&
-      semanticTermsCovered(
+    if (metadata?.kind === "code")
+      for (const term of semanticTermsCovered(
         `${metadata.symbolName ?? ""} ${metadata.scope ?? ""}`,
         terms,
-      ).size >= 2
-    );
-  });
+      ))
+        covered.add(term);
+  }
+  const required = Math.min(
+    terms.length,
+    Math.max(2, Math.ceil(terms.length * 0.75)),
+  );
+  return covered.size >= required;
 }
 
 function adaptiveNodeBudget(rootCount: number): number {

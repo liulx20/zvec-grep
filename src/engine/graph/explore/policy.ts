@@ -1332,10 +1332,16 @@ export function resolveExactExploreSeedGroups(
   // user query use the erased name. Include only same-file type fragments with
   // the same erased identity; this joins a type to its implementation blocks
   // without merging unrelated co-named types from other packages.
-  if (storage.findSymbolsByQuery) {
+  const fragmentCandidates = genericFragmentCandidates(
+    storage,
+    exact,
+    lookupName,
+    Math.max(512, limit * 32),
+  );
+  if (fragmentCandidates.length > 0) {
     exact = includeSameFileGenericTypeFragments(
       exact,
-      storage.findSymbolsByQuery(lookupName, Math.max(512, limit * 32)),
+      fragmentCandidates,
       lookupName,
     );
   }
@@ -1353,6 +1359,31 @@ export function resolveExactExploreSeedGroups(
       representative: group.representative,
     }))
     .slice(0, limit);
+}
+
+function genericFragmentCandidates(
+  storage: GraphReader,
+  exact: readonly StoredEntity[],
+  lookupName: string,
+  limit: number,
+): readonly StoredEntity[] {
+  if (
+    !exact.some((entity) => {
+      const metadata = entity.entity.metadata;
+      return (
+        metadata?.kind === "code" &&
+        TYPEISH_KINDS.has(metadata.symbolType ?? "")
+      );
+    })
+  )
+    return [];
+  if (storage.findSymbolsByFileStems) {
+    const stems = [
+      ...new Set(exact.map((entity) => fileStem(entity.file.relativePath))),
+    ];
+    return [...storage.findSymbolsByFileStems(stems, limit).values()].flat();
+  }
+  return storage.findSymbolsByQuery?.(lookupName, limit) ?? [];
 }
 
 function explicitSourcePath(query: string): string | undefined {
