@@ -22,6 +22,7 @@ interfaces.
 | Choose and configure an Embedding model | [Embedding models](./07-embedding.md) |
 | See what is stable now and what comes next | [Roadmap](./08-roadmap.md) |
 | Understand the graph model and query paths | [Graph](./09-graph.md) |
+| Read the detailed PR #43 implementation notes | [PR #43 architecture](./pr43/zvec-grep-pr43-architecture.md) |
 
 ## Recommended paths
 
