@@ -37,11 +37,9 @@ project counterparts            presentation / CLI / MCP output
 
 主要新能力：
 
-```text
-zg explore
-zg graph / neighborhood
-graph/index 状态展示
-```
+- Explore：根据 query 选择 roots，通过代码图扩展并组装源码上下文。
+- Graph neighborhood：围绕指定 symbol 查询局部节点和 typed edges。
+- Index status：展示 workspace 检索索引和 Graph Index 的可用状态。
 
 ### MCP
 
@@ -84,7 +82,7 @@ PR 在原索引管线中加入图索引：
 
 `pipeline/indexing/diff.ts` 处理增量差异，`status.ts` 汇总阶段状态；workspace 删除或变更时，graph writer 同步清理旧 symbols、edges、unresolved refs 和 candidates。
 
-完整的文件扫描、fragment、embedding 与 FileGraph 写入顺序见 [索引与源码抽取管线](./zvec-grep-indexing-and-extraction.md)。
+完整的文件扫描、fragment、embedding 与 FileGraph 写入顺序见 [索引与源码抽取管线](https://github.com/liulx20/zvec-grep/blob/beffad0/docs/pr43/zvec-grep-indexing-and-extraction.md)。
 
 ## 5. 代码抽取层
 
@@ -113,7 +111,7 @@ c-function-pointer-registration.ts
 
 > 源码中出现了哪些 symbol、ownership、call/ref/inheritance/import site？
 
-复杂流程见 [图关系抽取与解析](./zvec-grep-graph-relation-extraction.md)。
+复杂流程见 [图关系抽取与解析](https://github.com/liulx20/zvec-grep/blob/beffad0/docs/pr43/zvec-grep-graph-relation-extraction.md)。
 
 ## 6. Graph Normalization
 
@@ -157,9 +155,9 @@ direct-candidate-index.ts
 projection-buffer.ts     edge/dynamic candidate 原子投影
 ```
 
-当前核心表及字段见 [SQLite Graph Schema](./zvec-grep-graph-data-model.md)。
+当前核心表及字段见 [SQLite Graph Schema](https://github.com/liulx20/zvec-grep/blob/beffad0/docs/pr43/zvec-grep-graph-data-model.md)。
 
-Writer、pending resolver、projection buffer、dynamic candidate 和 reader 的协作见 [图持久化与引用解析](./zvec-grep-graph-persistence-and-resolution.md)。
+Writer、pending resolver、projection buffer、dynamic candidate 和 reader 的协作见 [图持久化与引用解析](https://github.com/liulx20/zvec-grep/blob/beffad0/docs/pr43/zvec-grep-graph-persistence-and-resolution.md)。
 
 ## 8. Pending Reference Resolution
 
@@ -211,11 +209,11 @@ query
 
 入口由 `graph/explore.ts` 暴露，核心编排在 `explore/subgraph.ts`。复杂模块已经拆成独立文档：
 
-- [Explore 总览](./zvec-grep-explore-overview.md)
-- [Seed Resolution](./zvec-grep-explore-seed-resolution.md)
-- [Subgraph](./zvec-grep-explore-subgraph.md)
-- [Ranking 与文件选择](./zvec-grep-explore-ranking.md)
-- [源码组装](./zvec-grep-explore-source-assembly.md)
+- [Explore 总览](https://github.com/liulx20/zvec-grep/blob/beffad0/docs/pr43/zvec-grep-explore-overview.md)
+- [Seed Resolution](https://github.com/liulx20/zvec-grep/blob/beffad0/docs/pr43/zvec-grep-explore-seed-resolution.md)
+- [Subgraph](https://github.com/liulx20/zvec-grep/blob/beffad0/docs/pr43/zvec-grep-explore-subgraph.md)
+- [Ranking 与文件选择](https://github.com/liulx20/zvec-grep/blob/beffad0/docs/pr43/zvec-grep-explore-ranking.md)
+- [源码组装](https://github.com/liulx20/zvec-grep/blob/beffad0/docs/pr43/zvec-grep-explore-source-assembly.md)
 
 ## 12. Presentation
 
@@ -236,7 +234,7 @@ RootRuntime
 
 `workspace-read-session-cache.ts` 和新增 `utils/read-handle-cache.ts` 管理可复用读句柄；写操作通过 runtime 协调，避免读到半更新状态。
 
-CLI/MCP、service、read session、daemon runtime 以及 neighborhood/Explore 的边界见 [查询接口与运行时](./zvec-grep-query-and-runtime.md)。
+CLI/MCP、service、read session、daemon runtime 以及 neighborhood/Explore 的边界见 [查询接口与运行时](https://github.com/liulx20/zvec-grep/blob/beffad0/docs/pr43/zvec-grep-query-and-runtime.md)。
 
 ## 14. Benchmark 与测试
 
@@ -306,9 +304,9 @@ benchmarks/tests      验证质量、语言覆盖和稳定性
 ## 17. 建议阅读顺序
 
 1. 本文：先建立整个 PR 的模块地图。
-2. [索引与源码抽取管线](./zvec-grep-indexing-and-extraction.md)：文件怎样变成 fragments 和 FileGraph。
-3. [图关系抽取与解析](./zvec-grep-graph-relation-extraction.md)：多语言语法怎样变成关系事实。
-4. [SQLite Graph Schema](./zvec-grep-graph-data-model.md)：这些事实具体存在哪里。
-5. [图持久化与引用解析](./zvec-grep-graph-persistence-and-resolution.md)：未决引用怎样变成边和动态候选。
-6. [查询接口与运行时](./zvec-grep-query-and-runtime.md)：图怎样被 CLI、MCP 和 daemon 安全读取。
-7. [Explore 总览](./zvec-grep-explore-overview.md)：最后再进入 Explore 的 seed、subgraph、ranking 和 assembly。
+2. [索引与源码抽取管线](https://github.com/liulx20/zvec-grep/blob/beffad0/docs/pr43/zvec-grep-indexing-and-extraction.md)：文件怎样变成 fragments 和 FileGraph。
+3. [图关系抽取与解析](https://github.com/liulx20/zvec-grep/blob/beffad0/docs/pr43/zvec-grep-graph-relation-extraction.md)：多语言语法怎样变成关系事实。
+4. [SQLite Graph Schema](https://github.com/liulx20/zvec-grep/blob/beffad0/docs/pr43/zvec-grep-graph-data-model.md)：这些事实具体存在哪里。
+5. [图持久化与引用解析](https://github.com/liulx20/zvec-grep/blob/beffad0/docs/pr43/zvec-grep-graph-persistence-and-resolution.md)：未决引用怎样变成边和动态候选。
+6. [查询接口与运行时](https://github.com/liulx20/zvec-grep/blob/beffad0/docs/pr43/zvec-grep-query-and-runtime.md)：图怎样被 CLI、MCP 和 daemon 安全读取。
+7. [Explore 总览](https://github.com/liulx20/zvec-grep/blob/beffad0/docs/pr43/zvec-grep-explore-overview.md)：最后再进入 Explore 的 seed、subgraph、ranking 和 assembly。
