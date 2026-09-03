@@ -134,147 +134,126 @@ orders_->save(...)
 
 最终 bundle 保留真实行号、`sourceOrigin`、入选 reasons 和 symbols；它没有单独的 truncation 布尔字段，裁剪通过 `text` 中的 gap / truncated 标记显式呈现。展示内容不是 LLM 摘要。
 
-## 7. 最终输出长什么样
+## 7. CLI 实际输出长什么样
 
-[`assembleExploreFiles()`](https://github.com/zvec-ai/zvec-grep/blob/64826e8196eb53bd44f9a073d03c893333c1e6ac/src/engine/graph/explore/assembly.ts#L34-L168) 返回 `ExploreFileBundle[]`；它最终放在 `ExploreResult.files` 中。单个 bundle 的结构是：
+CLI 的 direct 模式通过 [printExploreResult()](https://github.com/zvec-ai/zvec-grep/blob/64826e8196eb53bd44f9a073d03c893333c1e6ac/src/presentation/graph.ts#L23-L27) 输出；daemon/MCP 文本路径使用同一套 [formatExploreResult()](https://github.com/zvec-ai/zvec-grep/blob/64826e8196eb53bd44f9a073d03c893333c1e6ac/src/presentation/graph.ts#L29-L31) 格式。真正的终端输出不是 JSON，也不会直接打印 ExploreFileBundle.symbols。
 
-```ts
-type ExploreFileBundle = {
-  file: FileInfo;
-  score: number;
-  isCentral: boolean;
-  isChangeSurface: boolean;
-  reasons: string[];
-  symbols: ExploreSymbolSnippet[];
-  sourceOrigin: "current_disk" | "indexed_fragment";
-  text: string;
-};
-```
+例如：
 
-各字段可以这样理解：
+~~~console
+$ zg explore "CheckoutService::placeOrder" --max-files 3
 
-```text
-file             文件路径、格式等基本信息
-score            上一步传入的 file base score，不是把最终 MMR gain 再输出一次
-isCentral        是否属于 central 展示组
-isChangeSurface  是否包含入选的参数/返回类型 surface
-reasons          最多 6 个紧凑原因，例如 placeOrder(root)、save(calls)
-symbols          实际参与本文件渲染的 symbol 元数据及源码范围
-sourceOrigin     text 来自当前磁盘，还是 indexed fragment 回退
-text             真正交给调用方的、已经受字符预算约束的源码文本
-```
+explore: CheckoutService::placeOrder
+root: /workspace/shop
+roots: CheckoutService::placeOrder (src/checkout_service.cpp:18)
+subgraph: 17 nodes, 22 edges, 3 files
+source note: current blocks are verbatim, line-numbered disk reads, not summaries; do not re-read displayed ranges unless marked indexed.
 
-例如查询 `CheckoutService::placeOrder`，假设最终选择了实现文件、头文件和 repository，返回结果的形状可能类似下面这样。ID 和分数仅为说明结构而简化：
+flow:
+1. placeOrder -CALLS-> save
 
-```ts
-[
-  {
-    file: {
-      id: "checkout_cpp",
-      relativePath: "src/checkout_service.cpp",
-      format: "cpp"
-    },
-    score: 0.42,
-    isCentral: true,
-    isChangeSurface: false,
-    reasons: ["placeOrder(root)", "placeOrder(calls)"],
-    symbols: [
-      {
-        id: "place_def",
-        name: "placeOrder",
-        scope: "CheckoutService",
-        kind: "function",
-        signature: "Receipt CheckoutService::placeOrder(const Order& order)",
-        range: {
-          kind: "text",
-          startLine: 18,
-          endLine: 34,
-          startOffset: 410,
-          endOffset: 890
-        },
-        content: "Receipt CheckoutService::placeOrder(...) { ... }"
-      }
-    ],
-    sourceOrigin: "current_disk",
-    text: `18  Receipt CheckoutService::placeOrder(const Order& order) {
-19    payment_->charge(order);
-20    orders_->save(order);
-21    return Receipt{order.id()};
-22  }`
-  },
-  {
-    file: {
-      id: "checkout_h",
-      relativePath: "include/checkout_service.h",
-      format: "cpp"
-    },
-    score: 0.18,
-    isCentral: true,
-    isChangeSurface: false,
-    reasons: ["placeOrder(root)", "placeOrder(counterpart)"],
-    symbols: [
-      {
-        id: "place_decl",
-        name: "placeOrder",
-        scope: "CheckoutService",
-        kind: "function",
-        signature: "Receipt placeOrder(const Order& order);",
-        range: { kind: "text", startLine: 9, endLine: 9 },
-        content: "Receipt placeOrder(const Order& order);"
-      }
-    ],
-    sourceOrigin: "current_disk",
-    text: `7   class CheckoutService {
+blast radius:
+- placeOrder:
+  dependents: 2 symbols in src/checkout_controller.cpp
+  tests: 1 symbols in tests/checkout_service_test.cpp
+
+change surface:
+- placeOrder type -> Order (include/order.h:6)
+- placeOrder return -> Receipt (include/receipt.h:4)
+
+dynamic boundaries:
+- placeOrder@L25 -> payment_->charge
+  reason: dynamic dispatch
+  candidates: 2
+  - StripeGateway::charge (src/stripe_gateway.cpp); confidence=0.75; via=receiver type
+  - MockGateway::charge (tests/mock_gateway.cpp); confidence=0.65; via=hierarchy candidate
+
+relationships:
+CALLS:
+- placeOrder -CALLS-> save
+REFS:
+- placeOrder -REFS-> Order
+INSTANTIATES:
+- placeOrder -INSTANTIATES-> ReceiptBuilder
+
+src/checkout_service.cpp (central, score=0.4200)
+selected: placeOrder(root), placeOrder(calls)
+source:
+18  Receipt CheckoutService::placeOrder(const Order& order) {
+19    validate(order);
+20    payment_->charge(order);
+21    orders_->save(order);
+22    return Receipt{order.id()};
+23  }
+
+include/checkout_service.h (central, score=0.1800)
+selected: placeOrder(root), placeOrder(counterpart)
+source:
+7   class CheckoutService {
 8   public:
 9     Receipt placeOrder(const Order& order);
-10  };`
-  },
-  {
-    file: {
-      id: "repository_cpp",
-      relativePath: "src/order_repository.cpp",
-      format: "cpp"
-    },
-    score: 0.09,
-    isCentral: false,
-    isChangeSurface: false,
-    reasons: ["save(definition)", "save(calls)"],
-    symbols: [
-      {
-        id: "save_def",
-        name: "save",
-        scope: "OrderRepository",
-        kind: "function",
-        signature: "void OrderRepository::save(const Order& order)",
-        range: { kind: "text", startLine: 42, endLine: 57 },
-        content: "void OrderRepository::save(...) { ... }"
-      }
-    ],
-    sourceOrigin: "current_disk",
-    text: `42  void OrderRepository::save(const Order& order) {
+10  };
+
+src/order_repository.cpp (related, score=0.0900)
+selected: save(definition), save(calls)
+source:
+42  void OrderRepository::save(const Order& order) {
 43    database_.insert(order);
-44  }`
-  }
-]
-```
+44  }
+~~~
 
-这里要特别区分：
+上例用于展示格式，具体节点数、分数、关系和文件取决于本次索引与查询。CLI 的输出顺序固定为：
 
-```text
-symbols
-  是本文件实际选中并参与渲染的 symbol 清单，保留 ID、identity、range 和 indexed content。
+~~~text
+1. query、workspace root、roots 和 subgraph 规模
+2. source note：存在 current-disk 源码时提示正文是原样磁盘读取
+3. flow：去重后的主要调用路径
+4. blast radius：反向 dependents/tests 摘要
+5. change surface：参数类型和返回类型
+6. dynamic boundaries：无法唯一静态绑定的调用及候选
+7. relationships：按 CALLS / INHERITS / REFS / INSTANTIATES 分组
+8. files：逐文件打印角色、分数、入选原因和源码
+~~~
 
-text
-  是按照当前磁盘源码、focus lines 和文件字符预算真正组装出的展示文本。
-```
+这些区块按数据是否存在决定是否显示；例如没有 dynamic boundary 时，不会打印 dynamic boundaries。
 
-因此 `symbols[0].content` 不应被理解为最终一定原样展示的内容；最终上下文以 bundle 的 `text` 为准。
+### 7.1 每个源码文件在 CLI 中的格式
 
-### 7.1 长函数被裁剪时
+[exploreLines() 的文件循环](https://github.com/zvec-ai/zvec-grep/blob/64826e8196eb53bd44f9a073d03c893333c1e6ac/src/presentation/graph.ts#L143-L166) 将内部 bundle 转换为：
 
-如果 `placeOrder()` 完整正文超过该文件预算，bundle 结构不变，只是 `text` 改为 focused excerpt。例如：
+~~~text
+<relativePath> (<role>, score=<四位小数>)
+selected: <reasons>
+source:
+<组装后的 file.text>
+~~~
 
-```text
+角色显示为：
+
+~~~text
+isCentral=true                          → central
+isCentral=false && isChangeSurface=true → change-surface
+其他                                    → related
+~~~
+
+reasons 最多显示若干紧凑原因，例如 placeOrder(root)、save(definition)、save(calls) 或 PaymentGateway(inherits)。
+
+如果源码读取失败、使用索引 fragment 回退，标题会明确变为：
+
+~~~text
+source (indexed fragment):
+~~~
+
+CLI 不单独打印内部的 symbols[]；symbol 选择的结果已经体现在 selected 原因和最终 source 正文中。
+
+### 7.2 长函数在 CLI 中的样子
+
+如果完整函数超出本文件字符预算，source 后直接显示 focused excerpt：
+
+~~~console
+src/checkout_service.cpp (central, score=0.4200)
+selected: placeOrder(root), placeOrder(calls)
+source:
 18  Receipt CheckoutService::placeOrder(const Order& order) {
 19    validate(order);
 
@@ -289,25 +268,22 @@ text
 132   return Receipt{order.id()};
 133 }
 // ... truncated
-```
+~~~
 
-这里仍然是源码摘录，不是 LLM 生成的函数摘要。窗口位置主要由 query 命中、call-path edge 的 `firstLine` 和 dynamic-boundary 调用行决定。
+这些 gap/truncated 标记就是 CLI 中的裁剪提示；不存在单独打印的 truncated=true 文件字段。
 
-### 7.2 使用 indexed fragment 回退时
+### 7.3 CLI 的展示上限
 
-如果 `readFileText()` 失败，仍可能返回：
+Presentation 层还会限制摘要噪声：
 
-```ts
-{
-  sourceOrigin: "indexed_fragment",
-  symbols: [/* 入选 symbol */],
-  text: "索引时保存的 fragment 内容"
-}
-```
+~~~text
+每种 relationship 最多展示 6 条
+dynamic boundary 最多展示 8 条
+每个 dynamic boundary 最多展示 5 个 candidates
+blast radius 每类最多列出 4 个文件路径，更多文件显示 +N files
+~~~
 
-调用方可以通过 `sourceOrigin` 区分它不是当前磁盘文件的实时文本。
-
-如果一个入选文件在预算下最终没有生成任何非空 `text`，它不会出现在返回的 bundles 中。
+这些只是 CLI 展示上限，不等于 ExploreResult 内部只保存这么多记录。
 
 ## 8. 最简心智模型
 
