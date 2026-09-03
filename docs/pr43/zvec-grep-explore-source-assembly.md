@@ -132,9 +132,184 @@ orders_->save(...)
 
 多态 sibling 若只是用于说明候选实现，则可以只输出 signature skeleton，把正文预算留给真正位于执行路径上的实现。
 
-最终 bundle 仍保留真实行号、`sourceOrigin`、入选 reasons、symbols 和 truncation 状态，展示内容不是 LLM 摘要。
+最终 bundle 保留真实行号、`sourceOrigin`、入选 reasons 和 symbols；它没有单独的 truncation 布尔字段，裁剪通过 `text` 中的 gap / truncated 标记显式呈现。展示内容不是 LLM 摘要。
 
-## 7. 最简心智模型
+## 7. 最终输出长什么样
+
+[`assembleExploreFiles()`](https://github.com/zvec-ai/zvec-grep/blob/64826e8196eb53bd44f9a073d03c893333c1e6ac/src/engine/graph/explore/assembly.ts#L34-L168) 返回 `ExploreFileBundle[]`；它最终放在 `ExploreResult.files` 中。单个 bundle 的结构是：
+
+```ts
+type ExploreFileBundle = {
+  file: FileInfo;
+  score: number;
+  isCentral: boolean;
+  isChangeSurface: boolean;
+  reasons: string[];
+  symbols: ExploreSymbolSnippet[];
+  sourceOrigin: "current_disk" | "indexed_fragment";
+  text: string;
+};
+```
+
+各字段可以这样理解：
+
+```text
+file             文件路径、格式等基本信息
+score            上一步传入的 file base score，不是把最终 MMR gain 再输出一次
+isCentral        是否属于 central 展示组
+isChangeSurface  是否包含入选的参数/返回类型 surface
+reasons          最多 6 个紧凑原因，例如 placeOrder(root)、save(calls)
+symbols          实际参与本文件渲染的 symbol 元数据及源码范围
+sourceOrigin     text 来自当前磁盘，还是 indexed fragment 回退
+text             真正交给调用方的、已经受字符预算约束的源码文本
+```
+
+例如查询 `CheckoutService::placeOrder`，假设最终选择了实现文件、头文件和 repository，返回结果的形状可能类似下面这样。ID 和分数仅为说明结构而简化：
+
+```ts
+[
+  {
+    file: {
+      id: "checkout_cpp",
+      relativePath: "src/checkout_service.cpp",
+      format: "cpp"
+    },
+    score: 0.42,
+    isCentral: true,
+    isChangeSurface: false,
+    reasons: ["placeOrder(root)", "placeOrder(calls)"],
+    symbols: [
+      {
+        id: "place_def",
+        name: "placeOrder",
+        scope: "CheckoutService",
+        kind: "function",
+        signature: "Receipt CheckoutService::placeOrder(const Order& order)",
+        range: {
+          kind: "text",
+          startLine: 18,
+          endLine: 34,
+          startOffset: 410,
+          endOffset: 890
+        },
+        content: "Receipt CheckoutService::placeOrder(...) { ... }"
+      }
+    ],
+    sourceOrigin: "current_disk",
+    text: `18  Receipt CheckoutService::placeOrder(const Order& order) {
+19    payment_->charge(order);
+20    orders_->save(order);
+21    return Receipt{order.id()};
+22  }`
+  },
+  {
+    file: {
+      id: "checkout_h",
+      relativePath: "include/checkout_service.h",
+      format: "cpp"
+    },
+    score: 0.18,
+    isCentral: true,
+    isChangeSurface: false,
+    reasons: ["placeOrder(root)", "placeOrder(counterpart)"],
+    symbols: [
+      {
+        id: "place_decl",
+        name: "placeOrder",
+        scope: "CheckoutService",
+        kind: "function",
+        signature: "Receipt placeOrder(const Order& order);",
+        range: { kind: "text", startLine: 9, endLine: 9 },
+        content: "Receipt placeOrder(const Order& order);"
+      }
+    ],
+    sourceOrigin: "current_disk",
+    text: `7   class CheckoutService {
+8   public:
+9     Receipt placeOrder(const Order& order);
+10  };`
+  },
+  {
+    file: {
+      id: "repository_cpp",
+      relativePath: "src/order_repository.cpp",
+      format: "cpp"
+    },
+    score: 0.09,
+    isCentral: false,
+    isChangeSurface: false,
+    reasons: ["save(definition)", "save(calls)"],
+    symbols: [
+      {
+        id: "save_def",
+        name: "save",
+        scope: "OrderRepository",
+        kind: "function",
+        signature: "void OrderRepository::save(const Order& order)",
+        range: { kind: "text", startLine: 42, endLine: 57 },
+        content: "void OrderRepository::save(...) { ... }"
+      }
+    ],
+    sourceOrigin: "current_disk",
+    text: `42  void OrderRepository::save(const Order& order) {
+43    database_.insert(order);
+44  }`
+  }
+]
+```
+
+这里要特别区分：
+
+```text
+symbols
+  是本文件实际选中并参与渲染的 symbol 清单，保留 ID、identity、range 和 indexed content。
+
+text
+  是按照当前磁盘源码、focus lines 和文件字符预算真正组装出的展示文本。
+```
+
+因此 `symbols[0].content` 不应被理解为最终一定原样展示的内容；最终上下文以 bundle 的 `text` 为准。
+
+### 7.1 长函数被裁剪时
+
+如果 `placeOrder()` 完整正文超过该文件预算，bundle 结构不变，只是 `text` 改为 focused excerpt。例如：
+
+```text
+18  Receipt CheckoutService::placeOrder(const Order& order) {
+19    validate(order);
+
+... (focused call-site window) ...
+
+86    payment_->charge(order);
+87    metrics_.recordCharge(order.id());
+
+... (focused call-site window) ...
+
+131   orders_->save(order);
+132   return Receipt{order.id()};
+133 }
+// ... truncated
+```
+
+这里仍然是源码摘录，不是 LLM 生成的函数摘要。窗口位置主要由 query 命中、call-path edge 的 `firstLine` 和 dynamic-boundary 调用行决定。
+
+### 7.2 使用 indexed fragment 回退时
+
+如果 `readFileText()` 失败，仍可能返回：
+
+```ts
+{
+  sourceOrigin: "indexed_fragment",
+  symbols: [/* 入选 symbol */],
+  text: "索引时保存的 fragment 内容"
+}
+```
+
+调用方可以通过 `sourceOrigin` 区分它不是当前磁盘文件的实时文本。
+
+如果一个入选文件在预算下最终没有生成任何非空 `text`，它不会出现在返回的 bundles 中。
+
+## 8. 最简心智模型
 
 ```text
 先选文件，再读源码
