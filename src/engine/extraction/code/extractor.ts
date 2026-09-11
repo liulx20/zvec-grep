@@ -17,8 +17,16 @@ import { extractPlainTextFragments } from "../text/extractor.js";
 import { chunkOptionsForMetadata } from "../vector-content.js";
 import { resolveAdapter, type LanguageAdapter } from "./adapter.js";
 import { hasJavascriptTypescriptFunctionValue } from "./families/js-ts.js";
+import { WalkContext } from "../graph/walk-context.js";
+import {
+  collectImportEdge,
+  collectInheritanceEdges,
+  isImportNode,
+  scanCallEdges,
+} from "../graph/edge-collector.js";
 
 const DEFAULT_CODE_CHUNK_CHARS = 3600;
+const SUB_CHUNK_ENTITY_ID_BASE = 1_000_000;
 const DEFAULT_CODE_CHUNK_OVERLAP_CHARS = 540;
 const COMPONENT_CODE_FORMAT_SET: ReadonlySet<string> = new Set(
   COMPONENT_CODE_FORMATS,
@@ -61,11 +69,19 @@ export class CodeExtractor {
       source.text,
       source.file.format,
       (tree) => {
+        const ctx = new WalkContext(source.file.id);
         const collected: CodeEntity[] = [];
-        walkCodeNode(tree.rootNode, adapter, [], collected);
+        walkCodeNode(
+          tree.rootNode,
+          adapter,
+          [],
+          collected,
+          ctx,
+          source.file.format,
+        );
 
         const output: PreparedCodeFragment[] = [];
-        let entityIdIndex = 0;
+        let subChunkCounter = 0;
         const appendEntity = (entity: CodeEntity): void => {
           const fragments = codeEntityToSearchFragments(
             source,
@@ -75,12 +91,17 @@ export class CodeExtractor {
             chunkOptions.chunkOverlapChars,
           );
           const majorId =
-            fragments[0]?.group === ""
-              ? makeEntityId(source.file.id, entityIdIndex)
-              : null;
+            entity.id ?? makeEntityId(source.file.id, subChunkCounter++);
 
-          for (const item of fragments) {
-            const id = makeEntityId(source.file.id, entityIdIndex);
+          for (let i = 0; i < fragments.length; i++) {
+            const item = fragments[i];
+            const id =
+              i === 0
+                ? majorId
+                : makeEntityId(
+                    source.file.id,
+                    SUB_CHUNK_ENTITY_ID_BASE + subChunkCounter++,
+                  );
             const { embeddingText, ...fragment } = item;
             output.push({
               fragment: {
@@ -90,7 +111,6 @@ export class CodeExtractor {
               },
               embeddingText,
             });
-            entityIdIndex++;
           }
         };
 
@@ -190,6 +210,7 @@ function resolveCodeChunkOptions(
 }
 
 type CodeEntity = {
+  id: string;
   node: TSNode;
   name?: string;
   symbolType: CodeSymbolType;
@@ -226,6 +247,8 @@ function walkCodeNode(
   adapter: LanguageAdapter,
   breadcrumb: readonly string[],
   out: CodeEntity[],
+  ctx: WalkContext,
+  format: string,
 ): void {
   for (const child of node.children) {
     const isScope =
@@ -236,44 +259,82 @@ function walkCodeNode(
       adapter.shouldIndexEntity?.(child) !== false;
 
     if (isEntity) {
-      const entities = adapter.resolveEntities?.(child) ?? [
+      const entityNodes = adapter.resolveEntities?.(child) ?? [
         adapter.resolveEntity ? adapter.resolveEntity(child) : child,
       ];
+      const startIndex = out.length;
 
-      for (const entity of entities) {
-        const name = adapter.extractName(entity);
+      for (const entityNode of entityNodes) {
+        const id = ctx.nextEntityId();
+        const name = adapter.extractName(entityNode);
         const entityBreadcrumb =
-          adapter.scopeBreadcrumb?.(entity, breadcrumb) ?? breadcrumb;
+          adapter.scopeBreadcrumb?.(entityNode, breadcrumb) ?? breadcrumb;
         const symbolType =
-          adapter.classifyNode?.(entity, entityBreadcrumb) ??
-          classifyCodeNode(entity, entityBreadcrumb);
+          adapter.classifyNode?.(entityNode, entityBreadcrumb) ??
+          classifyCodeNode(entityNode, entityBreadcrumb);
 
         out.push({
-          node: entity,
+          id,
+          node: entityNode,
           name,
           symbolType,
           breadcrumb: entityBreadcrumb,
-          signature: adapter.extractSignature?.(entity),
-          doc: adapter.extractDoc?.(entity),
-          modifiers: adapter.extractModifiers?.(entity) ?? [],
+          signature: adapter.extractSignature?.(entityNode),
+          doc: adapter.extractDoc?.(entityNode),
+          modifiers: adapter.extractModifiers?.(entityNode) ?? [],
         });
+        ctx.registerSymbol(name, id);
+        ctx.addContainsEdge(id, {
+          line: entityNode.startPosition.row + 1,
+          column: entityNode.startPosition.column,
+        });
+      }
+
+      const firstEntity = out[startIndex];
+      if (firstEntity) {
+        scanCallEdges(firstEntity.node, firstEntity.id, ctx);
+        collectInheritanceEdges(
+          firstEntity.node,
+          format,
+          firstEntity.id,
+          ctx,
+        );
       }
     }
 
     if (isScope) {
       const name = adapter.extractName(child);
       const scopeNode = adapter.enterScopeNode?.(child) ?? child;
-      walkCodeNode(
-        scopeNode,
-        adapter,
-        name ? [...breadcrumb, name] : breadcrumb,
-        out,
-      );
+      const scopeId = isEntity ? out[out.length - 1].id : undefined;
+      if (scopeId) {
+        ctx.pushScope(scopeId);
+        walkCodeNode(
+          scopeNode,
+          adapter,
+          name ? [...breadcrumb, name] : breadcrumb,
+          out,
+          ctx,
+          format,
+        );
+        ctx.popScope();
+      } else {
+        walkCodeNode(
+          scopeNode,
+          adapter,
+          name ? [...breadcrumb, name] : breadcrumb,
+          out,
+          ctx,
+          format,
+        );
+      }
       continue;
     }
 
     if (!isEntity) {
-      walkCodeNode(child, adapter, breadcrumb, out);
+      if (isImportNode(child, format)) {
+        collectImportEdge(child, format, ctx);
+      }
+      walkCodeNode(child, adapter, breadcrumb, out, ctx, format);
     }
   }
 }

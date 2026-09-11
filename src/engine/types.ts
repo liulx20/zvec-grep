@@ -162,6 +162,9 @@ export type CodeEntityMetadata = {
   signature: string | null;
   doc: string | null;
   modifiers: readonly CodeEntityModifier[];
+  visibility?: string | null;
+  parameter?: string | null;
+  language?: string | null;
 };
 
 export type MarkdownEntityMetadata = {
@@ -194,7 +197,7 @@ export type EntityFragment = {
 // Workspace index types
 // -----------------------------------------------------------------------------
 
-export const CURRENT_INDEX_VERSION = 1;
+export const CURRENT_INDEX_VERSION = 2;
 
 export type WorkspaceIndexEmbeddingSchema = {
   provider: string;

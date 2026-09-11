@@ -905,6 +905,9 @@ function createSchema(
       stringField("symbol_signature", true),
       stringField("symbol_doc", true),
       stringField("symbol_modifiers", true),
+      stringField("symbol_visibility", true),
+      stringField("symbol_parameter", true),
+      stringField("symbol_language", true),
       stringField("node_type", true),
       stringField("heading", true),
       {
@@ -1032,6 +1035,9 @@ function metadataToFields(
         symbol_doc: metadata.doc,
         symbol_modifiers:
           metadata.modifiers.length > 0 ? metadata.modifiers.join(" ") : null,
+        symbol_visibility: metadata.visibility ?? null,
+        symbol_parameter: metadata.parameter ?? null,
+        symbol_language: metadata.language ?? null,
         node_type: metadata.nodeType,
       }),
     };
@@ -1108,6 +1114,9 @@ function parseMetadata(
       modifiers: readCodeModifiers(
         readNullableStringFieldFromFields(fields, "symbol_modifiers"),
       ),
+      visibility: readNullableStringFieldFromFields(fields, "symbol_visibility"),
+      parameter: readNullableStringFieldFromFields(fields, "symbol_parameter"),
+      language: readNullableStringFieldFromFields(fields, "symbol_language"),
     };
   }
 
