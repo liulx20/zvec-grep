@@ -1,4 +1,4 @@
-import type { FileEdge, FileGraphResult, PendingRefInput } from "./types.js";
+import type { FileEdge, FileGraphResult, PendingRef } from "./types.js";
 
 /**
  * Result of resolving a batch of file-local graph outputs.
@@ -7,7 +7,7 @@ export type ResolvedBatch = {
   /** Newly resolved edges, ready for persistence. */
   edges: readonly FileEdge[];
   /** References that could not be resolved. */
-  unresolvedRefs: readonly PendingRefInput[];
+  pendingRefs: readonly PendingRef[];
 };
 
 /**

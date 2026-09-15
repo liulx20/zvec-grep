@@ -32,11 +32,11 @@ export type FileEdge = {
   metadata: Record<string, unknown>;
 };
 
-/** Status of a persisted unresolved reference. */
+/** Status of a persisted pending reference. */
 export type PendingRefStatus = "pending" | "resolved" | "failed";
 
 /** A reference that could not be resolved within its own file. */
-export type PendingRefInput = {
+export type PendingRef = {
   ownerId: string;
   refName: string;
   receiverName: string | null;
@@ -75,5 +75,5 @@ export type FileGraphNode = {
 export type FileGraphResult = {
   nodes: readonly FileGraphNode[];
   edges: readonly FileEdge[];
-  unresolvedRefs: readonly PendingRefInput[];
+  pendingRefs: readonly PendingRef[];
 };

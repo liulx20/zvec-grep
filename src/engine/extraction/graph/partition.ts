@@ -3,7 +3,7 @@ import type {
   FileEdge,
   FileGraphNode,
   FileGraphResult,
-  PendingRefInput,
+  PendingRef,
 } from "../../graph/types.js";
 import type { NameEdge } from "./types.js";
 import type { WalkContext } from "./walk-context.js";
@@ -33,8 +33,8 @@ export type PartitionOptions = {
  * - Emit `contains` edges from `ctx.resolvedEdges`.
  * - Resolve in-file name references (`calls`/`extends`/`implements`) using
  *   `ctx.symbolTable`; uniquely resolvable ones become `file_local` edges,
- *   everything else becomes an `unresolvedRefs` entry.
- * - Convert top-level `imports` name edges directly into unresolved refs
+ *   everything else becomes a `pendingRefs` entry.
+ * - Convert top-level `imports` name edges directly into pending refs
  *   (their target lives in another file).
  */
 export function partition(
@@ -48,7 +48,7 @@ export function partition(
   return {
     nodes,
     edges,
-    unresolvedRefs: unresolved.map((edge) => nameEdgeToPendingRef(edge)),
+    pendingRefs: unresolved.map((edge) => nameEdgeToPendingRef(edge)),
   };
 }
 
@@ -156,7 +156,7 @@ function buildEdgeMetadata(nameEdge: NameEdge): Record<string, unknown> {
   return metadata;
 }
 
-function nameEdgeToPendingRef(nameEdge: NameEdge): PendingRefInput {
+function nameEdgeToPendingRef(nameEdge: NameEdge): PendingRef {
   return {
     ownerId: nameEdge.ownerId,
     refName: nameEdge.refName,

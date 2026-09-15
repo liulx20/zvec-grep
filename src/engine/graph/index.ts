@@ -5,7 +5,7 @@ export type {
   FileGraphResult,
   GraphEdgeKind,
   GraphRefKind,
-  PendingRefInput,
+  PendingRef,
   PendingRefStatus,
 } from "./types.js";
 

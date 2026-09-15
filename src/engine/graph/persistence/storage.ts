@@ -10,7 +10,7 @@ export type ResolveStats = {
 };
 
 /**
- * Storage backend for code-graph edges and unresolved references.
+ * Storage backend for code-graph edges and pending references.
  *
  * Implementations own exactly two concerns: persisting per-file graph output
  * and answering relationship queries. Node and file metadata live in the zvec
@@ -25,15 +25,15 @@ export interface GraphStorage {
    */
   writeFileGraph(fileId: string, result: FileGraphResult): Promise<void>;
 
-  /** Removes all edges and unresolved refs owned by the given file. */
+  /** Removes all edges and pending refs owned by the given file. */
   deleteFileGraph(fileId: string): Promise<void>;
 
   /**
    * Runs a pass over currently pending references and attempts to resolve
    * them against the current workspace symbol index.
    *
-   * Newly resolved edges are written; refs that remain unresolved are left
-   * in the pending table with status `"pending"`.
+   * Newly resolved edges are written; refs that remain pending are left in
+   * the pending table with status `"pending"`.
    */
   resolvePendingRefs(options?: { batchSize?: number }): Promise<ResolveStats>;
 

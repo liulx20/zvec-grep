@@ -6,7 +6,7 @@
  * touches storage. The pipeline layer later assembles these into a
  * {@link FileGraphResult} and hands them to the graph persistence layer.
  *
- * Shared graph contract types (edges, nodes, unresolved refs) live in
+ * Shared graph contract types (edges, nodes, pending refs) live in
  * {@link ../../graph/types.ts} so that the persistence and resolution layers
  * can import them without creating a dependency on extraction internals.
  */
@@ -18,7 +18,7 @@ import type {
   FileGraphResult,
   GraphEdgeKind,
   GraphRefKind,
-  PendingRefInput,
+  PendingRef,
   PendingRefStatus,
 } from "../../graph/types.js";
 
@@ -29,7 +29,7 @@ export type {
   FileGraphResult,
   GraphEdgeKind,
   GraphRefKind,
-  PendingRefInput,
+  PendingRef,
   PendingRefStatus,
 } from "../../graph/types.js";
 
