@@ -12,6 +12,7 @@ import type {
   EmbeddingResult,
 } from "../../models/index.js";
 import type { WorkspaceIndexStorage } from "../../storage/index.js";
+import type { FileGraphResult } from "../../graph/types.js";
 import type {
   WorkspaceIndexStatus,
   WorkspaceIndexInfo,
@@ -64,6 +65,7 @@ type PreparedFragment = {
 type PreparedFile = {
   file: FileInfo;
   fragments: PreparedFragment[];
+  graph?: FileGraphResult;
 };
 
 type FailedPreparedFile = {
@@ -909,7 +911,7 @@ async function prepareFile(
     );
     const extracted = await extractForIndexing(source, chunkOptions);
     throwIfIndexCancelled(ctx);
-    const fragments = extracted
+    const fragments = extracted.fragments
       .filter(({ fragment }) =>
         ctx.embeddingModel.info.inputKinds.includes(fragment.content.kind),
       )
@@ -922,7 +924,7 @@ async function prepareFile(
         ),
       }));
 
-    return { file, fragments };
+    return { file, fragments, graph: extracted.graph };
   } catch (error) {
     if (indexIsCancelled(ctx)) {
       throw indexCancellationError(ctx);

@@ -1,5 +1,3 @@
-import type { CodeSymbolType } from "../../types.js";
-
 /**
  * Intermediate representations for graph extraction.
  *
@@ -7,21 +5,33 @@ import type { CodeSymbolType } from "../../types.js";
  * an AST walk into plain data (edges + buffered name references) and never
  * touches storage. The pipeline layer later assembles these into a
  * {@link FileGraphResult} and hands them to the graph persistence layer.
+ *
+ * Shared graph contract types (edges, nodes, unresolved refs) live in
+ * {@link ../../graph/types.ts} so that the persistence and resolution layers
+ * can import them without creating a dependency on extraction internals.
  */
 
-/** Edge kinds produced by the extraction layer. */
-export type GraphEdgeKind =
-  | "contains"
-  | "calls"
-  | "imports"
-  | "extends"
-  | "implements";
+import type {
+  EdgeProvenance,
+  FileEdge,
+  FileGraphNode,
+  FileGraphResult,
+  GraphEdgeKind,
+  GraphRefKind,
+  PendingRefInput,
+  PendingRefStatus,
+} from "../../graph/types.js";
 
-/**
- * Kinds of buffered name references. Each pending ref is resolved into the
- * {@link GraphEdgeKind} with the same name.
- */
-export type GraphRefKind = Exclude<GraphEdgeKind, "contains">;
+export type {
+  EdgeProvenance,
+  FileEdge,
+  FileGraphNode,
+  FileGraphResult,
+  GraphEdgeKind,
+  GraphRefKind,
+  PendingRefInput,
+  PendingRefStatus,
+} from "../../graph/types.js";
 
 /**
  * An edge whose both endpoints are known at walk time. Only `contains`
@@ -56,68 +66,4 @@ export type NameEdge = {
   arity?: number;
   line: number;
   column: number;
-};
-
-/** Evidence provenance recorded on persisted edges. */
-export type EdgeProvenance =
-  | "file_local"
-  | "import_scoped"
-  | "preferred_file"
-  | "workspace_unique";
-
-/** An edge ready for persistence after partition. */
-export type FileEdge = {
-  kind: GraphEdgeKind;
-  source: string;
-  target: string;
-  line: number | null;
-  column: number | null;
-  provenance: EdgeProvenance;
-  metadata: Record<string, unknown>;
-};
-
-/** Status of a persisted unresolved reference. */
-export type PendingRefStatus = "pending" | "resolved" | "failed";
-
-/** A reference that could not be resolved within its own file. */
-export type PendingRefInput = {
-  ownerId: string;
-  refName: string;
-  receiverName: string | null;
-  refKind: GraphRefKind;
-  arity: number | null;
-  line: number;
-  column: number;
-  status: PendingRefStatus;
-  metadata: Record<string, unknown>;
-};
-
-/**
- * A graph node derived from an indexed entity fragment. The pipeline layer
- * builds these from the existing `EntityFragment` results; the extraction
- * graph layer only defines the shape.
- */
-export type FileGraphNode = {
-  id: string;
-  kind: CodeSymbolType;
-  name: string | null;
-  /** `scope::name` breadcrumb joined with `::`, or the bare name. */
-  qualifiedName: string;
-  language: string;
-  startLine: number;
-  endLine: number;
-  startColumn: number;
-  endColumn: number;
-  signature: string | null;
-  doc: string | null;
-  arity: number | null;
-  visibility: string | null;
-  isExported: boolean;
-};
-
-/** Per-file graph extraction output, assembled after the walk and partition. */
-export type FileGraphResult = {
-  nodes: readonly FileGraphNode[];
-  edges: readonly FileEdge[];
-  unresolvedRefs: readonly PendingRefInput[];
 };

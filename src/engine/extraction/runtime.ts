@@ -1,3 +1,4 @@
+import type { FileGraphResult } from "../graph/types.js";
 import type { Content, EntityFragment } from "../types.js";
 import { CodeExtractor } from "./code/extractor.js";
 import { ImageExtractor } from "./image/extractor.js";
@@ -31,24 +32,34 @@ export type IndexingExtractionFragment = {
   embeddingSource?: Content;
 };
 
+export type IndexingExtractionResult = {
+  fragments: IndexingExtractionFragment[];
+  graph?: FileGraphResult;
+};
+
 export async function extractForIndexing(
   source: Source,
   options: ChunkOptions = {},
-): Promise<IndexingExtractionFragment[]> {
+): Promise<IndexingExtractionResult> {
   if (routeSource(source) === "code") {
-    return (await extractors.code.extractForIndexing(source, options)).map(
-      ({ fragment, embeddingText }) => ({
+    const result = await extractors.code.extractForIndexing(source, options);
+    return {
+      fragments: result.fragments.map(({ fragment, embeddingText }) => ({
         fragment,
         ...(embeddingText === undefined
           ? {}
           : { embeddingSource: { kind: "text", text: embeddingText } }),
-      }),
-    );
+      })),
+      graph: result.graph,
+    };
   }
 
-  return (await extractors[routeSource(source)].extract(source, options)).map(
-    (fragment) => ({ fragment }),
-  );
+  const fragments = (await extractors[routeSource(source)].extract(
+    source,
+    options,
+  )).map((fragment) => ({ fragment }));
+
+  return { fragments };
 }
 
 function routeSource(source: Source): ExtractorRoute {

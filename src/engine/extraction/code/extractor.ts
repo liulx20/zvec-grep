@@ -13,11 +13,13 @@ import { hasGrammar } from "./tree-sitter/grammar.js";
 import type { TSNode } from "./tree-sitter/nodes.js";
 import { withParser } from "./tree-sitter/parser.js";
 import type { ChunkOptions } from "../types.js";
+import type { FileGraphResult } from "../graph/types.js";
 import { extractPlainTextFragments } from "../text/extractor.js";
 import { chunkOptionsForMetadata } from "../vector-content.js";
 import { resolveAdapter, type LanguageAdapter } from "./adapter.js";
 import { hasJavascriptTypescriptFunctionValue } from "./families/js-ts.js";
 import { WalkContext } from "../graph/walk-context.js";
+import { partition } from "../graph/partition.js";
 import {
   collectImportEdge,
   collectInheritanceEdges,
@@ -37,26 +39,25 @@ export class CodeExtractor {
     source: Source,
     options: ChunkOptions = {},
   ): Promise<EntityFragment[]> {
-    return (await this.extractForIndexing(source, options)).map(
-      (item) => item.fragment,
-    );
+    const result = await this.extractForIndexing(source, options);
+    return result.fragments.map((item) => item.fragment);
   }
 
   async extractForIndexing(
     source: Source,
     options: ChunkOptions = {},
-  ): Promise<PreparedCodeFragment[]> {
+  ): Promise<PreparedCodeResult> {
     if (source.kind !== "text" || source.file.kind !== "code") {
-      return [];
+      return { fragments: [] };
     }
 
     validateSourceFile(source);
     const chunkOptions = resolveCodeChunkOptions(options);
 
     if (isScriptBlockFormat(source.file.format)) {
-      const fragments = await this.extractScriptBlocks(source, chunkOptions);
-      return fragments.length > 0
-        ? fragments
+      const blockResult = await this.extractScriptBlocks(source, chunkOptions);
+      return blockResult.fragments.length > 0
+        ? blockResult
         : this.fallback(source, chunkOptions);
     }
 
@@ -118,11 +119,15 @@ export class CodeExtractor {
           appendEntity(entity);
         }
 
-        return output;
+        const graph = partition(ctx, collected, {
+          fileId: source.file.id,
+          language: source.file.format,
+        });
+        return { fragments: output, graph };
       },
     );
 
-    if (!extracted || extracted.length === 0) {
+    if (!extracted || extracted.fragments.length === 0) {
       return this.fallback(source, chunkOptions);
     }
 
@@ -132,18 +137,20 @@ export class CodeExtractor {
   private fallback(
     source: TextSource,
     options: Required<ChunkOptions>,
-  ): PreparedCodeFragment[] {
-    return extractPlainTextFragments(
-      source,
-      options.maxChunkChars,
-      options.chunkOverlapChars,
-    ).map((fragment) => ({ fragment }));
+  ): PreparedCodeResult {
+    return {
+      fragments: extractPlainTextFragments(
+        source,
+        options.maxChunkChars,
+        options.chunkOverlapChars,
+      ).map((fragment) => ({ fragment })),
+    };
   }
 
   private async extractScriptBlocks(
     source: TextSource,
     options: Required<ChunkOptions>,
-  ): Promise<PreparedCodeFragment[]> {
+  ): Promise<PreparedCodeResult> {
     const fragments: PreparedCodeFragment[] = [];
 
     for (const block of findScriptBlocks(source.text)) {
@@ -151,7 +158,7 @@ export class CodeExtractor {
         ...source.file,
         format: block.format,
       };
-      const blockFragments = await this.extractForIndexing(
+      const blockResult = await this.extractForIndexing(
         {
           kind: "text",
           file: blockFile,
@@ -163,7 +170,7 @@ export class CodeExtractor {
       fragments.push(
         ...remapScriptBlockFragments(
           source.file.id,
-          blockFragments,
+          blockResult.fragments,
           fragments.length,
           block.startLine,
           block.startOffset,
@@ -171,7 +178,7 @@ export class CodeExtractor {
       );
     }
 
-    return fragments;
+    return { fragments };
   }
 }
 
@@ -209,7 +216,7 @@ function resolveCodeChunkOptions(
   return { maxChunkChars, chunkOverlapChars };
 }
 
-type CodeEntity = {
+export type CodeEntity = {
   id: string;
   node: TSNode;
   name?: string;
@@ -233,6 +240,12 @@ type CodeFragmentOutput = Omit<EntityFragment, "id"> & {
 export type PreparedCodeFragment = {
   fragment: EntityFragment;
   embeddingText?: string;
+};
+
+/** Per-file extraction result: search fragments plus an optional code graph. */
+export type PreparedCodeResult = {
+  fragments: PreparedCodeFragment[];
+  graph?: FileGraphResult;
 };
 
 type ScriptBlock = {
