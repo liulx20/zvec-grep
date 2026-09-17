@@ -2,7 +2,7 @@ import { mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
-import { initializeGraphSchema } from "./schema.js";
+import { initializeGraphSchema, GRAPH_SCHEMA_VERSION } from "./schema.js";
 
 const require = createRequire(import.meta.url);
 
@@ -17,23 +17,31 @@ export class GraphDatabase {
    * Requires an available node:sqlite module (Node 22.13+ without flags).
    * Use :memory: for an isolated in-memory database.
    */
-  static open(path: string): GraphDatabase {
+  static open(path: string, readOnly = false): GraphDatabase {
     if (path.trim().length === 0) {
       throw new Error("Graph database path must not be empty");
     }
-    // Keep SQLite optional until graph storage is used, preserving existing
-    // search entry points on earlier Node 22 releases.
+    // Load SQLite only for graph operations.
     const { DatabaseSync: SQLiteDatabase } = require("node:sqlite") as {
       DatabaseSync: typeof DatabaseSync;
     };
-    if (path !== ":memory:") {
+    if (!readOnly && path !== ":memory:") {
       mkdirSync(dirname(path), { recursive: true });
     }
-    const database = new SQLiteDatabase(path);
+    const database = new SQLiteDatabase(path, { readOnly });
     try {
       database.exec("PRAGMA busy_timeout = 5000");
-      initializeGraphSchema(database);
-      database.exec("PRAGMA journal_mode = WAL");
+      if (!readOnly) {
+        initializeGraphSchema(database);
+        database.exec("PRAGMA journal_mode = WAL");
+      } else if (
+        database.prepare("PRAGMA user_version").get()?.user_version !==
+          GRAPH_SCHEMA_VERSION ||
+        database.prepare("PRAGMA application_id").get()?.application_id !==
+          0x5a475250
+      ) {
+        throw new Error("Unsupported graph database; run zg --index --rebuild");
+      }
       return new GraphDatabase(database);
     } catch (error) {
       database.close();

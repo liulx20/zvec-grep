@@ -14,7 +14,7 @@
     <a href="https://www.npmjs.com/package/@zvec/zvec-grep"><img src="https://img.shields.io/npm/v/@zvec/zvec-grep.svg" alt="npm version" /></a>
     <a href="https://github.com/zvec-ai/zvec-grep/actions/workflows/ci.yml"><img src="https://github.com/zvec-ai/zvec-grep/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
     <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="Apache 2.0 license" /></a>
-    <img src="https://img.shields.io/badge/node-%3E%3D22-blue.svg" alt="Node.js 22 or newer" />
+    <img src="https://img.shields.io/badge/node-%3E%3D22.13-blue.svg" alt="Node.js 22.13 or newer" />
   </p>
 
   <p>
@@ -65,7 +65,7 @@ terminal, or let your agent use it for you.
 ### 1. Set up and search a sample bookshelf
 
 ```bash
-# Requires Node.js 22 or newer.
+# Requires Node.js 22.13 or newer.
 npm install -g @zvec/zvec-grep
 
 mkdir zg-mystery && cd zg-mystery
@@ -243,3 +243,5 @@ Community contributions are always welcome—bug fixes, features, and
 documentation improvements all help make zvec-grep better.
 
 Check out our [Contributing Guide](./CONTRIBUTING.md) to get started!
+
+[Code relationship queries and recovery](docs/graph.md).

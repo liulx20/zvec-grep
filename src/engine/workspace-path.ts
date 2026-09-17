@@ -1,11 +1,11 @@
 import { existsSync, realpathSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { deleteWorkspaceManifest, workspaceManifestPath } from "../manifest.js";
+import { deleteWorkspaceManifest, workspaceManifestPath } from "./manifest.js";
 import {
   deleteWorkspaceIndexStorage,
   hasWorkspaceIndexStorage,
-} from "../storage/index.js";
-import { workspaceIndexPath } from "../storage/layout.js";
+  workspaceIndexPath,
+} from "./storage/layout.js";
 
 export const ZVEC_GREP_DIR = ".zvec-grep";
 export type WorkspaceIndexLocation = {

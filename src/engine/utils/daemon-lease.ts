@@ -11,7 +11,7 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { EngineError } from "../errors.js";
-import { workspaceHome } from "../service/root.js";
+import { workspaceHome } from "../workspace-path.js";
 
 export type DaemonLeaseRecord = {
   pid: number;

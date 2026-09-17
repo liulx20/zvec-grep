@@ -622,3 +622,52 @@ export type ZvecGrepIndexStatusInput = z.infer<
 export type ZvecGrepRgInput = z.infer<typeof zvecGrepRgInputSchema>;
 export type StringListInput = z.infer<typeof stringListInputSchema>;
 export type TimeInput = z.infer<typeof timeInputSchema>;
+
+export const zvecGrepRelationshipInputSchema = z
+  .object({
+    root: absoluteRootSchema,
+    symbol: z
+      .string()
+      .trim()
+      .min(1)
+      .max(1024)
+      .describe(
+        "Symbol name or scope-qualified name, for example helper or MyClass::method. Exact matches take priority; otherwise full-text candidates are returned with exact scope filtering if specified. Returns definitions from up to 100 matching index records; use a qualified name to narrow results.",
+      ),
+    limit: z
+      .number()
+      .int()
+      .positive()
+      .default(20)
+      .describe(
+        "Maximum relationship edges per matching symbol. Defaults to 20. Does not limit matching definitions.",
+      ),
+  })
+  .strict();
+export type ZvecGrepRelationshipInput = z.input<
+  typeof zvecGrepRelationshipInputSchema
+>;
+const relationshipSymbolSchema = z.object({
+  name: z.string(),
+  filePath: z.string(),
+  startLine: z.number().int(),
+  endLine: z.number().int(),
+});
+export const zvecGrepRelationshipOutputSchema = z.object({
+  matches: z.array(
+    relationshipSymbolSchema.extend({
+      totalEdges: z
+        .number()
+        .int()
+        .nonnegative()
+        .describe("Total relationship edges before limit is applied."),
+      edges: z.array(
+        z.object({
+          symbol: relationshipSymbolSchema.nullable(),
+          line: z.number().int().nullable(),
+          column: z.number().int().nullable(),
+        }),
+      ),
+    }),
+  ),
+});

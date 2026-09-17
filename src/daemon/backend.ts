@@ -1,3 +1,9 @@
+import {
+  getCallers as queryCallers,
+  getCallees as queryCallees,
+  type SymbolRelationships,
+} from "../engine/pipeline/relationships/index.js";
+import type { ZvecGrepRelationshipInput } from "../mcp/schemas.js";
 import { createZvecGrep } from "../engine/service/index.js";
 import type {
   CreateZvecGrepOptions,
@@ -10,7 +16,7 @@ import {
   type EmbeddingRuntimeConfig,
 } from "../engine/config.js";
 import { readWorkspaceManifest } from "../engine/manifest.js";
-import { workspaceIndexLocation } from "../engine/service/root.js";
+import { workspaceIndexLocation } from "../engine/workspace-path.js";
 import type {
   EmbeddingModel,
   EmbeddingModelInfo,
@@ -605,6 +611,22 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
     return indexCompletionFromStatus(
       this.statusCache.get(canonicalRoot)?.status,
     );
+  }
+
+  async getCallers(
+    input: ZvecGrepRelationshipInput,
+  ): Promise<SymbolRelationships[]> {
+    const root = await resolveRequestedRoot(input.root, false);
+    this.assertRootNotDropping(root);
+    return queryCallers(root, input.symbol, input.limit);
+  }
+
+  async getCallees(
+    input: ZvecGrepRelationshipInput,
+  ): Promise<SymbolRelationships[]> {
+    const root = await resolveRequestedRoot(input.root, false);
+    this.assertRootNotDropping(root);
+    return queryCallees(root, input.symbol, input.limit);
   }
 
   async indexStatus(

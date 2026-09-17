@@ -201,3 +201,27 @@ test("migration failure rolls back DDL and version and allows retry", (t) => {
     GRAPH_SCHEMA_VERSION,
   );
 });
+
+test("read-only graph connections query without allowing mutations or creating missing databases", async (t) => {
+  const path = await databasePath(t);
+  assert.throws(() => GraphDatabase.open(path, true));
+  const writer = GraphDatabase.open(path);
+  writer.connection
+    .prepare(INSERT_EDGE)
+    .run("file", "source", "target", 1, "{}");
+  writer.close();
+  const reader = GraphDatabase.open(path, true);
+  try {
+    assert.equal(
+      reader.connection.prepare("SELECT count(*) AS count FROM edges").get()
+        .count,
+      1,
+    );
+    assert.throws(
+      () => reader.connection.exec("DELETE FROM edges"),
+      /readonly/,
+    );
+  } finally {
+    reader.close();
+  }
+});

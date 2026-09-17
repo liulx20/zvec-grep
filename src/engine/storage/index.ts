@@ -56,6 +56,8 @@ export interface WorkspaceIndexStorage {
     options?: { limit?: number; offset?: number },
   ): StoredEntity[];
   getEntity(entityId: string): StoredEntity | null;
+  /** Bounded exact symbol lookup. Optional exact scope; public entities returned once. */
+  findSymbols(name: string, scope?: string): StoredEntity[];
   searchFts(
     query: string,
     limit: number,
@@ -82,3 +84,5 @@ export {
   deleteWorkspaceIndexStorage,
   hasWorkspaceIndexStorage,
 } from "./layout.js";
+
+export { withWorkspaceGraphRead } from "./read.js";

@@ -14,7 +14,7 @@
     <a href="https://www.npmjs.com/package/@zvec/zvec-grep"><img src="https://img.shields.io/npm/v/@zvec/zvec-grep.svg" alt="npm 版本" /></a>
     <a href="https://github.com/zvec-ai/zvec-grep/actions/workflows/ci.yml"><img src="https://github.com/zvec-ai/zvec-grep/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
     <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="Apache 2.0 许可证" /></a>
-    <img src="https://img.shields.io/badge/node-%3E%3D22-blue.svg" alt="Node.js 22 或更新版本" />
+    <img src="https://img.shields.io/badge/node-%3E%3D22.13-blue.svg" alt="Node.js 22.13 或更新版本" />
   </p>
 
   <p>
@@ -64,7 +64,7 @@
 ### 1. 准备并搜索示例书架
 
 ```bash
-# 需要 Node.js 22 或更新版本。
+# 需要 Node.js 22.13 或更新版本。
 npm install -g @zvec/zvec-grep
 
 mkdir zg-mystery && cd zg-mystery
@@ -228,3 +228,5 @@ Profile 均使用 Qwen3.7 Text Embedding。
 始终欢迎社区贡献——缺陷修复、新功能和文档改进都会让 zvec-grep 变得更好。
 
 请查阅我们的[贡献指南](./CONTRIBUTING.md)开始参与！
+
+[代码关系查询与故障恢复](docs/graph.md)。

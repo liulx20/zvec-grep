@@ -117,3 +117,15 @@ export interface GraphStorage {
   /** Incoming implements edges. Returns all matching edges. */
   getImplementations(typeId: string): Promise<FileEdge[]>;
 }
+
+/** Read-only graph storage. The caller closes it after the workspace read. */
+export type GraphReadStorage = Pick<
+  GraphStorage,
+  | "neighborhood"
+  | "getCallers"
+  | "getCallees"
+  | "getImports"
+  | "getInheritance"
+  | "getSubclasses"
+  | "getImplementations"
+> & { close(): void };

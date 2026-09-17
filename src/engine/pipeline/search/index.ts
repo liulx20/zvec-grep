@@ -1,4 +1,8 @@
 import {
+  publicEntityId,
+  resolveStoredFragment,
+} from "../../storage/entities.js";
+import {
   workspaceIndexDetail,
   detail,
   EngineError,
@@ -478,7 +482,8 @@ function addRecallHits(
 
     const rank = index + 1;
     const entityId = publicEntityId(hit.fragment);
-    const resolved = candidates.get(entityId) ?? resolveHitEntity(hit, storage);
+    const resolved =
+      candidates.get(entityId) ?? resolveStoredFragment(hit, storage);
 
     if (!resolved) {
       continue;
@@ -641,34 +646,6 @@ function recallRouteHits(
 
 function recallTargetCandidateCount(limit: number): number {
   return Math.max(limit * RECALL_TARGET_FACTOR, RECALL_MIN_TARGET_CANDIDATES);
-}
-
-function resolveHitEntity(
-  hit: StorageSearchHit,
-  storage: WorkspaceIndexStorage,
-): { entity: Entity; file: FileInfo } | null {
-  if (!hit.fragment.group || hit.fragment.group === hit.fragment.id) {
-    return {
-      entity: fragmentToEntity(hit.fragment),
-      file: hit.file,
-    };
-  }
-
-  return storage.getEntity(hit.fragment.group);
-}
-
-function fragmentToEntity(fragment: EntityFragment): Entity {
-  return {
-    id: publicEntityId(fragment),
-    fileId: fragment.fileId,
-    range: fragment.range,
-    content: fragment.content,
-    metadata: fragment.metadata,
-  };
-}
-
-function publicEntityId(fragment: EntityFragment): string {
-  return fragment.group ?? fragment.id;
 }
 
 function addOrUpdateRecall(

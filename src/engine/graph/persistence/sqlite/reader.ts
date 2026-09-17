@@ -1,6 +1,6 @@
 import type { SQLOutputValue } from "node:sqlite";
 import type { FileEdge, GraphEdgeKind } from "../../types.js";
-import type { GraphStorage, NeighborhoodOptions } from "../storage.js";
+import type { GraphReadStorage, NeighborhoodOptions } from "../storage.js";
 import type { GraphDatabase } from "./database.js";
 
 const EDGE_KINDS: readonly GraphEdgeKind[] = [
@@ -18,16 +18,7 @@ type EdgeQuery = {
 };
 
 /** One-hop relationship reads; node metadata stays in zvec. */
-export class SqliteGraphReader implements Pick<
-  GraphStorage,
-  | "neighborhood"
-  | "getCallers"
-  | "getCallees"
-  | "getImports"
-  | "getInheritance"
-  | "getSubclasses"
-  | "getImplementations"
-> {
+export class SqliteGraphReader implements GraphReadStorage {
   constructor(private readonly database: GraphDatabase) {}
 
   async neighborhood(options: NeighborhoodOptions): Promise<FileEdge[]> {
@@ -64,6 +55,10 @@ export class SqliteGraphReader implements Pick<
 
   async getImplementations(typeId: string): Promise<FileEdge[]> {
     return this.readAll({ id: typeId, scope: "target", kinds: ["implements"] });
+  }
+
+  close(): void {
+    this.database.close();
   }
 
   private readAll(query: EdgeQuery): FileEdge[] {

@@ -240,7 +240,7 @@ test("indexing compacts AST gaps without changing stored source windows", async 
     "spaced.py",
   );
   const maxChunkChars = 120;
-  const prepared = await extractForIndexing(source, {
+  const { fragments: prepared } = await extractForIndexing(source, {
     maxChunkChars,
     chunkOverlapChars: 18,
   });

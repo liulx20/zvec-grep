@@ -53,7 +53,7 @@ import {
   workspaceHome,
   workspaceIndexLocation,
   type WorkspaceIndexLocation,
-} from "./root.js";
+} from "../workspace-path.js";
 import { runRgSearch } from "./lexical.js";
 import { defaultHome, normalizePath } from "../utils/path.js";
 import {
@@ -301,13 +301,16 @@ class ZvecGrepService implements ZvecGrep {
                   ),
               );
               try {
-                const result = await workspaceIndex.index({
-                  rebuild: false,
-                  embeddingConcurrency: options.embeddingConcurrency,
-                  onProgress: options.onProgress,
-                  changedPaths: options.changedPaths,
-                  signal: options.signal,
-                });
+                const result = await workspaceIndex.index(
+                  {
+                    rebuild: false,
+                    embeddingConcurrency: options.embeddingConcurrency,
+                    onProgress: options.onProgress,
+                    changedPaths: options.changedPaths,
+                    signal: options.signal,
+                  },
+                  this.options.graphResolver,
+                );
                 writeWorkspaceManifest(location.home, {
                   ...manifest,
                   embeddingRuntime,
@@ -606,10 +609,13 @@ class ZvecGrepService implements ZvecGrep {
             embeddingModel,
           });
           try {
-            const result = await workspaceIndex.index({
-              embeddingConcurrency: options.embeddingConcurrency,
-              onProgress: options.onAutoUpdateProgress,
-            });
+            const result = await workspaceIndex.index(
+              {
+                embeddingConcurrency: options.embeddingConcurrency,
+                onProgress: options.onAutoUpdateProgress,
+              },
+              this.options.graphResolver,
+            );
             timings.addEntries(result.timings, "auto_update_");
           } finally {
             workspaceIndex.close();

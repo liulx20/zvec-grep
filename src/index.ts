@@ -69,3 +69,6 @@ export type {
   EmbeddingOptions,
   EmbeddingResult,
 } from "./engine/models/index.js";
+
+export type { FileEdge, GraphEdgeKind } from "./engine/graph/types.js";
+export type { WorkspaceGraphResolver } from "./engine/graph/workspace.js";

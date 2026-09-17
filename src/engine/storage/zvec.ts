@@ -1,3 +1,4 @@
+import { publicEntityId, resolveStoredFragment } from "./entities.js";
 import {
   ZVecCollectionSchema,
   ZVecCreateAndOpen,
@@ -169,24 +170,41 @@ class ZvecWorkspaceIndexStorage implements WorkspaceIndexStorage {
     return this.fetchStoredEntities(ids);
   }
 
+  findSymbols(name: string, scope?: string): StoredEntity[] {
+    if (!name) throw new Error("Symbol name must not be empty");
+    const docs = querySymbolDocs(this.collection, name, scope);
+    const ids = [
+      ...new Set(
+        docs.map((doc) =>
+          publicEntityId({
+            id: doc.id,
+            group:
+              readNullableStringFieldFromFields(doc.fields, "group") ??
+              undefined,
+          }),
+        ),
+      ),
+    ];
+    const matches: StoredEntity[] = [];
+    const seen = new Set<string>();
+    for (const stored of this.fetchStoredEntities(ids)) {
+      const metadata = stored.entity.metadata;
+      if (
+        stored.file.indexStatus?.indexedTime != null &&
+        metadata?.kind === "code" &&
+        metadata.symbolName === name &&
+        (scope === undefined || metadata.scope === scope) &&
+        !seen.has(stored.entity.id)
+      ) {
+        seen.add(stored.entity.id);
+        matches.push(stored);
+      }
+    }
+    return matches;
+  }
+
   getEntity(entityId: string): StoredEntity | null {
-    const fragment = this.getFragment(entityId);
-
-    if (!fragment) {
-      return null;
-    }
-
-    if (
-      fragment.fragment.group &&
-      fragment.fragment.group !== fragment.fragment.id
-    ) {
-      return this.getEntity(fragment.fragment.group);
-    }
-
-    return {
-      file: fragment.file,
-      entity: fragmentToEntity(fragment.fragment),
-    };
+    return resolveStoredFragment(this.getFragment(entityId), this);
   }
 
   private getFragment(fragmentId: string): StoredEntityFragment | null {
@@ -326,6 +344,7 @@ class ZvecWorkspaceIndexStorage implements WorkspaceIndexStorage {
 
   async finalizeWrites(): Promise<void> {
     this.assertWritable("finalizeWrites");
+    await this.files.finalizeWrites();
     if (this.needsOptimize) {
       await this.collection.optimize();
       this.needsOptimize = false;
@@ -366,20 +385,7 @@ class ZvecWorkspaceIndexStorage implements WorkspaceIndexStorage {
   }
 
   docToStoredEntity(doc: ZVecDoc): StoredEntity | null {
-    const stored = this.docToStoredFragment(doc);
-
-    if (!stored) {
-      return null;
-    }
-
-    if (stored.fragment.group && stored.fragment.group !== stored.fragment.id) {
-      return this.getEntity(stored.fragment.group);
-    }
-
-    return {
-      file: stored.file,
-      entity: fragmentToEntity(stored.fragment),
-    };
+    return resolveStoredFragment(this.docToStoredFragment(doc), this);
   }
 
   docToStoredFragment(doc: ZVecDoc): StoredEntityFragment | null {
@@ -519,6 +525,14 @@ class ZvecFileMetaStore {
     this.needsOptimize = true;
   }
 
+  async finalizeWrites(): Promise<void> {
+    this.assertWritable("finalizeWrites");
+    if (this.needsOptimize) {
+      await this.collection.optimize();
+      this.needsOptimize = false;
+    }
+  }
+
   close(): void {
     if (this.needsOptimize) {
       this.collection.optimizeSync();
@@ -536,6 +550,23 @@ class ZvecFileMetaStore {
       });
     }
   }
+}
+
+/** Fetch a bounded set of indexed symbol candidates in one query. */
+export function querySymbolDocs(
+  collection: Pick<ZVecCollection, "querySync">,
+  name: string,
+  scope?: string,
+): ZVecDoc[] {
+  const clauses = [buildNonEmptyInFilter("symbol_name", [name])];
+  if (scope !== undefined)
+    clauses.push(buildNonEmptyInFilter("symbol_scope", [scope]));
+  return collection.querySync({
+    filter: clauses.join(" AND "),
+    topk: 100,
+    includeVector: false,
+    outputFields: ["group"],
+  });
 }
 
 export function queryFileMetadataDocs(
@@ -727,20 +758,6 @@ function fileRecordToInfo(file: FileRecord): FileInfo {
   const { entityIds: _entityIds, ...info } = file;
 
   return info;
-}
-
-function fragmentToEntity(fragment: EntityFragment): Entity {
-  return {
-    id: publicEntityId(fragment),
-    fileId: fragment.fileId,
-    range: fragment.range,
-    content: fragment.content,
-    metadata: fragment.metadata,
-  };
-}
-
-function publicEntityId(fragment: EntityFragment): string {
-  return fragment.group ?? fragment.id;
 }
 
 function publicEntityIds(fragments: readonly EntityFragment[]): string[] {
@@ -1114,7 +1131,10 @@ function parseMetadata(
       modifiers: readCodeModifiers(
         readNullableStringFieldFromFields(fields, "symbol_modifiers"),
       ),
-      visibility: readNullableStringFieldFromFields(fields, "symbol_visibility"),
+      visibility: readNullableStringFieldFromFields(
+        fields,
+        "symbol_visibility",
+      ),
       parameter: readNullableStringFieldFromFields(fields, "symbol_parameter"),
       language: readNullableStringFieldFromFields(fields, "symbol_language"),
     };
@@ -1348,5 +1368,10 @@ function buildInFilter(field: string, values: readonly string[]): string {
 }
 
 function quoteFilterString(value: string): string {
-  return `'${value.replaceAll("\\", "\\\\").replaceAll("'", "\\'")}'`;
+  // zvec preserves ordinary backslashes, but unescapes quotes. Some literal
+  // backslash/quote combinations cannot be represented by its filter parser.
+  if (/\\(?:['"]|$)/u.test(value)) {
+    throw new Error("Cannot represent this string in a zvec filter");
+  }
+  return `'${value.replaceAll("'", "\\'")}'`;
 }

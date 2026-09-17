@@ -1,4 +1,8 @@
 import {
+  WorkspaceGraph,
+  type WorkspaceGraphResolver,
+} from "../graph/workspace.js";
+import {
   workspaceIndexDetail,
   detail,
   EngineError,
@@ -36,6 +40,8 @@ export class WorkspaceIndex {
   private readonly embedding: WorkspaceIndexEmbeddingSchema;
   private readonly embeddingModel?: EmbeddingModel;
   private closed = false;
+  private graph?: WorkspaceGraph;
+  private indexing = false;
 
   constructor(
     readonly info: WorkspaceIndexInfo,
@@ -66,7 +72,10 @@ export class WorkspaceIndex {
     return this.info.name;
   }
 
-  index(options: IndexOptions = {}): Promise<IndexResult> {
+  async index(
+    options: IndexOptions = {},
+    graphResolver?: WorkspaceGraphResolver,
+  ): Promise<IndexResult> {
     if (this.storage.readOnly) {
       throw new EngineError("Cannot update a read-only workspace index", {
         code: "ZVEC_GREP.ENGINE.WORKSPACE_INDEX.READ_ONLY",
@@ -76,17 +85,28 @@ export class WorkspaceIndex {
 
     const embeddingModel = this.requireEmbeddingModel("index");
 
-    const context = {
-      workspaceIndex: this.info,
-      embeddingModel,
-      storage: this.storage,
-      embeddingConcurrency: options.embeddingConcurrency,
-      onProgress: options.onProgress,
-      signal: options.signal,
-    };
-    return options.changedPaths && options.changedPaths.length > 0
-      ? indexWorkspacePaths(context, options.changedPaths)
-      : indexWorkspace(context);
+    if (this.indexing) throw new Error("Workspace indexing is already running");
+    this.indexing = true;
+    try {
+      this.graph ??= new WorkspaceGraph(this.info.path, this.storage);
+      await this.graph.recover();
+      const context = {
+        workspaceIndex: this.info,
+        embeddingModel,
+        storage: this.storage,
+        graph: this.graph,
+        graphResolver,
+        rebuildGraph: this.graph.needsRebuild,
+        embeddingConcurrency: options.embeddingConcurrency,
+        onProgress: options.onProgress,
+        signal: options.signal,
+      };
+      return !context.rebuildGraph && options.changedPaths?.length
+        ? await indexWorkspacePaths(context, options.changedPaths)
+        : await indexWorkspace(context);
+    } finally {
+      this.indexing = false;
+    }
   }
 
   status(): Promise<WorkspaceIndexStatus> {
@@ -106,8 +126,12 @@ export class WorkspaceIndex {
       return;
     }
 
-    this.storage.close();
-    this.closed = true;
+    try {
+      this.storage.close();
+    } finally {
+      this.graph?.close();
+      this.closed = true;
+    }
   }
 
   private validateIndexVersion(): void {

@@ -28,7 +28,18 @@ export function hasWorkspaceIndexStorage(storagePath: string): boolean {
 
 export function deleteWorkspaceIndexStorage(storagePath: string): void {
   const paths = resolveWorkspaceIndexStoragePaths(storagePath);
-  for (const target of [paths.filesPath, paths.indexPath]) {
+  for (const target of [
+    paths.filesPath,
+    paths.indexPath,
+    ...[
+      "graph.sqlite",
+      "graph.sqlite-wal",
+      "graph.sqlite-shm",
+      "graph.ready",
+      "graph.pending.json",
+      "graph.pending.json.tmp",
+    ].map((name) => join(paths.storagePath, name)),
+  ]) {
     if (dirname(target) !== paths.storagePath) {
       throw new Error("Workspace index data must be inside its storage path");
     }

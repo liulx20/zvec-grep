@@ -181,7 +181,7 @@ test("MCP toolset resolution prefers explicit configuration and defaults to agen
   assert.throws(() => parseMcpToolset("all"), /Expected "agent" or "full"/);
 });
 
-test("default agent contract exposes only indexed search", async (t) => {
+test("default agent contract exposes indexed search and relationship tools", async (t) => {
   const backend = createBackend();
   let managementCalls = 0;
   backend.index = async (input) => {
@@ -208,6 +208,8 @@ test("default agent contract exposes only indexed search", async (t) => {
 
   const listed = await client.listTools();
   assert.deepEqual(listed.tools.map((tool) => tool.name).toSorted(), [
+    "callees",
+    "callers",
     "zvec_grep_search",
   ]);
 
@@ -302,6 +304,8 @@ test("full server contract exposes all tools with stable annotations", async (t)
   assert.deepEqual(
     tools.map((tool) => tool.name),
     [
+      "callees",
+      "callers",
       "zvec_grep_index",
       "zvec_grep_index_drop",
       "zvec_grep_index_status",
@@ -1552,4 +1556,91 @@ test("CLI admin search includes per-group recall while public MCP remains text-o
     adminSearch.structuredContent.result.groupResults[1].items[0].content,
     "beta-hit",
   );
+});
+
+test("relationship tools dispatch independently beside search in both toolsets", async (t) => {
+  const methods = {
+    callers: "getCallers",
+    callees: "getCallees",
+  };
+  const edges = [
+    {
+      symbol: { name: "run", filePath: "worker.ts", startLine: 1, endLine: 5 },
+      line: 1,
+      column: 0,
+    },
+  ];
+  const matches = [
+    {
+      name: "helper",
+      filePath: "a.ts",
+      startLine: 1,
+      endLine: 2,
+      totalEdges: edges.length,
+      edges,
+    },
+  ];
+  for (const toolset of ["agent", "full"]) {
+    await t.test(toolset, async (t) => {
+      const calls = [];
+      const backend = createBackend();
+      for (const method of Object.values(methods))
+        backend[method] = async (input) => {
+          calls.push([method, input]);
+          return matches;
+        };
+      backend.search = async () => {
+        throw new Error("must not route through search");
+      };
+      const { client, server } = await connect(backend, { toolset });
+      t.after(async () => {
+        await client.close();
+        await server.close();
+      });
+      const { tools } = await client.listTools();
+      for (const [name, method] of Object.entries(methods)) {
+        const tool = tools.find((tool) => tool.name === name);
+        assert.equal(tool.annotations.readOnlyHint, true);
+        assert.equal(tool.inputSchema.properties.limit.default, 20);
+        assert.ok(!tool.inputSchema.required.includes("limit"));
+        assert.equal(tool.inputSchema.properties.id, undefined);
+        assert.ok(tool.inputSchema.properties.symbol);
+        const result = await client.callTool({
+          name: tool.name,
+          arguments: { root, symbol: "helper" },
+        });
+        assert.deepEqual(result.structuredContent.matches, matches);
+        assert.deepEqual(calls.at(-1), [
+          method,
+          { root, symbol: "helper", limit: 20 },
+        ]);
+        const limited = await client.callTool({
+          name: tool.name,
+          arguments: { root, symbol: "helper", limit: 1 },
+        });
+        assert.deepEqual(limited.structuredContent.matches, matches);
+        assert.deepEqual(calls.at(-1), [
+          method,
+          { root, symbol: "helper", limit: 1 },
+        ]);
+      }
+      const before = calls.length;
+      for (const args of [
+        { root: "relative", symbol: "helper" },
+        { root, symbol: " " },
+        { root, symbol: "helper", limit: 0 },
+        { root, symbol: "helper", limit: -1 },
+        { root, symbol: "helper", limit: 1.5 },
+        { root, symbol: "helper", limit: "1" },
+        { root, id: "entity-id" },
+      ]) {
+        const result = await client.callTool({
+          name: "callers",
+          arguments: args,
+        });
+        assert.equal(result.isError, true);
+      }
+      assert.equal(calls.length, before);
+    });
+  }
 });

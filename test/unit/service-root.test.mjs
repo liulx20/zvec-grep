@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
-import { workspaceIndexLocation } from "../../dist/engine/service/root.js";
+import { workspaceIndexLocation } from "../../dist/engine/workspace-path.js";
 
 test("workspace index locations resolve an existing index symlink", async () => {
   const temporaryRoot = await mkdtemp(join(tmpdir(), "zvec-grep-root-"));

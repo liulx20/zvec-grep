@@ -1,3 +1,7 @@
+import type {
+  WorkspaceGraph,
+  WorkspaceGraphResolver,
+} from "../../graph/workspace.js";
 import { lstat, readFile } from "node:fs/promises";
 import {
   workspaceIndexDetail,
@@ -41,6 +45,9 @@ import {
 import { indexChunkOptions } from "./input-budget.js";
 
 export type IndexContext = {
+  graph?: WorkspaceGraph;
+  graphResolver?: WorkspaceGraphResolver;
+  rebuildGraph?: boolean;
   workspaceIndex: WorkspaceIndexInfo;
   storage: WorkspaceIndexStorage;
   embeddingModel: EmbeddingModel;
@@ -273,6 +280,12 @@ async function indexWorkspaceUnchecked(
   throwIfIndexCancelled(ctx);
   reportIndexFinalizing(ctx, report, finalPass, progressBase);
   await timings.time("index_optimize", () => optimizeStorage(ctx));
+  if (finalPass.stats.filesFailed === 0 && ctx.graph) {
+    const graph = ctx.graph;
+    await timings.time("index_graph_resolve", () =>
+      graph.finish(ctx.graphResolver, ctx.signal),
+    );
+  }
 
   const result = buildIndexResult(ctx, passes, Date.now() - start, timings);
 
@@ -318,6 +331,12 @@ async function indexWorkspacePathsUnchecked(
   throwIfIndexCancelled(ctx);
   reportIndexFinalizing(ctx, report, finalPass, progressBase);
   await timings.time("index_optimize", () => optimizeStorage(ctx));
+  if (finalPass.stats.filesFailed === 0 && ctx.graph) {
+    const graph = ctx.graph;
+    await timings.time("index_graph_resolve", () =>
+      graph.finish(ctx.graphResolver, ctx.signal),
+    );
+  }
   const result = buildIndexResult(ctx, passes, Date.now() - start, timings);
   if (result.filesFailed > 0) {
     throw filesFailedError(ctx, result, finalPass, passes.length);
@@ -466,6 +485,10 @@ async function runDiffPass(
     computeDiffFromFiles(scannedFiles, existingFiles),
   );
   throwIfIndexCancelled(ctx);
+  if (ctx.rebuildGraph) {
+    diff.modified.push(...diff.unchanged);
+    diff.unchanged = [];
+  }
   const pending = [...diff.added, ...diff.modified, ...diff.pending];
 
   report({
@@ -475,11 +498,18 @@ async function runDiffPass(
     detail: `${diff.added.length} added, ${diff.modified.length} modified, ${diff.pending.length} pending, ${diff.deleted.length} deleted, ${diff.unchanged.length} unchanged`,
   });
 
-  timings.timeSync("index_delete_stale", () => {
+  await timings.time("index_delete_stale", async () => {
     for (const file of diff.deleted) {
       throwIfIndexCancelled(ctx);
       try {
-        ctx.storage.deleteFile(file.id);
+        if (ctx.graph)
+          await ctx.graph.update(
+            file,
+            undefined,
+            () => ctx.storage.deleteFile(file.id),
+            true,
+          );
+        else ctx.storage.deleteFile(file.id);
       } catch (error) {
         throw toEngineError(
           error,
@@ -844,7 +874,7 @@ async function indexFiles(
       }
 
       if (prepared.fragments.length === 0) {
-        const committed = commitFile(prepared, [], ctx, stats);
+        const committed = await commitFile(prepared, [], ctx, stats);
         onProgress(stats, finishedFileDetail(committed, file.relativePath));
         continue;
       }
@@ -931,7 +961,7 @@ async function prepareFile(
     }
     return {
       file,
-      failedReason: markFileFailed(ctx, file, error, "prepare"),
+      failedReason: await markFileFailed(ctx, file, error, "prepare"),
     };
   }
 }
@@ -985,7 +1015,7 @@ async function embedAndCommitBatch(
         }
       }
       offset += file.fragments.length;
-      const committed = timings.timeSync("index_commit", () =>
+      const committed = await timings.time("index_commit", () =>
         commitFile(file, fileVectors, ctx, stats, truncatedFragmentCount),
       );
       onProgress(stats, finishedFileDetail(committed, file.file.relativePath));
@@ -1044,7 +1074,7 @@ async function embedAndCommitFile(
       ),
     );
     throwIfIndexCancelled(ctx);
-    const committed = timings.timeSync("index_commit", () =>
+    const committed = await timings.time("index_commit", () =>
       commitFile(
         file,
         embedding.vectors,
@@ -1061,19 +1091,19 @@ async function embedAndCommitFile(
     if (shouldFailFastEmbeddingError(error, ctx.embeddingModel)) {
       throw error;
     }
-    const reason = markFileFailed(ctx, file.file, error, "embed");
+    const reason = await markFileFailed(ctx, file.file, error, "embed");
     recordFileFailed(stats, file.file, reason);
     onProgress(stats, finishedFileDetail(false, file.file.relativePath));
   }
 }
 
-function commitFile(
+async function commitFile(
   file: PreparedFile,
   vectors: readonly number[][],
   ctx: IndexContext,
   stats: IndexStats,
   truncatedFragmentCount = 0,
-): boolean {
+): Promise<boolean> {
   try {
     throwIfIndexCancelled(ctx);
     if (file.fragments.length !== vectors.length) {
@@ -1085,16 +1115,19 @@ function commitFile(
         },
       );
     }
-    ctx.storage.replaceFile(
-      file.file,
-      file.fragments.map(({ fragment }, index) => ({
-        fragment,
-        vector: vectors[index],
-      })),
-      {
-        truncatedFragmentCount,
-      },
-    );
+    const replace = () =>
+      ctx.storage.replaceFile(
+        file.file,
+        file.fragments.map(({ fragment }, index) => ({
+          fragment,
+          vector: vectors[index],
+        })),
+        {
+          truncatedFragmentCount,
+        },
+      );
+    if (ctx.graph) await ctx.graph.update(file.file, file.graph, replace);
+    else replace();
     stats.filesIndexed++;
     stats.entitiesCreated += countPublicEntities(
       file.fragments.map(({ fragment }) => fragment),
@@ -1104,7 +1137,7 @@ function commitFile(
     if (indexIsCancelled(ctx)) {
       throw indexCancellationError(ctx);
     }
-    const reason = markFileFailed(ctx, file.file, error, "commit");
+    const reason = await markFileFailed(ctx, file.file, error, "commit");
     recordFileFailed(stats, file.file, reason);
     return false;
   }
@@ -1897,16 +1930,20 @@ async function withContentHash(file: FileInfo): Promise<FileInfo> {
   };
 }
 
-function markFileFailed(
+async function markFileFailed(
   ctx: IndexContext,
   file: FileInfo,
   error: unknown,
   stage: string,
-): string {
+): Promise<string> {
   const reason = fileFailureReason(stage, error);
 
   try {
-    ctx.storage.markFileFailed(file, reason);
+    if (ctx.graph)
+      await ctx.graph.update(file, undefined, () =>
+        ctx.storage.markFileFailed(file, reason),
+      );
+    else ctx.storage.markFileFailed(file, reason);
     return reason;
   } catch (markError) {
     throw toEngineError(markError, "Indexing failed to record file failure", {

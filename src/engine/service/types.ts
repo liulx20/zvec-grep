@@ -1,3 +1,4 @@
+import type { WorkspaceGraphResolver } from "../graph/workspace.js";
 import type { EmbeddingModel } from "../models/index.js";
 import type {
   CodeSymbolType,
@@ -17,6 +18,7 @@ import type {
 } from "../types.js";
 
 export type CreateZvecGrepOptions = {
+  graphResolver?: WorkspaceGraphResolver;
   root?: string;
   home?: string;
   embeddingModel?: EmbeddingModel;

@@ -2039,3 +2039,24 @@ async function waitFor(predicate) {
   }
   throw new Error("Condition was not reached.");
 }
+
+test("relationship queries use workspace reads without creating a service or embedding model", async () => {
+  const root = await mkdtemp(join(tmpdir(), "zvec-graph-backend-"));
+  let serviceCalls = 0;
+  const backend = new DaemonBackend({
+    version: "test",
+    createService: async () => {
+      serviceCalls++;
+      throw new Error("unexpected service creation");
+    },
+  });
+  try {
+    await assert.rejects(backend.getCallers({ root, symbol: "target" }));
+    await assert.rejects(backend.getCallees({ root, symbol: "source" }));
+    assert.equal(serviceCalls, 0);
+    assert.equal(backend.modelPool.snapshot().loaded, 0);
+  } finally {
+    await backend.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});

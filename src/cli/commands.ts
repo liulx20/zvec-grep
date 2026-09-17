@@ -29,7 +29,7 @@ import {
   routeByMode,
 } from "../client/mode-router.js";
 import { serverStatus } from "../daemon/server-controller.js";
-import { findNearestWorkspace } from "../engine/service/root.js";
+import { findNearestWorkspace } from "../engine/workspace-path.js";
 import type { ParsedArgs, CliOptions } from "./types.js";
 import {
   contextWarningLines,

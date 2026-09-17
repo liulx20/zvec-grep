@@ -7,9 +7,13 @@ import {
   ZVecCollectionSchema,
   ZVecCreateAndOpen,
   ZVecDataType,
+  ZVecIndexType,
 } from "@zvec/zvec";
 import { createWorkspaceIndexStorage } from "../../dist/engine/storage/index.js";
-import { queryFileMetadataDocs } from "../../dist/engine/storage/zvec.js";
+import {
+  queryFileMetadataDocs,
+  querySymbolDocs,
+} from "../../dist/engine/storage/zvec.js";
 
 function doc(id) {
   return {
@@ -152,3 +156,180 @@ function fileInfo(id, root, relativePath) {
     format: relativePath.endsWith(".md") ? "markdown" : "typescript",
   };
 }
+
+test("indexed symbol queries cap candidates in one query and preserve exact filters", async (t) => {
+  const parent = await mkdtemp(join(tmpdir(), "zvec-symbol-candidates-"));
+  const collection = ZVecCreateAndOpen(
+    join(parent, "data"),
+    new ZVecCollectionSchema({
+      name: "symbol_candidates",
+      fields: [
+        {
+          name: "symbol_name",
+          dataType: ZVecDataType.STRING,
+          indexParams: { indexType: ZVecIndexType.INVERT },
+        },
+        { name: "symbol_scope", dataType: ZVecDataType.STRING },
+        {
+          name: "file_id",
+          dataType: ZVecDataType.STRING,
+          indexParams: { indexType: ZVecIndexType.INVERT },
+        },
+        { name: "fragment_index", dataType: ZVecDataType.INT32 },
+        { name: "group", dataType: ZVecDataType.STRING, nullable: true },
+      ],
+    }),
+  );
+  t.after(async () => {
+    collection.closeSync();
+    await rm(parent, { recursive: true, force: true });
+  });
+  const name = "helper'\\name";
+  const docs = ["a", "b", "z"].flatMap((file) =>
+    Array.from({ length: file === "b" ? 107 : 2 }, (_, index) => ({
+      id: `${file}-${index}`,
+      fields: {
+        file_id: file,
+        fragment_index: index,
+        symbol_name: name,
+        symbol_scope: index % 2 ? "Class" : "Other",
+      },
+    })),
+  );
+  docs.push({
+    id: "unrelated",
+    fields: {
+      file_id: "b",
+      fragment_index: 8,
+      symbol_name: "other",
+      symbol_scope: "Class",
+    },
+  });
+  for (const status of collection.insertSync(docs))
+    assert.equal(status.ok, true);
+  const queries = [];
+  const traced = {
+    querySync(query) {
+      queries.push(query);
+      return collection.querySync(query);
+    },
+  };
+  const candidates = querySymbolDocs(traced, name);
+  assert.equal(candidates.length, 100);
+  assert.equal(queries.length, 1);
+  assert.ok(candidates.every((doc) => doc.id !== "unrelated"));
+  assert.deepEqual(
+    querySymbolDocs(traced, name, "Class")
+      .map((doc) => doc.id)
+      .sort(),
+    docs
+      .filter(
+        (doc) =>
+          doc.fields.symbol_name === name &&
+          doc.fields.symbol_scope === "Class",
+      )
+      .map((doc) => doc.id)
+      .sort(),
+  );
+  assert.deepEqual(querySymbolDocs(traced, "' OR symbol_name != '"), []);
+  for (const unsupported of ["trailing\\", "slash\\'quote", 'slash\\"quote']) {
+    assert.throws(
+      () => querySymbolDocs(traced, unsupported),
+      /Cannot represent this string in a zvec filter/,
+    );
+  }
+  assert.ok(
+    queries.every(
+      (query) =>
+        query.filter.startsWith("symbol_name = ") &&
+        query.topk === 100 &&
+        query.includeVector === false,
+    ),
+  );
+  assert.equal(queries.length, 3);
+});
+
+test("findSymbols returns public entities once and filters exact names and scopes", async (t) => {
+  const parent = await mkdtemp(join(tmpdir(), "zvec-symbol-storage-"));
+  const storage = createWorkspaceIndexStorage({
+    storagePath: join(parent, "storage"),
+    readOnly: false,
+    embedding: {
+      provider: "local",
+      model: "test",
+      dimension: 2,
+      metric: "cosine",
+    },
+  });
+  t.after(async () => {
+    storage.close();
+    await rm(parent, { recursive: true, force: true });
+  });
+  const name = "helper'\\name";
+  function fragment(file, id, scope, group, symbolName = name) {
+    return {
+      fragment: {
+        id,
+        fileId: file.id,
+        group,
+        range: {
+          kind: "text",
+          startLine: 1,
+          endLine: 2,
+          startOffset: 0,
+          endOffset: 10,
+        },
+        content: { kind: "text", text: "helper content" },
+        metadata: {
+          kind: "code",
+          symbolName,
+          symbolType: "function",
+          scope,
+          modifiers: [],
+          nodeType: "function_declaration",
+          signature: null,
+          doc: null,
+          language: "typescript",
+        },
+      },
+      vector: [1, 0],
+    };
+  }
+  const a = fileInfo("a", parent, "a.ts");
+  const b = fileInfo("b", parent, "b.ts");
+  storage.replaceFile(a, [
+    fragment(a, "major", "Class", "major"),
+    ...Array.from({ length: 5 }, (_, i) =>
+      fragment(a, `chunk-${i}`, "Class", "major"),
+    ),
+    fragment(a, "mention", null, undefined, "other"),
+  ]);
+  storage.replaceFile(b, [fragment(b, "standalone", "Other")]);
+  await storage.finalizeWrites();
+  assert.deepEqual(
+    storage
+      .findSymbols(name)
+      .map((row) => row.entity.id)
+      .sort(),
+    ["major", "standalone"],
+  );
+  assert.deepEqual(
+    storage.findSymbols(name, "Class").map((row) => row.entity.id),
+    ["major"],
+  );
+  assert.deepEqual(storage.findSymbols(name, "missing"), []);
+  assert.deepEqual(storage.findSymbols("HELPER"), []);
+  assert.deepEqual(storage.findSymbols("HELPER", "Class"), []);
+  const originalFts = storage.searchFts;
+  storage.searchFts = () => {
+    throw new Error("Exact matches must not invoke FTS");
+  };
+  assert.equal(storage.findSymbols(name).length, 2);
+  storage.searchFts = originalFts;
+  assert.deepEqual(storage.findSymbols("zznonexistenttoken"), []);
+  storage.markFileFailed(a, "failed update");
+  assert.deepEqual(
+    storage.findSymbols(name).map((row) => row.entity.id),
+    ["standalone"],
+  );
+});

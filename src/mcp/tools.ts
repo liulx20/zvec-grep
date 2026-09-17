@@ -1,3 +1,4 @@
+import type { SymbolRelationships } from "../engine/pipeline/relationships/index.js";
 import { randomBytes } from "node:crypto";
 import {
   acceptedContent,
@@ -25,6 +26,9 @@ import {
   type NormalizedSearchInput,
 } from "./input-normalization.js";
 import {
+  zvecGrepRelationshipInputSchema,
+  zvecGrepRelationshipOutputSchema,
+  type ZvecGrepRelationshipInput,
   zvecGrepIndexInputSchema,
   zvecGrepIndexOutputSchema,
   zvecGrepIndexDropInputSchema,
@@ -195,6 +199,9 @@ export type ZvecGrepRgResult = {
 };
 
 export interface ZvecGrepDaemonBackend {
+  getCallers(input: ZvecGrepRelationshipInput): Promise<SymbolRelationships[]>;
+  getCallees(input: ZvecGrepRelationshipInput): Promise<SymbolRelationships[]>;
+
   index(
     input: ZvecGrepIndexRequest,
     options?: {
@@ -229,6 +236,7 @@ export interface ZvecGrepDaemonBackend {
 
 function searchRoutingRules(exactTool: string, focusedTools: string): string[] {
   return [
+    "For known symbol names, use callers or callees for persisted call relationships. Same-name definitions are returned as separate matches. Unresolved references are excluded, so empty results do not prove a relationship is absent.",
     `Use ${exactTool} first only when exact lookup alone is sufficient, such as locating one definition, literal, filename, configuration key, error message, regex match, or exhaustive occurrence list.`,
     "Use zvec_grep_search first when wording or location is unknown, or when the answer requires architecture, lifecycle, call relationships, dependencies, data or control flow, design rationale, comparison, or synthesis across files or components.",
     `When user-provided or verified exact symbols are present but the answer spans multiple files, components, stages, implementations, or relationships, treat the task as mixed: call zvec_grep_search with the semantic intent and those anchors, then use ${focusedTools} for focused verification.`,
@@ -338,6 +346,40 @@ export function registerZvecGrepTools(
 ): void {
   const toolset = options.toolset ?? DEFAULT_MCP_TOOLSET;
   const full = toolset === "full";
+
+  const relationships = [
+    [
+      "callers",
+      "Incoming call sites for a symbol name.",
+      (input: ZvecGrepRelationshipInput) => backend.getCallers(input),
+    ],
+    [
+      "callees",
+      "Outgoing call sites for a symbol name.",
+      (input: ZvecGrepRelationshipInput) => backend.getCallees(input),
+    ],
+  ] as const;
+  for (const [name, description, query] of relationships) {
+    server.registerTool(
+      name,
+      {
+        title: description,
+        description: `${description} Matches exact symbol names or scope-qualified names (Class::method), falling back to full-text candidates with exact scope filtering if specified when no exact match exists, returning definitions from up to 100 matching index records with their edges. Use a qualified name to narrow ambiguous results. Each edge contains symbol (the caller for callers, the callee for callees) with its qualified name, file path, and definition line range, or null if unavailable. Edge line/column locate the call in the caller file. Optional limit caps edges per matching symbol (default 20). Each match includes totalEdges before truncation. Unresolved references are excluded. Requires an existing graph index; does not refresh or build it.`,
+        inputSchema: zvecGrepRelationshipInputSchema,
+        outputSchema: zvecGrepRelationshipOutputSchema,
+        annotations: {
+          readOnlyHint: true,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: false,
+        },
+      },
+      async (input) => {
+        const matches = await query(input);
+        return toolResult(JSON.stringify(matches), { matches });
+      },
+    );
+  }
 
   if (full) {
     server.registerTool(

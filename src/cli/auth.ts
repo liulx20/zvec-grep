@@ -19,7 +19,7 @@ import { readWorkspaceManifest } from "../engine/manifest.js";
 import {
   findNearestWorkspace,
   workspaceIndexLocation,
-} from "../engine/service/root.js";
+} from "../engine/workspace-path.js";
 import { createEmbeddingModelForIdentity } from "../engine/service/index.js";
 import {
   RemoteEmbeddingAuthorizationManager,
