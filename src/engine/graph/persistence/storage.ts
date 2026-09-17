@@ -1,4 +1,39 @@
-import type { FileEdge, FileGraphResult } from "../types.js";
+import type {
+  EdgeProvenance,
+  FileEdge,
+  FileGraphResult,
+  GraphEdgeKind,
+  PendingRef,
+} from "../types.js";
+
+export type StoredPendingRef = PendingRef & {
+  id: number;
+  /** Changes whenever the reference is invalidated; prevents stale writeback. */
+  token: string;
+  fileId: string;
+};
+
+export type PendingRefPage = {
+  refs: StoredPendingRef[];
+  nextCursor?: number;
+};
+
+export type ReferenceResolution = {
+  refId: number;
+  refToken: string;
+  /** Target existence/version must be validated by the coordinating pipeline. */
+  targetId: string;
+  provenance: Exclude<EdgeProvenance, "file_local">;
+};
+
+export type NeighborhoodOptions = {
+  /** Entity or file endpoint ID, not a filter on the owning file. */
+  id: string;
+  /** Defaults to both incoming and outgoing edges. */
+  direction?: "in" | "out" | "both";
+  /** Omitted means all kinds; an empty list matches nothing. */
+  kinds?: readonly GraphEdgeKind[];
+};
 
 /**
  * Statistics returned by a pending-reference resolution pass.
@@ -22,11 +57,31 @@ export interface GraphStorage {
    * Replaces the persisted graph for a single file. Callers must ensure that
    * `replaceFile` into the zvec store and `writeFileGraph` into graph storage
    * are committed together (or that failures roll back both).
+   * Pass complete pre-update entity IDs from zvec; use [] for a new file.
    */
-  writeFileGraph(fileId: string, result: FileGraphResult): Promise<void>;
+  writeFileGraph(
+    fileId: string,
+    result: FileGraphResult,
+    oldEntityIds: readonly string[],
+  ): Promise<void>;
 
-  /** Removes all edges and pending refs owned by the given file. */
-  deleteFileGraph(fileId: string): Promise<void>;
+  /** Removes owned rows and invalidates incoming cross-file edges. */
+  deleteFileGraph(
+    fileId: string,
+    oldEntityIds: readonly string[],
+  ): Promise<void>;
+
+  /** Only pending refs; restart after file changes. */
+  listPendingRefs(options?: {
+    limit?: number;
+    cursor?: number;
+  }): Promise<PendingRefPage>;
+
+  /** Adds resolved edges without replacing local edges; skips stale reference tokens.
+   * Caller must serialize target validation/writeback with file updates and deletes. */
+  applyResolutions(
+    results: readonly ReferenceResolution[],
+  ): Promise<{ resolved: number; stale: number }>;
 
   /**
    * Runs a pass over currently pending references and attempts to resolve
@@ -41,21 +96,24 @@ export interface GraphStorage {
   // Reader queries
   // ---------------------------------------------------------------------------
 
-  /** Edges where `target` is the given entity ID and kind is `calls`. */
+  /** One-hop edges only; pending refs and zvec node metadata are excluded. */
+  neighborhood(options: NeighborhoodOptions): Promise<FileEdge[]>;
+
+  /** Incoming calls. Returns all matching edges. */
   getCallers(targetId: string): Promise<FileEdge[]>;
 
-  /** Edges where `source` is the given entity ID and kind is `calls`. */
+  /** Outgoing calls. Returns all matching edges. */
   getCallees(sourceId: string): Promise<FileEdge[]>;
 
-  /** `imports` edges owned by the given file ID. */
+  /** Import edges owned by the file (not an endpoint filter). Returns all matching edges. */
   getImports(fileId: string): Promise<FileEdge[]>;
 
-  /** `extends` edges where `source` is the given type ID. */
+  /** Outgoing extends edges. Returns all matching edges. */
   getInheritance(typeId: string): Promise<FileEdge[]>;
 
-  /** `extends` edges where `target` is the given type ID. */
+  /** Incoming extends edges. Returns all matching edges. */
   getSubclasses(typeId: string): Promise<FileEdge[]>;
 
-  /** `implements` edges where `target` is the given interface ID. */
+  /** Incoming implements edges. Returns all matching edges. */
   getImplementations(typeId: string): Promise<FileEdge[]>;
 }
