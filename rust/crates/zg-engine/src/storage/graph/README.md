@@ -56,8 +56,9 @@ All operations are synchronous. Writes require `&mut self` and use SQLite
   provenance and stale candidates. Original reference context is retained.
   Deleting the source file removes its rows.
 
-Transactions cover SQLite only. The indexer must coordinate graph writes with
-zvec's file-update journal/checkpoints and use the workspace write lock. Do not
+Transactions cover SQLite only. Integration must coordinate graph writes through
+IndexStore's file-update lifecycle, recovery and checkpoints, under the workspace
+write lock. Do not
 publish an index if only one store has committed. This module deliberately does
 not add another workspace recovery journal or a ready marker.
 
