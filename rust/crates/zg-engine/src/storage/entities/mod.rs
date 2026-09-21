@@ -8,10 +8,7 @@ use crate::{
     domain::{Entity, EntityId, EntityMetadata, FileId},
 };
 
-use super::zvec::{
-    corrupt, doc_key, fetch_map, native, open_collection, scalar, string_field, u32_field,
-    write_docs,
-};
+use super::zvec::{corrupt, fetch_map, native, open_collection, scalar, u32_field, write_docs};
 
 mod codec;
 pub(super) use codec::validate_content;
@@ -51,9 +48,10 @@ impl Entities {
             .iter()
             .map(|id| id.as_str().to_owned())
             .collect::<Vec<_>>();
-        fetch_map(&self.collection, &keys)?
+        zg_storage::EntityReader::new(&self.collection)
+            .fetch(&keys)?
             .into_values()
-            .map(|doc| decode_doc(&doc).map(|entity| (entity.id.clone(), entity)))
+            .map(|record| decode_record(record).map(|entity| (entity.id.clone(), entity)))
             .collect()
     }
 
@@ -123,26 +121,22 @@ fn encode_doc(entity: &Entity) -> EngineResult<Doc> {
     Ok(doc)
 }
 
+#[cfg(test)]
 fn decode_doc(doc: &Doc) -> EngineResult<Entity> {
-    let metadata = decode_metadata(doc)?;
-    let entity = codec::decode_entity(&string_field(doc, "payload")?, metadata.as_ref())?;
-    if doc_key(doc)? != entity.id.as_str()
-        || u32_field(doc, "file_id")? != entity.file_id.get()
-        || string_field(doc, "entity_id")? != entity.id.as_str()
-    {
+    decode_record(zg_storage::EntityRecord::from_doc(doc)?)
+}
+
+fn decode_record(record: zg_storage::EntityRecord) -> EngineResult<Entity> {
+    let metadata: Option<EntityMetadata> = record
+        .metadata
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|error| corrupt(format!("invalid entity metadata: {error}")))?;
+    let entity = codec::decode_entity(&record.payload, metadata.as_ref())?;
+    if record.id != entity.id.as_str() || record.file_id != entity.file_id.get() {
         return Err(corrupt("entity identity differs from its index fields"));
     }
     Ok(entity)
-}
-
-fn decode_metadata(doc: &Doc) -> EngineResult<Option<EntityMetadata>> {
-    if !doc.has_field("metadata") || doc.is_field_null("metadata") {
-        return Ok(None);
-    }
-    let json = string_field(doc, "metadata")?;
-    serde_json::from_str(&json)
-        .map(Some)
-        .map_err(|error| corrupt(format!("invalid entity metadata: {error}")))
 }
 
 #[cfg(test)]

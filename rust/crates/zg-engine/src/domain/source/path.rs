@@ -18,10 +18,6 @@ impl SourcePath {
         &self.0
     }
 
-    pub(crate) fn into_path_buf(self) -> PathBuf {
-        self.0
-    }
-
     fn validate(path: &Path) -> EngineResult<()> {
         if path.as_os_str().is_empty()
             || path
@@ -88,7 +84,7 @@ mod tests {
         ] {
             let source = SourcePath::new(path).expect("native relative path");
             assert_eq!(source.as_path(), Path::new(path));
-            assert_eq!(source.into_path_buf(), PathBuf::from(path));
+            assert_eq!(source.to_path_buf(), PathBuf::from(path));
         }
     }
 

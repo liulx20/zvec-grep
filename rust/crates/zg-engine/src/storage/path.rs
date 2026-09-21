@@ -6,7 +6,7 @@ use crate::{EngineError, EngineResult, domain::SourcePath};
 
 use super::zvec::{native, scalar, wildcard_string};
 use crate::domain::{DirectoryId, FileRecord};
-use serde::{Deserialize, Serialize};
+pub(super) use zg_storage::path::PathRecord;
 use zvec_rust::{CollectionSchema, DataType, Doc};
 
 pub(super) fn encode_path(path: &SourcePath) -> EngineResult<String> {
@@ -37,78 +37,6 @@ pub(super) fn query_path(path: &Path) -> Option<String> {
     return Some(value.replace('\\', "/"));
     #[cfg(not(windows))]
     Some(value.to_owned())
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(tag = "encoding", content = "value", rename_all = "snake_case")]
-pub(super) enum PathRecord {
-    Utf8(String),
-    UnixBytes(Vec<u8>),
-    WindowsWide(Vec<u16>),
-}
-
-impl PathRecord {
-    pub(super) fn from_path(path: &Path) -> EngineResult<Self> {
-        validate_path(path)?;
-        if let Some(value) = path.to_str() {
-            return Ok(Self::Utf8(value.to_owned()));
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::ffi::OsStrExt;
-            Ok(Self::UnixBytes(path.as_os_str().as_bytes().to_vec()))
-        }
-        #[cfg(windows)]
-        {
-            use std::os::windows::ffi::OsStrExt;
-            Ok(Self::WindowsWide(path.as_os_str().encode_wide().collect()))
-        }
-        #[cfg(not(any(unix, windows)))]
-        Err(EngineError::storage_failure(
-            "cannot store a non-Unicode path on this platform",
-        ))
-    }
-
-    pub(super) fn into_path(self) -> EngineResult<PathBuf> {
-        match self {
-            Self::Utf8(value) => Ok(PathBuf::from(value)),
-            Self::UnixBytes(bytes) => {
-                #[cfg(unix)]
-                {
-                    use std::os::unix::ffi::OsStringExt;
-                    Ok(std::ffi::OsString::from_vec(bytes).into())
-                }
-                #[cfg(not(unix))]
-                String::from_utf8(bytes).map(PathBuf::from).map_err(|_| {
-                    EngineError::invalid_argument(
-                        "stored Unix path cannot be represented on this platform",
-                    )
-                })
-            }
-            Self::WindowsWide(units) => {
-                #[cfg(windows)]
-                {
-                    use std::os::windows::ffi::OsStringExt;
-                    Ok(std::ffi::OsString::from_wide(&units).into())
-                }
-                #[cfg(not(windows))]
-                String::from_utf16(&units).map(PathBuf::from).map_err(|_| {
-                    EngineError::invalid_argument(
-                        "stored Windows path cannot be represented on this platform",
-                    )
-                })
-            }
-        }
-    }
-}
-
-fn validate_path(path: &Path) -> EngineResult<()> {
-    if path.as_os_str().as_encoded_bytes().contains(&0) {
-        return Err(EngineError::invalid_argument(
-            "source file path must not contain NUL",
-        ));
-    }
-    Ok(())
 }
 
 pub(super) fn file_membership_schema(schema: &mut CollectionSchema) -> EngineResult<()> {

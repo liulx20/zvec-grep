@@ -82,7 +82,7 @@ fn query_projections_read_all_paths_and_optional_times_without_decoding_payloads
             .expect("replace payload");
         docs.push(doc);
         expected_attributes.push(StoredFileAttributes::from(&source));
-        expected.push((source.id, source.relative_path.into_path_buf()));
+        expected.push((source.id, source.relative_path.to_path_buf()));
     }
     write_docs(&store.collection, &docs, "write source").expect("write projections");
     let mut actual = store.list_paths().expect("read lightweight paths");

@@ -50,6 +50,7 @@ tree-sitter-rust.workspace = true
 tree-sitter-typescript.workspace = true
 uuid.workspace = true
 zg-engine-macros = { path = "macros" }
+zg-storage = { path = "../zg-storage" }
 zg-host-native = { path = "../zg-host-native" }
 zvec-rust.workspace = true
 

@@ -7,13 +7,11 @@ use std::{
 use zvec_rust::{Collection, CollectionSchema, DataType, Doc, SearchQuery};
 
 use super::{
-    path::{
-        decode_path, encode_path, file_membership_doc, file_membership_schema, path_key, query_path,
-    },
+    path::{encode_path, file_membership_doc, file_membership_schema, path_key, query_path},
     types::StoredFileAttributes,
     zvec::{
-        corrupt, doc_key, fetch_map, native, open_collection, scalar, string_field, u32_field,
-        wildcard_string, write_docs,
+        corrupt, fetch_map, native, open_collection, scalar, string_field, wildcard_string,
+        write_docs,
     },
 };
 use crate::{
@@ -65,14 +63,11 @@ impl Files {
 
     /// Enumerate complete native paths without loading file snapshots or status.
     pub(super) fn list_paths(&self) -> EngineResult<Vec<(FileId, PathBuf)>> {
-        let iterator = native(
-            self.collection
-                .iter_with_options(Some(&["file_id", "path"]), false),
-            "iterate source paths",
-        )?;
-        iterator
-            .map(|doc| decode_file_path_doc(&native(doc, "read source path")?))
-            .collect()
+        Ok(zg_storage::FileReader::new(&self.collection)
+            .list()?
+            .into_iter()
+            .map(|file| (FileId::new(file.id), file.relative_path))
+            .collect())
     }
 
     pub(super) fn list_attributes(&self) -> EngineResult<Vec<StoredFileAttributes>> {
@@ -268,14 +263,8 @@ fn decode_file_attributes_doc(doc: &Doc) -> EngineResult<StoredFileAttributes> {
 }
 
 fn decode_file_path_doc(doc: &Doc) -> EngineResult<(FileId, PathBuf)> {
-    let id = FileId::new(u32_field(doc, "file_id")?);
-    if doc_key(doc)? != file_key(id) {
-        return Err(corrupt("file identity differs from its primary key"));
-    }
-    Ok((
-        id,
-        decode_path(&string_field(doc, "path")?)?.into_path_buf(),
-    ))
+    let file = zg_storage::FileRecord::from_doc(doc)?;
+    Ok((FileId::new(file.id), file.relative_path))
 }
 
 #[cfg(test)]

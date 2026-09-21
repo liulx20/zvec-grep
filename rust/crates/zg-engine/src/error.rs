@@ -279,6 +279,15 @@ fn normalize_source_file(file: &str) -> String {
         .map_or_else(|| file.clone(), |index| file[index..].to_owned())
 }
 
+impl From<zg_storage::Error> for EngineError {
+    fn from(error: zg_storage::Error) -> Self {
+        match error {
+            zg_storage::Error::InvalidArgument(message) => Self::invalid_argument(message),
+            zg_storage::Error::Storage(message) => Self::storage_failure(message),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::io;

@@ -1,5 +1,9 @@
 # zvec-grep Rust rewrite
 
+Canonical file/entity reads shared by storage consumers live in
+[zg-storage](crates/zg-storage/README.md). The engine retains workspace
+sessions, writes and recovery.
+
 This directory contains the Rust implementation of zvec-grep. The TypeScript /
 Node.js implementation remains at the repository root; the [main README](../README.md)
 and [user documentation](../docs/README.md) describe that implementation.
