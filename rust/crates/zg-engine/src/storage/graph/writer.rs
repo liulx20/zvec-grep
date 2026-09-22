@@ -3,6 +3,9 @@ use std::collections::HashSet;
 
 use super::{Error, FileGraph, Provenance, Result, SqliteGraphStorage, nonempty};
 
+// Bound IN-clause parameters; invalidation also binds the owning file ID.
+const TARGET_ID_BATCH_SIZE: usize = 512;
+
 impl SqliteGraphStorage {
     /// Atomically replaces one file's local graph and invalidates inbound edges.
     /// `old_entity_ids` must contain **all** pre-update entity IDs from zvec; pass
@@ -30,7 +33,7 @@ impl SqliteGraphStorage {
         targets.push(&file_node_id);
         targets.sort_unstable();
         targets.dedup();
-        for chunk in targets.chunks(500) {
+        for chunk in targets.chunks(TARGET_ID_BATCH_SIZE) {
             let placeholders = vec!["?"; chunk.len()].join(",");
             // Even unchanged target IDs require re-resolution. Preserve the row ID
             // and reference context, but discard candidates from the old snapshot.

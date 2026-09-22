@@ -4,17 +4,21 @@ use super::{
 };
 use rusqlite::{Row, TransactionBehavior, params};
 
+/// Maximum references per page, excluding the one-row pagination lookahead.
+pub(super) const MAX_PENDING_PAGE_SIZE: usize = 1024;
+
 const SELECT_REF: &str = "SELECT id, file_id, source, reference_name, receiver_name, kind, arity, line, col, metadata, candidates, language, name_tail FROM edges";
 
 impl SqliteGraphStorage {
     /// Lists only pending refs using keyset pagination; no snapshot spans pages.
-    /// Restart with cursor 0 after file mutations. Limit must be 1..=1000.
+    /// Restart with cursor 0 after file mutations.
+    /// Limit must be positive and at most [`MAX_PENDING_PAGE_SIZE`].
     /// # Errors
     /// Rejects invalid limits/cursors and malformed stored rows or SQLite errors.
     pub(crate) fn list_pending_refs(&self, limit: usize, cursor: i64) -> Result<PendingRefPage> {
-        if !(1..=1000).contains(&limit) || cursor < 0 {
+        if !(1..=MAX_PENDING_PAGE_SIZE).contains(&limit) || cursor < 0 {
             return Err(Error::InvalidInput(
-                "pending query requires limit 1..1000 and nonnegative cursor",
+                "pending query requires limit 1..1024 and nonnegative cursor",
             ));
         }
         let mut statement = self.connection.prepare(&format!(
