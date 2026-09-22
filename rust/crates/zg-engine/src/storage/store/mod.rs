@@ -21,7 +21,6 @@ use super::{
     entities::{self, Entities},
     files::Files,
     fragments::{self, Fragments},
-    graph::{self, Direction, Edge, EdgeKind, OpenMode, SqliteGraphStorage},
     types::{
         IndexedFragment, StorageSearchFilter, StorageSearchHit, StoredEntity, StoredFileAttributes,
         StoredSearchData, WorkspaceIndexStorageOptions,
@@ -46,8 +45,6 @@ struct StoreState {
     directories: Directories,
     entities: Entities,
     fragments: Fragments,
-    graph_path: PathBuf,
-    graph: Option<SqliteGraphStorage>,
     closed: bool,
 }
 
@@ -170,8 +167,6 @@ impl IndexStore {
                 directories,
                 entities,
                 fragments,
-                graph_path: path.join("graph.sqlite"),
-                graph: None,
                 closed: false,
             }),
             schema,
@@ -276,48 +271,6 @@ impl IndexStore {
         self.read(|state| load_search_hits(state, hits))
     }
 
-    /// Read resolved one-hop edges without truncation. Relationship pipelines
-    /// choose direction and kinds, then apply any user-facing result limit.
-    /// The graph opens lazily so ordinary search also works on graph-less indexes.
-    #[allow(dead_code)] // Relationship pipelines are integrated separately.
-    pub(crate) fn neighborhood(
-        &self,
-        id: &str,
-        direction: Direction,
-        kinds: Option<&[EdgeKind]>,
-    ) -> EngineResult<Vec<Edge>> {
-        let shared = self.shared()?;
-        let mut state = lock_state(&shared)?;
-        assert_usable(&state)?;
-        if state.graph.is_none() {
-            match fs::metadata(&state.graph_path) {
-                Ok(_) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    return Err(EngineError::not_found(
-                        "workspace graph is missing; this index has no persisted relationship data",
-                    ));
-                }
-                Err(error) => {
-                    return Err(io_error(
-                        "inspect workspace graph",
-                        &state.graph_path,
-                        &error,
-                    ));
-                }
-            }
-            state.graph = Some(
-                SqliteGraphStorage::open(&state.graph_path, OpenMode::ReadOnly)
-                    .map_err(graph_error)?,
-            );
-        }
-        state
-            .graph
-            .as_ref()
-            .expect("opened graph reader")
-            .neighborhood(id, direction, kinds)
-            .map_err(graph_error)
-    }
-
     pub(crate) fn search_fts(
         &self,
         query: &str,
@@ -416,13 +369,6 @@ impl IndexStore {
         // for this lock. A successful close commits every accepted write.
         state.closed = true;
         flush(&state)
-    }
-}
-
-fn graph_error(error: graph::Error) -> EngineError {
-    match error {
-        graph::Error::InvalidInput(message) => EngineError::invalid_argument(message),
-        error => EngineError::storage_failure(format!("cannot read workspace graph: {error}")),
     }
 }
 
