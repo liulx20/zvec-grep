@@ -2,7 +2,7 @@ use std::path::Path;
 
 use super::{
     Direction, Edge, EdgeKind, Error, FileGraph, Metadata, OpenMode, PendingRef, Provenance,
-    Resolution, ResolutionStats, SqliteGraphStorage,
+    Resolution, ResolutionStats, SqliteGraphStorage, pending::MAX_PENDING_PAGE_SIZE,
 };
 use rusqlite::Connection;
 use serde_json::json;
@@ -278,7 +278,7 @@ fn file_level_import_targets_are_invalidated_without_entity_ids() {
 #[test]
 fn pagination_is_pending_only_and_readers_do_not_truncate_edges() {
     let mut db = SqliteGraphStorage::in_memory().expect("open");
-    let refs = (0..1001)
+    let refs = (0..=MAX_PENDING_PAGE_SIZE)
         .map(|i| reference("a", &format!("target-{i}")))
         .collect();
     let edges = (1..=1100)
@@ -292,24 +292,26 @@ fn pagination_is_pending_only_and_readers_do_not_truncate_edges() {
             .len(),
         1100
     );
-    let page = db.list_pending_refs(1000, 0).expect("page1");
-    assert_eq!(page.refs.len(), 1000);
+    let page = db
+        .list_pending_refs(MAX_PENDING_PAGE_SIZE, 0)
+        .expect("page1");
+    assert_eq!(page.refs.len(), MAX_PENDING_PAGE_SIZE);
     let last = db
-        .list_pending_refs(1000, page.next_cursor.expect("cursor"))
+        .list_pending_refs(MAX_PENDING_PAGE_SIZE, page.next_cursor.expect("cursor"))
         .expect("page2");
     assert_eq!(last.refs.len(), 1);
     assert_eq!(last.next_cursor, None);
     let resolution = proposal(&db, "external");
     db.apply_resolutions(&[resolution]).expect("resolve one");
     assert_eq!(
-        db.list_pending_refs(1000, 0)
+        db.list_pending_refs(MAX_PENDING_PAGE_SIZE, 0)
             .expect("pending only")
             .refs
             .len(),
-        1000
+        MAX_PENDING_PAGE_SIZE
     );
     assert!(db.list_pending_refs(0, 0).is_err());
-    assert!(db.list_pending_refs(1001, 0).is_err());
+    assert!(db.list_pending_refs(MAX_PENDING_PAGE_SIZE + 1, 0).is_err());
     assert!(db.list_pending_refs(1, -1).is_err());
 }
 
