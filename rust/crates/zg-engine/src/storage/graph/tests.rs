@@ -1,4 +1,6 @@
-use std::path::Path;
+use std::{collections::HashSet, path::Path};
+
+use crate::domain::EntityId;
 
 use super::{
     Direction, Edge, EdgeKind, Error, FileGraph, Metadata, OpenMode, PendingRef, Provenance,
@@ -35,9 +37,8 @@ fn reference(owner: &str, name: &str) -> PendingRef {
     }
 }
 
-fn graph(ids: &[&str], edges: Vec<Edge>, refs: Vec<PendingRef>) -> FileGraph {
+fn graph(edges: Vec<Edge>, refs: Vec<PendingRef>) -> FileGraph {
     FileGraph {
-        entity_ids: ids.iter().map(|id| (*id).into()).collect(),
         edges,
         pending_refs: refs,
     }
@@ -71,7 +72,7 @@ fn local_queries_preserve_direction_kinds_order_metadata_and_call_sites() {
     ];
     db.write_file_graph(
         1,
-        &graph(&["a", "b"], edges.clone(), vec![reference("a", "external")]),
+        &graph(edges.clone(), vec![reference("a", "external")]),
         &[],
     )
     .expect("write");
@@ -107,7 +108,6 @@ fn replacement_and_repeated_deletion_remove_only_owned_rows() {
     db.write_file_graph(
         2,
         &graph(
-            &["a", "b"],
             vec![edge(EdgeKind::Calls, "a", "b", 1)],
             vec![reference("a", "x")],
         ),
@@ -115,13 +115,16 @@ fn replacement_and_repeated_deletion_remove_only_owned_rows() {
     )
     .expect("first");
     let other = edge(EdgeKind::Calls, "x", "y", 2);
-    db.write_file_graph(3, &graph(&["x", "y"], vec![other.clone()], vec![]), &[])
+    db.write_file_graph(3, &graph(vec![other.clone()], vec![]), &[])
         .expect("second");
     let new = edge(EdgeKind::Calls, "c", "d", 3);
     db.write_file_graph(
         2,
-        &graph(&["c", "d"], vec![new.clone()], vec![]),
-        &["a".into(), "b".into()],
+        &graph(vec![new.clone()], vec![]),
+        &[
+            EntityId::from_string("a".into()),
+            EntityId::from_string("b".into()),
+        ],
     )
     .expect("replace");
     assert!(
@@ -141,8 +144,15 @@ fn replacement_and_repeated_deletion_remove_only_owned_rows() {
         vec![new]
     );
     for _ in 0..2 {
-        db.delete_file_graph(2, &["c".into(), "d".into(), "c".into()])
-            .expect("delete");
+        db.delete_file_graph(
+            2,
+            &[
+                EntityId::from_string("c".into()),
+                EntityId::from_string("d".into()),
+                EntityId::from_string("c".into()),
+            ],
+        )
+        .expect("delete");
     }
     assert_eq!(
         db.neighborhood("x", Direction::Out, Some(&[EdgeKind::Calls]))
@@ -162,15 +172,11 @@ fn cross_file_resolution_is_idempotent_and_invalidation_requeues_refs() {
     let local = edge(EdgeKind::Calls, "a", "b", 1);
     db.write_file_graph(
         4,
-        &graph(
-            &["a", "b"],
-            vec![local.clone()],
-            vec![reference("a", "remote")],
-        ),
+        &graph(vec![local.clone()], vec![reference("a", "remote")]),
         &[],
     )
     .expect("caller");
-    db.write_file_graph(5, &graph(&["remote"], vec![], vec![]), &[])
+    db.write_file_graph(5, &graph(vec![], vec![]), &[])
         .expect("target");
     let resolution = proposal(&db, "remote");
     assert_eq!(
@@ -195,7 +201,7 @@ fn cross_file_resolution_is_idempotent_and_invalidation_requeues_refs() {
     assert_eq!(incoming.len(), 1);
     assert_eq!(incoming[0].metadata, reference("a", "remote").metadata);
     assert_eq!(incoming[0].line, Some(3));
-    db.delete_file_graph(5, &["remote".into()])
+    db.delete_file_graph(5, &[EntityId::from_string("remote".into())])
         .expect("invalidate");
     assert!(
         db.neighborhood("remote", Direction::In, Some(&[EdgeKind::Calls]))
@@ -215,8 +221,14 @@ fn cross_file_resolution_is_idempotent_and_invalidation_requeues_refs() {
             .resolved,
         1
     );
-    db.delete_file_graph(4, &["a".into(), "b".into()])
-        .expect("delete owner");
+    db.delete_file_graph(
+        4,
+        &[
+            EntityId::from_string("a".into()),
+            EntityId::from_string("b".into()),
+        ],
+    )
+    .expect("delete owner");
     assert!(
         db.neighborhood("replacement", Direction::In, Some(&[EdgeKind::Calls]))
             .expect("cascade")
@@ -227,14 +239,18 @@ fn cross_file_resolution_is_idempotent_and_invalidation_requeues_refs() {
 #[test]
 fn replacing_a_target_with_the_same_id_invalidates_resolutions() {
     let mut db = SqliteGraphStorage::in_memory().expect("open");
-    db.write_file_graph(4, &graph(&["a"], vec![], vec![reference("a", "b")]), &[])
+    db.write_file_graph(4, &graph(vec![], vec![reference("a", "b")]), &[])
         .expect("caller");
-    db.write_file_graph(5, &graph(&["b"], vec![], vec![]), &[])
+    db.write_file_graph(5, &graph(vec![], vec![]), &[])
         .expect("target");
     let resolution = proposal(&db, "b");
     db.apply_resolutions(&[resolution]).expect("resolve");
-    db.write_file_graph(5, &graph(&["b"], vec![], vec![]), &["b".into()])
-        .expect("replace");
+    db.write_file_graph(
+        5,
+        &graph(vec![], vec![]),
+        &[EntityId::from_string("b".into())],
+    )
+    .expect("replace");
     assert!(
         db.neighborhood("b", Direction::In, Some(&[EdgeKind::Calls]))
             .expect("invalidated")
@@ -265,7 +281,7 @@ fn file_level_import_targets_are_invalidated_without_entity_ids() {
     };
     let mut import = reference("f6", "module");
     import.reference_kind = EdgeKind::Imports;
-    db.write_file_graph(6, &graph(&[], vec![], vec![import]), &[])
+    db.write_file_graph(6, &graph(vec![], vec![import]), &[])
         .expect("import");
     let resolution = proposal(&db, "f7");
     db.apply_resolutions(&[resolution]).expect("resolve");
@@ -284,7 +300,7 @@ fn pagination_is_pending_only_and_readers_do_not_truncate_edges() {
     let edges = (1..=1100)
         .map(|i| edge(EdgeKind::Calls, "a", "b", i))
         .collect();
-    db.write_file_graph(1, &graph(&["a", "b"], edges, refs), &[])
+    db.write_file_graph(1, &graph(edges, refs), &[])
         .expect("large graph");
     assert_eq!(
         db.neighborhood("a", Direction::Out, Some(&[EdgeKind::Calls]))
@@ -318,22 +334,13 @@ fn pagination_is_pending_only_and_readers_do_not_truncate_edges() {
 #[test]
 fn deletion_chunks_large_entity_lists() {
     let mut db = SqliteGraphStorage::in_memory().expect("open");
-    db.write_file_graph(
-        8,
-        &graph(&["owner"], vec![], vec![reference("owner", "last")]),
-        &[],
-    )
-    .expect("source");
-    let ids: Vec<String> = (0..1600).map(|i| format!("entity-{i}")).collect();
-    db.write_file_graph(
-        5,
-        &FileGraph {
-            entity_ids: ids.clone(),
-            ..FileGraph::default()
-        },
-        &[],
-    )
-    .expect("target");
+    db.write_file_graph(8, &graph(vec![], vec![reference("owner", "last")]), &[])
+        .expect("source");
+    let ids: Vec<EntityId> = (0..1600)
+        .map(|i| EntityId::from_string(format!("entity-{i}")))
+        .collect();
+    db.write_file_graph(5, &FileGraph::default(), &[])
+        .expect("target");
     db.apply_resolutions(&[proposal(&db, "entity-1599")])
         .expect("resolve");
     db.delete_file_graph(5, &ids).expect("delete all chunks");
@@ -346,41 +353,65 @@ fn deletion_chunks_large_entity_lists() {
 }
 
 #[test]
-fn ownership_validation_prevents_cross_file_snapshot_writes() {
+fn snapshot_validation_uses_current_entities_for_ownership() {
+    let local = HashSet::from(["a", "b"]);
+    let mut nonlocal = edge(EdgeKind::Calls, "a", "b", 1);
+    nonlocal.provenance = Provenance::WorkspaceUnique;
+    let mut bad_reference_line = reference("a", "b");
+    bad_reference_line.line = 0;
+    for invalid in [
+        graph(vec![edge(EdgeKind::Calls, "a", "external", 1)], vec![]),
+        graph(vec![edge(EdgeKind::Calls, "external", "b", 1)], vec![]),
+        graph(vec![nonlocal], vec![]),
+        graph(vec![edge(EdgeKind::Calls, "a", "b", 0)], vec![]),
+        graph(vec![], vec![reference("external", "b")]),
+        graph(vec![], vec![reference("a", " ")]),
+        graph(vec![], vec![bad_reference_line]),
+    ] {
+        assert!(invalid.validate(1, &local).is_err());
+    }
+    graph(
+        vec![
+            edge(EdgeKind::Calls, "a", "b", 1),
+            edge(EdgeKind::Contains, "f1", "a", 1),
+            edge(EdgeKind::Imports, "b", "f1", 2),
+        ],
+        vec![reference("a", "external"), reference("f1", "module")],
+    )
+    .validate(1, &local)
+    .expect("entity IDs and the file key are local endpoints");
+    FileGraph::default()
+        .validate(1, &HashSet::new())
+        .expect("an empty graph needs no entity IDs");
+}
+
+#[test]
+fn snapshot_validation_rejects_empty_endpoints_even_if_present_in_local_ids() {
+    let local = HashSet::from(["a", " "]);
+    for invalid in [
+        graph(vec![edge(EdgeKind::Calls, " ", "a", 1)], vec![]),
+        graph(vec![edge(EdgeKind::Calls, "a", " ", 1)], vec![]),
+        graph(vec![], vec![reference(" ", "a")]),
+    ] {
+        assert!(invalid.validate(1, &local).is_err());
+    }
+}
+
+#[test]
+fn empty_old_ids_are_rejected_before_mutation() {
     let mut db = SqliteGraphStorage::in_memory().expect("open");
     let original = edge(EdgeKind::Calls, "a", "b", 1);
-    db.write_file_graph(1, &graph(&["a", "b"], vec![original.clone()], vec![]), &[])
+    db.write_file_graph(1, &graph(vec![original.clone()], vec![]), &[])
         .expect("write");
-    let mut nonlocal = original.clone();
-    nonlocal.provenance = Provenance::WorkspaceUnique;
-    for invalid in [
-        graph(&["a", "a"], vec![], vec![]),
-        graph(&["f1"], vec![], vec![]),
-        graph(&[" "], vec![], vec![]),
-        graph(
-            &["a"],
-            vec![edge(EdgeKind::Calls, "a", "external", 1)],
-            vec![],
-        ),
-        graph(&["a", "b"], vec![nonlocal], vec![]),
-        graph(
-            &["a", "b"],
-            vec![edge(EdgeKind::Calls, "a", "b", 0)],
-            vec![],
-        ),
-        graph(&[], vec![], vec![reference("external", "b")]),
-    ] {
-        assert!(
-            db.write_file_graph(1, &invalid, &["a".into(), "b".into()])
-                .is_err()
-        );
-        assert_eq!(
-            db.neighborhood("a", Direction::Out, Some(&[EdgeKind::Calls]))
-                .expect("original intact"),
-            vec![original.clone()]
-        );
-    }
-    assert!(db.delete_file_graph(1, &[String::new()]).is_err());
+    assert!(
+        db.delete_file_graph(1, &[EntityId::from_string(String::new())])
+            .is_err()
+    );
+    assert_eq!(
+        db.neighborhood("a", Direction::Out, Some(&[EdgeKind::Calls]))
+            .expect("original intact"),
+        vec![original]
+    );
 }
 
 #[test]
@@ -388,9 +419,9 @@ fn sql_failure_rolls_back_replacement_and_invalidation() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("graph.sqlite");
     let mut db = open(&path);
-    db.write_file_graph(8, &graph(&["a"], vec![], vec![reference("a", "b")]), &[])
+    db.write_file_graph(8, &graph(vec![], vec![reference("a", "b")]), &[])
         .expect("source");
-    db.write_file_graph(5, &graph(&["b"], vec![], vec![]), &[])
+    db.write_file_graph(5, &graph(vec![], vec![]), &[])
         .expect("target");
     db.apply_resolutions(&[proposal(&db, "b")])
         .expect("resolve");
@@ -399,8 +430,8 @@ fn sql_failure_rolls_back_replacement_and_invalidation() {
     assert!(
         db.write_file_graph(
             5,
-            &graph(&["b"], vec![edge(EdgeKind::Calls, "b", "b", 1)], vec![]),
-            &["b".into()]
+            &graph(vec![edge(EdgeKind::Calls, "b", "b", 1)], vec![]),
+            &[EntityId::from_string("b".into())]
         )
         .is_err()
     );
@@ -425,11 +456,7 @@ fn sql_failure_rolls_back_an_entire_resolution_batch() {
     let mut db = open(&path);
     db.write_file_graph(
         1,
-        &graph(
-            &["a"],
-            vec![],
-            vec![reference("a", "one"), reference("a", "two")],
-        ),
+        &graph(vec![], vec![reference("a", "one"), reference("a", "two")]),
         &[],
     )
     .expect("write");
@@ -467,12 +494,8 @@ fn readonly_connections_reopen_data_and_never_create_or_write() {
     assert!(!path.parent().expect("parent").exists());
     let mut db = open(&path);
     let expected = edge(EdgeKind::Calls, "a'\"\\", "b", 1);
-    db.write_file_graph(
-        1,
-        &graph(&["a'\"\\", "b"], vec![expected.clone()], vec![]),
-        &[],
-    )
-    .expect("escaped ids");
+    db.write_file_graph(1, &graph(vec![expected.clone()], vec![]), &[])
+        .expect("escaped ids");
     db.close().expect("close writer");
     let mut reader = SqliteGraphStorage::open(&path, OpenMode::ReadOnly).expect("read-only");
     assert_eq!(
@@ -487,7 +510,11 @@ fn readonly_connections_reopen_data_and_never_create_or_write() {
             .expect("bound parameter")
             .is_empty()
     );
-    assert!(reader.delete_file_graph(1, &["b".into()]).is_err());
+    assert!(
+        reader
+            .delete_file_graph(1, &[EntityId::from_string("b".into())])
+            .is_err()
+    );
     assert_eq!(
         reader
             .neighborhood("b", Direction::In, Some(&[EdgeKind::Calls]))
@@ -550,7 +577,7 @@ fn schema_contains_only_edges_and_enforces_json_objects() {
 #[test]
 fn invalid_and_stale_resolution_proposals_do_not_mutate_pending_refs() {
     let mut db = SqliteGraphStorage::in_memory().expect("open");
-    db.write_file_graph(9, &graph(&["a"], vec![], vec![reference("a", "b")]), &[])
+    db.write_file_graph(9, &graph(vec![], vec![reference("a", "b")]), &[])
         .expect("write");
     let valid = proposal(&db, "b");
     for invalid in [
@@ -600,12 +627,14 @@ fn independent_connections_observe_commits_and_skip_deleted_refs() {
     let path = dir.path().join("graph.sqlite");
     let mut writer = open(&path);
     writer
-        .write_file_graph(9, &graph(&["a"], vec![], vec![reference("a", "b")]), &[])
+        .write_file_graph(9, &graph(vec![], vec![reference("a", "b")]), &[])
         .expect("write");
     let mut resolver = open(&path);
     let reader = SqliteGraphStorage::open(&path, OpenMode::ReadOnly).expect("reader");
     let old = proposal(&resolver, "b");
-    writer.delete_file_graph(9, &["a".into()]).expect("delete");
+    writer
+        .delete_file_graph(9, &[EntityId::from_string("a".into())])
+        .expect("delete");
     assert_eq!(resolver.apply_resolutions(&[old]).expect("stale").stale, 1);
     assert!(
         reader
@@ -630,11 +659,7 @@ fn neighborhood_filters_direction_and_kinds() {
     ];
     db.write_file_graph(
         1,
-        &graph(
-            &["a", "b", "c"],
-            edges.clone(),
-            vec![reference("b", "pending")],
-        ),
+        &graph(edges.clone(), vec![reference("b", "pending")]),
         &[],
     )
     .expect("write");
@@ -688,7 +713,7 @@ fn neighborhood_returns_all_edges_without_a_limit() {
     let edges: Vec<_> = (1..=1100)
         .map(|line| edge(EdgeKind::Calls, "a", "b", line))
         .collect();
-    db.write_file_graph(1, &graph(&["a", "b"], edges.clone(), vec![]), &[])
+    db.write_file_graph(1, &graph(edges.clone(), vec![]), &[])
         .expect("write");
     assert_eq!(
         db.neighborhood("a", Direction::Both, None)
@@ -706,7 +731,7 @@ fn graph_queries_skip_unrelated_resolved_edges() {
 
     let mut db = SqliteGraphStorage::in_memory().expect("open");
     let expected = edge(EdgeKind::Calls, "needle", "needle", 1);
-    db.write_file_graph(1, &graph(&["needle"], vec![expected.clone()], vec![]), &[])
+    db.write_file_graph(1, &graph(vec![expected.clone()], vec![]), &[])
         .expect("write one relevant edge");
     let steps = Arc::new(AtomicUsize::new(0));
     let counter = Arc::clone(&steps);
@@ -735,7 +760,7 @@ fn graph_queries_skip_unrelated_resolved_edges() {
         // pending index would make even this one-row queue scan through them.
         db.write_file_graph(
             3,
-            &graph(&["waiting"], vec![], vec![reference("waiting", "external")]),
+            &graph(vec![], vec![reference("waiting", "external")]),
             &[],
         )
         .expect("write pending reference");
@@ -808,7 +833,7 @@ fn resolution_retains_reference_context_and_invalidation_resets_candidates() {
     let mut db = open(&path);
     let mut original = reference("source", "module::target");
     original.candidates = Some(vec!["target".into(), "alternative".into()]);
-    db.write_file_graph(6, &graph(&["source"], vec![], vec![original.clone()]), &[])
+    db.write_file_graph(6, &graph(vec![], vec![original.clone()]), &[])
         .expect("write");
     let stored = db.list_pending_refs(100, 0).expect("refs").refs.remove(0);
     assert_eq!(stored.reference, original);
@@ -846,7 +871,7 @@ fn resolution_retains_reference_context_and_invalidation_resets_candidates() {
         (source.as_str(), target.as_str(), ref_id),
         ("source", "target", stored.id)
     );
-    db.delete_file_graph(7, &["target".into()])
+    db.delete_file_graph(7, &[EntityId::from_string("target".into())])
         .expect("invalidate");
     let requeued = db
         .list_pending_refs(100, 0)
@@ -863,7 +888,7 @@ fn resolution_retains_reference_context_and_invalidation_resets_candidates() {
     );
     db.apply_resolutions(&[proposal(&db, "new-target")])
         .expect("resolve again");
-    db.delete_file_graph(6, &["source".into()])
+    db.delete_file_graph(6, &[EntityId::from_string("source".into())])
         .expect("delete source");
     assert_eq!(
         raw.query_row("SELECT count(*) FROM edges", [], |r| r.get::<_, i64>(0))
@@ -938,10 +963,10 @@ fn reference_schema_defaults_and_state_constraints() {
 #[test]
 fn replaced_reference_ids_are_not_reused() {
     let mut db = SqliteGraphStorage::in_memory().expect("open");
-    let snapshot = graph(&["a"], vec![], vec![reference("a", "b")]);
+    let snapshot = graph(vec![], vec![reference("a", "b")]);
     db.write_file_graph(1, &snapshot, &[]).expect("write");
     let old = proposal(&db, "b");
-    db.write_file_graph(1, &snapshot, &["a".into()])
+    db.write_file_graph(1, &snapshot, &[EntityId::from_string("a".into())])
         .expect("replace");
     let new = proposal(&db, "b");
     assert!(new.ref_id > old.ref_id);
@@ -959,12 +984,8 @@ fn file_ids_round_trip_as_u32_and_sqlite_rejects_out_of_range_values() {
     let mut db = open(&path);
     for id in [0, u32::MAX] {
         let key = format!("f{id}");
-        db.write_file_graph(
-            id,
-            &graph(&[], vec![], vec![reference(&key, "external")]),
-            &[],
-        )
-        .expect("write boundary");
+        db.write_file_graph(id, &graph(vec![], vec![reference(&key, "external")]), &[])
+            .expect("write boundary");
     }
     let refs = db.list_pending_refs(100, 0).expect("read").refs;
     assert_eq!(
@@ -1002,7 +1023,7 @@ fn contains_references_use_the_same_kinds_as_resolved_edges() {
     let mut db = SqliteGraphStorage::in_memory().expect("open");
     let mut pending = reference("owner", "member");
     pending.reference_kind = EdgeKind::Contains;
-    db.write_file_graph(1, &graph(&["owner"], vec![], vec![pending.clone()]), &[])
+    db.write_file_graph(1, &graph(vec![], vec![pending.clone()]), &[])
         .expect("write contains ref");
     assert_eq!(
         db.list_pending_refs(100, 0).expect("pending").refs[0].reference,
@@ -1020,7 +1041,7 @@ fn contains_references_use_the_same_kinds_as_resolved_edges() {
             .expect("calls only")
             .is_empty()
     );
-    db.delete_file_graph(2, &["member".into()])
+    db.delete_file_graph(2, &[EntityId::from_string("member".into())])
         .expect("invalidate");
     assert_eq!(
         db.list_pending_refs(100, 0).expect("requeued").refs[0].reference,

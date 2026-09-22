@@ -46,8 +46,9 @@ impl IndexStore {
             [file.id]
         );
         let shared = self.shared()?;
-        validate_batch(file, entities, entries, &shared.schema)?;
-        self.write(|state| super::replace_file(state, file, entities, entries))
+        let graph = FileGraph::default();
+        validate_batch(file, entities, entries, &graph, &shared.schema)?;
+        self.write(|state| super::replace_file(state, file, entities, entries, &graph))
     }
 }
 

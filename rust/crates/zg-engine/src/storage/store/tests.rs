@@ -48,7 +48,7 @@ impl IndexStore {
         fixtures: &[FixtureEntity],
     ) -> EngineResult<()> {
         let (entities, entries) = fixture_records(fixtures);
-        self.replace_file(file, &entities, &entries)
+        self.replace_file(file, &entities, &entries, &FileGraph::default())
     }
 }
 
@@ -1017,7 +1017,9 @@ fn invalid_file_states_and_owners_leave_storage_unchanged() {
         vec![unknown_fragment],
     ] {
         assert!(
-            storage.replace_file(&file, &entities, &invalid).is_err(),
+            storage
+                .replace_file(&file, &entities, &invalid, &FileGraph::default())
+                .is_err(),
             "every canonical fragment requires exactly one projection of its owner"
         );
     }

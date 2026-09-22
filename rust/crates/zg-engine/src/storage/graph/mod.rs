@@ -1,10 +1,10 @@
 //! SQLite persistence for directed code relationships and pending references.
 //!
 //! Nodes and file metadata remain in the entity store. Each file replacement is
-//! atomic within SQLite; the indexing coordinator owns consistency with zvec.
+//! atomic within SQLite; `IndexStore` coordinates replacement and deletion with zvec.
 //! Callers must serialize reference reads, resolution and writeback with file updates.
 //! This module does not resolve names, run FTS, or manage workspace locks.
-//! Indexing integration is pending; this storage is not yet opened by `IndexStore`.
+//! Extraction and cross-file resolution are connected separately.
 
 mod pending;
 mod reader;
@@ -89,6 +89,8 @@ impl SqliteGraphStorage {
             OpenMode::ReadWrite => {
                 schema::initialize(&mut connection)?;
                 connection.pragma_update(None, "journal_mode", "WAL")?;
+                // Graph invalidation must survive before zvec removes old IDs.
+                connection.pragma_update(None, "synchronous", "FULL")?;
             }
         }
         Ok(Self { connection })

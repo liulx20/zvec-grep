@@ -41,7 +41,7 @@ use crate::{
     },
     file_selection::ScanPolicy,
     models::{EmbeddingConcurrencyDefaults, EmbeddingOptions, ModelError, ModelRuntimeLease},
-    storage::types::IndexedFragment,
+    storage::{graph::FileGraph, types::IndexedFragment},
     utils::{collapse_whitespace, decode_text, sha256_hex},
 };
 
@@ -576,6 +576,7 @@ struct PreparedFile {
     file: FileRecord,
     entities: Vec<Entity>,
     fragments: Vec<PreparedFragment>,
+    graph: FileGraph,
 }
 
 enum PreparedCandidate {
@@ -836,7 +837,7 @@ fn commit_file(
             vector,
         })
         .collect::<Vec<_>>();
-    storage.replace_file(&file.file, &file.entities, &entries)?;
+    storage.replace_file(&file.file, &file.entities, &entries, &file.graph)?;
     stats.files_indexed += 1;
     stats.entities_created += public_entities;
     Ok(())
@@ -908,6 +909,9 @@ async fn prepare_candidate(
         file,
         entities,
         fragments,
+        // Rust extraction does not produce relationships yet. An empty snapshot
+        // clears any previous graph when the file changes.
+        graph: FileGraph::default(),
     })))
 }
 
@@ -2317,6 +2321,7 @@ mod tests {
             },
             entities,
             fragments,
+            graph: FileGraph::default(),
         };
         let vectors = vec![vec![1.0, 0.0], vec![0.0, 1.0]];
         commit_file(
@@ -2381,6 +2386,7 @@ mod tests {
             file: &FileRecord,
             entities: &[Entity],
             entries: &[IndexedFragment],
+            _graph: &FileGraph,
         ) -> EngineResult<()> {
             if self
                 .fail_replacements_once

@@ -21,6 +21,7 @@ use super::{
     entities::{self, Entities},
     files::Files,
     fragments::{self, Fragments},
+    graph::{self, FileGraph, OpenMode, SqliteGraphStorage},
     types::{
         IndexedFragment, StorageSearchFilter, StorageSearchHit, StoredEntity, StoredFileAttributes,
         StoredSearchData, WorkspaceIndexStorageOptions,
@@ -45,6 +46,8 @@ struct StoreState {
     directories: Directories,
     entities: Entities,
     fragments: Fragments,
+    // Missing only for read-only indexes created before graph storage existed.
+    graph: Option<SqliteGraphStorage>,
     closed: bool,
 }
 
@@ -150,6 +153,21 @@ impl IndexStore {
         let directories = Directories::open(&path, read_only)?;
         let entities = Entities::open(&path, read_only)?;
         let fragments = Fragments::open(&path, &schema, read_only)?;
+        let graph_path = path.join("graph.sqlite");
+        let graph = if read_only
+            && !graph_path
+                .try_exists()
+                .map_err(|error| io_error("inspect graph storage", &graph_path, &error))?
+        {
+            None
+        } else {
+            let mode = if read_only {
+                OpenMode::ReadOnly
+            } else {
+                OpenMode::ReadWrite
+            };
+            Some(SqliteGraphStorage::open(&graph_path, mode).map_err(graph_error)?)
+        };
         if !read_only {
             directories.load()?;
         }
@@ -167,6 +185,7 @@ impl IndexStore {
                 directories,
                 entities,
                 fragments,
+                graph,
                 closed: false,
             }),
             schema,
@@ -306,14 +325,17 @@ impl IndexStore {
         })
     }
 
+    /// Replace all projections of a file, including an empty relationship snapshot.
+    /// Old entity IDs are read internally while holding the store's write lock.
     pub(crate) fn replace_file(
         &self,
         file: &FileRecord,
         entities: &[Entity],
         entries: &[IndexedFragment],
+        graph: &FileGraph,
     ) -> EngineResult<()> {
         let shared = self.shared()?;
-        validate_batch(file, entities, entries, &shared.schema)?;
+        validate_batch(file, entities, entries, graph, &shared.schema)?;
         let mut file = file.clone();
         file.index_status = FileIndexStatus::Indexed {
             indexed_epoch_ms: now_epoch_ms()?,
@@ -321,7 +343,7 @@ impl IndexStore {
                 .map_err(|_| EngineError::invalid_argument("entity count exceeds u64"))?,
         };
         file.validate()?;
-        self.write(|state| replace_file(state, &file, entities, entries))
+        self.write(|state| replace_file(state, &file, entities, entries, graph))
     }
 
     pub(crate) fn mark_file_failed(&self, file: &FileRecord, error: &str) -> EngineResult<()> {
@@ -331,15 +353,26 @@ impl IndexStore {
             error: error.to_owned(),
         };
         file.validate()?;
-        self.write(|state| replace_file(state, &file, &[], &[]))
+        self.write(|state| replace_file(state, &file, &[], &[], &FileGraph::default()))
     }
 
+    /// Invalidate graph targets before their canonical IDs disappear from zvec.
     pub(crate) fn delete_file(&self, file_id: FileId) -> EngineResult<()> {
         self.write(|state| {
+            let old_ids = state.entities.list_ids(file_id)?;
             state.files.mark_deleting(file_id)?;
+            state.files.flush()?;
+            state
+                .graph
+                .as_mut()
+                .expect("writable graph")
+                .delete_file_graph(file_id.get(), &old_ids)
+                .map_err(graph_error)?;
             state.fragments.delete_file(file_id)?;
             state.entities.delete_file(file_id)?;
-            state.files.delete(file_id)
+            flush_content(state)?;
+            state.files.delete(file_id)?;
+            state.files.flush()
         })
     }
 
@@ -368,7 +401,12 @@ impl IndexStore {
         // Reject a write that acquired its Arc before close but is still waiting
         // for this lock. A successful close commits every accepted write.
         state.closed = true;
-        flush(&state)
+        let checkpoint = flush(&state);
+        let graph_close = state
+            .graph
+            .take()
+            .map_or(Ok(()), |graph| graph.close().map_err(graph_error));
+        checkpoint.and(graph_close)
     }
 }
 
@@ -378,6 +416,7 @@ fn replace_file(
     file: &FileRecord,
     entities: &[Entity],
     entries: &[IndexedFragment],
+    graph: &FileGraph,
 ) -> EngineResult<()> {
     state.files.validate(file)?;
     state.entities.validate_ownership(entities, file.id)?;
@@ -386,14 +425,35 @@ fn replace_file(
     // Encode every projection before removing any of the previous file's data.
     let entity_docs = Entities::prepare(entities)?;
     let fragment_docs = Fragments::prepare(file, entities, entries, &directories)?;
+    let old_ids = state.entities.list_ids(file.id)?;
     let mut unfinished = file.clone();
     unfinished.index_status = FileIndexStatus::NotIndexed;
     state.files.put(&unfinished, &directories)?;
+    // Persist retry state before SQLite can get ahead of the canonical entities.
+    // Graph commits are durable before any old entity IDs can be lost from zvec.
+    state.directories.flush()?;
+    state.files.flush()?;
+    state
+        .graph
+        .as_mut()
+        .expect("writable graph")
+        .write_file_graph(file.id.get(), graph, &old_ids)
+        .map_err(graph_error)?;
     state.fragments.delete_file(file.id)?;
     state.entities.delete_file(file.id)?;
     state.entities.write(&entity_docs)?;
     state.fragments.write(&fragment_docs)?;
-    state.files.put(file, &directories)
+    // Complete content must be durable before the final status can suppress retry.
+    flush_content(state)?;
+    state.files.put(file, &directories)?;
+    state.files.flush()
+}
+
+fn graph_error(error: graph::Error) -> EngineError {
+    match error {
+        graph::Error::InvalidInput(message) => EngineError::invalid_argument(message),
+        error => EngineError::storage_failure(error.to_string()),
+    }
 }
 
 fn load_search_hits(
@@ -451,10 +511,15 @@ fn load_search_hits(
 }
 
 fn flush(state: &StoreState) -> EngineResult<()> {
+    // SQLite commits synchronously; WAL checkpointing is not needed for durability.
+    flush_content(state)?;
+    state.files.flush()
+}
+
+fn flush_content(state: &StoreState) -> EngineResult<()> {
     state.directories.flush()?;
     state.entities.flush()?;
-    state.fragments.flush()?;
-    state.files.flush()
+    state.fragments.flush()
 }
 
 fn assert_usable(state: &StoreState) -> EngineResult<()> {
@@ -468,6 +533,7 @@ fn validate_batch(
     file: &FileRecord,
     entities: &[Entity],
     entries: &[IndexedFragment],
+    graph: &FileGraph,
     schema: &[EmbeddingModelInfo],
 ) -> EngineResult<()> {
     file.validate()?;
@@ -479,7 +545,7 @@ fn validate_batch(
                 "entity belongs to a different file",
             ));
         }
-        if !entity_ids.insert(&entity.id) {
+        if !entity_ids.insert(entity.id.as_str()) {
             return Err(EngineError::invalid_argument("duplicate entity id"));
         }
         entity.validate()?;
@@ -490,6 +556,9 @@ fn validate_batch(
             }
         }
     }
+    graph
+        .validate(file.id.get(), &entity_ids)
+        .map_err(graph_error)?;
     fragments::validate_projections(entities, entries)?;
     for entry in entries {
         validate_vector(&entry.vector, model_schema(schema, &entry.model)?)?;
@@ -668,3 +737,6 @@ mod tests;
 
 #[cfg(test)]
 mod tables_tests;
+
+#[cfg(test)]
+mod graph_tests;

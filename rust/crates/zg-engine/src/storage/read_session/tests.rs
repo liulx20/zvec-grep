@@ -12,7 +12,7 @@ use crate::{
     },
     models::ModelRuntimeManager,
     pipelines::{indexed_search::service::context, indexing::service::WorkspaceIndexService},
-    storage::types::IndexedFragment,
+    storage::{graph::FileGraph, types::IndexedFragment},
     workspace::{
         CURRENT_INDEX_VERSION,
         lock::acquire_home_lock,
@@ -155,6 +155,7 @@ fn write_text(home: &Path, storage_home: &Path, text: &str) {
                 vector: vec![1.0, 0.0, 0.0],
                 fts_text: text.into(),
             }],
+            &FileGraph::default(),
         )
         .expect("replace indexed text");
     storage.close().expect("checkpoint");
