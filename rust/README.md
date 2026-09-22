@@ -77,6 +77,17 @@ policy when invoking the engine and also bounds cancellable waits for scheduled 
 The native engine supports indexing, indexed FTS and vector search, `zg query
 --rg`, workspace discovery, `info`, and idempotent `drop_index`.
 
+`zg callers <symbol> [root] --limit 20` and `zg callees <symbol> [root] --limit 20`
+read persisted call edges from an existing graph index. The equivalent engine
+methods are `ZvecGrep::callers` and `ZvecGrep::callees`, and both MCP toolsets expose
+`callers` and `callees`. Queries accept scope-qualified names such as
+`Class::method`, keep same-name definitions separate, and return compact JSON
+with a per-match `totalEdges` before truncation. Call-site line/column coordinates
+refer to the caller file. These reads do not load models or refresh/build indexes.
+Unresolved references are excluded, so an empty result does not prove absence.
+Graph extraction and indexing integration are still pending; these queries require
+an existing `storage/graph.sqlite` in the active index generation.
+
 This version indexes text with one embedding model per workspace. Choose it with
 `zg index --embedding <model>` or set a default with
 `zg config model set <model> --default`. Code, documents and structured text use

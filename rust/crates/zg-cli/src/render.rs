@@ -373,6 +373,7 @@ pub fn help_text(topic: Option<&str>) -> Result<String, HelpTopicError> {
     let text = match topic {
         None => return Ok(main_help()),
         Some("query") => QUERY_HELP,
+        Some("callers" | "callees") => RELATIONSHIP_HELP,
         Some("index") => INDEX_HELP,
         Some("status") => STATUS_HELP,
         Some("config") => CONFIG_HELP,
@@ -412,6 +413,8 @@ const MAIN_HELP_BODY: &str = r#"Usage:
 
 Commands:
   query          Search indexed context or run managed ripgrep
+  callers        Show persisted incoming call sites for a symbol
+  callees        Show persisted outgoing call sites for a symbol
   index          Build, rebuild, or drop the workspace index
   status         Show workspace and index status
   config         Configure provider credentials and embedding model defaults
@@ -444,6 +447,21 @@ Run zg help models or zg help file-types for supported indexing capabilities.
 Run zg help environment for all variables, scopes, aliases, and precedence.
 Run zg help <command> or zg <command> --help for command-specific help.
 Use zg -h/--help for this page and zg -v/--version for the version."#;
+
+const RELATIONSHIP_HELP: &str = r"Usage:
+  zg callers <symbol> [root] [options]
+  zg callees <symbol> [root] [options]
+
+Options:
+  --limit <N>                      Maximum edges per matching symbol (default: 20)
+  --mode <direct|server|auto>       Select the execution mode (default: auto)
+  --home <PATH>                    Runtime and daemon state directory
+
+Names may be scope-qualified, such as Class::method. Same-name definitions are
+returned as separate JSON matches. totalEdges counts edges before truncation;
+line and column identify the call site in the caller file. Unresolved references
+are excluded, so empty results do not prove that a relationship is absent.
+Requires an existing graph index; does not refresh or build it.";
 
 const QUERY_HELP: &str = r#"Usage:
   zg query <query> [options]
@@ -635,7 +653,7 @@ when the client disconnects.
 
 The server listens on loopback. Authentication is disabled by default; pass a
 token file or set ZVEC_GREP_SERVER_TOKEN to require Bearer authentication.
-The public MCP endpoint defaults to the agent toolset (indexed search only).
+The public MCP endpoint defaults to the agent toolset (indexed search and callers/callees).
 Use --mcp-toolset full, or ZVEC_GREP_MCP_TOOLSET=full, to expose managed rg and
 the four index and status tools. CLI managed rg, index, and status commands
 continue to use the daemon's internal administration endpoint.

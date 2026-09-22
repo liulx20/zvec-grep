@@ -141,6 +141,22 @@ fn qoder_manages_owned_permissions_and_both_clients() {
             .iter()
             .any(|rule| rule == "mcp__zvec_grep__zvec_grep_search")
     );
+    for tool in ["callers", "callees"] {
+        assert!(
+            parsed["permissions"]["allow"]
+                .as_array()
+                .expect("allow")
+                .iter()
+                .any(|rule| rule == &format!("mcp__zvec_grep__{tool}"))
+        );
+        assert!(
+            parsed["mcpServers"]["zvec_grep"]["alwaysAllow"]
+                .as_array()
+                .expect("alwaysAllow")
+                .iter()
+                .any(|rule| rule == tool)
+        );
+    }
     assert_eq!(parsed["mcpServers"]["zvec_grep"]["trust"], true);
     assert!(
         json(&ide)["mcpServers"]["zvec_grep"]["command"]

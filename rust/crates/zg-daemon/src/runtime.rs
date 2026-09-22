@@ -248,6 +248,20 @@ async fn execute_command(
                 .await
                 .map(|reply| DaemonReply::Context(Box::new(reply))),
         ),
+        DaemonCommand::Callers(request) => engine_execution(
+            state
+                .engine
+                .callers(request)
+                .await
+                .map(DaemonReply::Callers),
+        ),
+        DaemonCommand::Callees(request) => engine_execution(
+            state
+                .engine
+                .callees(request)
+                .await
+                .map(DaemonReply::Callees),
+        ),
         DaemonCommand::Index(request) => match state.runtimes.submit_index(request, true).await {
             Ok(submitted) if submitted.job.state == JobState::Succeeded => {
                 submitted.result.map_or_else(
