@@ -16,7 +16,7 @@ use crate::{
         direct_search::DirectSearchService, indexed_search,
         indexing::service::WorkspaceIndexService, relationships,
     },
-    storage::{IndexStore, read_session::ReadSessionCache},
+    storage::read_session::ReadSessionCache,
 };
 
 #[derive(Clone, Debug)]
@@ -55,11 +55,7 @@ impl EngineService {
         if options.rg {
             self.direct_search.context(options).await
         } else {
-            let cache = self
-                .read_sessions
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone();
+            let cache = self.read_session_cache();
             indexed_search::service::context(&self.indexing, &self.models, &options, cache.as_ref())
                 .await
         }
@@ -69,28 +65,23 @@ impl EngineService {
         &self,
         options: RelationshipOptions,
     ) -> Result<Vec<SymbolRelationships>, EngineError> {
-        self.relationships(&options, IndexStore::get_callers).await
+        self.ensure_open()?;
+        relationships::service::callers(&options, self.read_session_cache().as_ref()).await
     }
 
     pub(crate) async fn callees(
         &self,
         options: RelationshipOptions,
     ) -> Result<Vec<SymbolRelationships>, EngineError> {
-        self.relationships(&options, IndexStore::get_callees).await
+        self.ensure_open()?;
+        relationships::service::callees(&options, self.read_session_cache().as_ref()).await
     }
 
-    async fn relationships(
-        &self,
-        options: &RelationshipOptions,
-        read_edges: relationships::ReadEdges,
-    ) -> Result<Vec<SymbolRelationships>, EngineError> {
-        self.ensure_open()?;
-        let cache = self
-            .read_sessions
+    fn read_session_cache(&self) -> Option<ReadSessionCache> {
+        self.read_sessions
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        relationships::query(options, cache.as_ref(), read_edges).await
+            .clone()
     }
 
     /// Creates or refreshes the workspace index.

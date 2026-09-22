@@ -389,8 +389,16 @@ fn missing_or_invalid_graph_does_not_create_a_database_or_break_search() {
             .code(),
         EngineError::NOT_FOUND
     );
-    assert!(reader.get_callers("missing").is_err());
-    assert!(reader.get_callees("missing").is_err());
+    assert!(
+        reader
+            .neighborhood("missing", Direction::In, Some(&[EdgeKind::Calls]))
+            .is_err()
+    );
+    assert!(
+        reader
+            .neighborhood("missing", Direction::Out, Some(&[EdgeKind::Calls]))
+            .is_err()
+    );
     assert!(!graph_path.exists());
     assert!(
         !reader
@@ -464,17 +472,35 @@ fn store_graph_reads_preserve_call_sites_and_share_the_storage_lifetime() {
     let reader = IndexStore::open(options.clone()).expect("reader");
     let second = IndexStore::open(options).expect("shared reader");
     reader.ensure_graph_available().expect("existing graph");
-    assert_eq!(reader.get_callers("callee").expect("all callers"), edges);
-    assert_eq!(reader.get_callees("caller").expect("all callees"), edges);
-    assert!(reader.get_callers("caller").expect("direction").is_empty());
+    assert_eq!(
+        reader
+            .neighborhood("callee", Direction::In, Some(&[EdgeKind::Calls]))
+            .expect("all callers"),
+        edges
+    );
+    assert_eq!(
+        reader
+            .neighborhood("caller", Direction::Out, Some(&[EdgeKind::Calls]))
+            .expect("all callees"),
+        edges
+    );
     assert!(
         reader
-            .get_callees("missing")
+            .neighborhood("caller", Direction::In, Some(&[EdgeKind::Calls]))
+            .expect("direction")
+            .is_empty()
+    );
+    assert!(
+        reader
+            .neighborhood("missing", Direction::Out, Some(&[EdgeKind::Calls]))
             .expect("unknown endpoint")
             .is_empty()
     );
     assert_eq!(
-        reader.get_callers(" ").expect_err("blank endpoint").code(),
+        reader
+            .neighborhood(" ", Direction::In, Some(&[EdgeKind::Calls]))
+            .expect_err("blank endpoint")
+            .code(),
         EngineError::INVALID_ARGUMENT
     );
     reader.close().expect("close one lease");
@@ -487,13 +513,15 @@ fn store_graph_reads_preserve_call_sites_and_share_the_storage_lifetime() {
     );
     assert_eq!(
         reader
-            .get_callees("caller")
+            .neighborhood("caller", Direction::Out, Some(&[EdgeKind::Calls]))
             .expect_err("closed graph query")
             .code(),
         EngineError::RESOURCE_CLOSED
     );
     assert_eq!(
-        second.get_callers("callee").expect("remaining lease"),
+        second
+            .neighborhood("callee", Direction::In, Some(&[EdgeKind::Calls]))
+            .expect("remaining lease"),
         edges
     );
     second.close().expect("close last reader");

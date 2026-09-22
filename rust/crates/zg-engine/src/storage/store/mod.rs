@@ -21,7 +21,7 @@ use super::{
     entities::{self, Entities},
     files::Files,
     fragments::{self, Fragments},
-    graph::{self, Edge, OpenMode, SqliteGraphStorage},
+    graph::{self, Direction, Edge, EdgeKind, OpenMode, SqliteGraphStorage},
     types::{
         IndexedFragment, StorageSearchFilter, StorageSearchHit, StoredEntity, StoredFileAttributes,
         StoredSearchData, WorkspaceIndexStorageOptions,
@@ -320,12 +320,13 @@ impl IndexStore {
         self.read_graph(|_| Ok(()))
     }
 
-    pub(crate) fn get_callers(&self, id: &str) -> EngineResult<Vec<Edge>> {
-        self.read_graph(|graph| graph.get_callers(id))
-    }
-
-    pub(crate) fn get_callees(&self, id: &str) -> EngineResult<Vec<Edge>> {
-        self.read_graph(|graph| graph.get_callees(id))
+    pub(crate) fn neighborhood(
+        &self,
+        id: &str,
+        direction: Direction,
+        kinds: Option<&[EdgeKind]>,
+    ) -> EngineResult<Vec<Edge>> {
+        self.read_graph(|graph| graph.neighborhood(id, direction, kinds))
     }
 
     fn read_graph<T>(
