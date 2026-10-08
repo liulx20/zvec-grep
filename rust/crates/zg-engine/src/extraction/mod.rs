@@ -19,7 +19,7 @@ pub(crate) use spi::ChunkOptions;
 pub(crate) use spi::{ExtractedEntity, ExtractedEntityFragment, IndexingExtractionOutput};
 
 // Code-graph walk output.
-pub(crate) use graph::{PartitionedGraph, FILE_SCOPE_INDEX};
+pub(crate) use graph::{FILE_SCOPE_INDEX, PartitionedGraph};
 
 use crate::{
     EngineError,

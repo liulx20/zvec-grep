@@ -1,8 +1,6 @@
 //! Prepared inputs and indexing options for extraction.
 
-use crate::domain::{
-    Content, EntityMetadata, FileFormat, ImageContent, Range, SourcePath,
-};
+use crate::domain::{Content, EntityMetadata, FileFormat, ImageContent, Range, SourcePath};
 
 use super::graph::PartitionedGraph;
 

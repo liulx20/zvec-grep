@@ -137,7 +137,9 @@ impl WalkContext {
     /// True when exactly one entity in this file declares `name`.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn is_unique_symbol(&self, name: &str) -> bool {
-        self.symbols.get(name).is_some_and(|indices| indices.len() == 1)
+        self.symbols
+            .get(name)
+            .is_some_and(|indices| indices.len() == 1)
     }
 
     /// Emits a `contains` edge from the innermost scope. Top-level entities
@@ -307,7 +309,15 @@ mod tests {
         context.add_call_edge(0, "helper", None, None, None, 3, 1);
         // Same owner, kind, and name: collapses even when the site evidence
         // (receiver, raw text, arity, position) differs.
-        context.add_call_edge(0, "helper", Some("this"), Some("this.helper()"), Some(0), 9, 8);
+        context.add_call_edge(
+            0,
+            "helper",
+            Some("this"),
+            Some("this.helper()"),
+            Some(0),
+            9,
+            8,
+        );
         context.add_call_edge(1, "helper", None, None, None, 4, 2);
         context.add_call_edge(0, "other", None, None, None, 5, 3);
         assert_eq!(context.name_edges().len(), 3);
@@ -317,7 +327,15 @@ mod tests {
     fn buffers_call_import_and_inheritance_references() {
         let mut context = WalkContext::new();
         let owner = context.next_entity_index();
-        context.add_call_edge(owner, "bark", Some("dog"), Some("dog.bark()"), Some(2), 7, 11);
+        context.add_call_edge(
+            owner,
+            "bark",
+            Some("dog"),
+            Some("dog.bark()"),
+            Some(2),
+            7,
+            11,
+        );
         context.add_import_edge("./utils.js", Some("import './utils.js'"), 1, 0);
         context.add_inheritance_edge(GraphRefKind::Extends, owner, "Animal", None, 2, 5);
         context.add_inheritance_edge(GraphRefKind::Implements, owner, "Runnable", None, 2, 5);

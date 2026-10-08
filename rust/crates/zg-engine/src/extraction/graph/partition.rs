@@ -76,7 +76,12 @@ pub(crate) fn partition_walk(
     context: WalkContext,
     head_fragment_indices: Vec<usize>,
 ) -> PartitionedGraph {
-    let WalkContext { resolved_edges, name_edges, symbols, .. } = context;
+    let WalkContext {
+        resolved_edges,
+        name_edges,
+        symbols,
+        ..
+    } = context;
     let mut partitioned = PartitionedGraph {
         contains: resolved_edges,
         resolved: Vec::new(),
@@ -87,11 +92,9 @@ pub(crate) fn partition_walk(
         let resolved_target = match edge.ref_kind {
             GraphRefKind::Imports => None,
             GraphRefKind::Calls if edge.receiver_name.is_some() => None,
-            GraphRefKind::Calls | GraphRefKind::Extends | GraphRefKind::Implements => {
-                symbols.get(&edge.ref_name).and_then(|indices| {
-                    (indices.len() == 1).then(|| indices[0])
-                })
-            }
+            GraphRefKind::Calls | GraphRefKind::Extends | GraphRefKind::Implements => symbols
+                .get(&edge.ref_name)
+                .and_then(|indices| (indices.len() == 1).then(|| indices[0])),
         };
         match resolved_target {
             Some(target_index) => partitioned.resolved.push(ResolvedNameEdge {
@@ -122,8 +125,8 @@ pub(crate) fn partition_walk(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::FILE_SCOPE_INDEX;
+    use super::*;
 
     fn context_with_entities(count: usize) -> WalkContext {
         let mut context = WalkContext::new();
@@ -216,7 +219,12 @@ mod tests {
         let graph = partition_walk(context, vec![0, 1]);
         assert_eq!(
             graph.contains,
-            vec![WalkEdge { source_index: outer, target_index: inner, line: 8, column: 2 }]
+            vec![WalkEdge {
+                source_index: outer,
+                target_index: inner,
+                line: 8,
+                column: 2
+            }]
         );
         assert_eq!(graph.head_fragment_indices, vec![0, 1]);
     }

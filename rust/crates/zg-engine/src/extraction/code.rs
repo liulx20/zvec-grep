@@ -9,14 +9,14 @@ use crate::{
 };
 
 use self::adapter::{LanguageAdapter, named_children, resolve_adapter};
+use super::graph::{
+    WalkContext, collect_import_edge, collect_inheritance_edges, is_import_node, partition_walk,
+    scan_call_edges,
+};
 use super::{
     ChunkOptions, ExtractedEntity, IndexingExtractionOutput, TextRange, TextSource,
     chunk_options_for_metadata, chunking::text_fragments, text::extract_plain_text_entities,
     validate_formats,
-};
-use super::graph::{
-    WalkContext, collect_import_edge, collect_inheritance_edges, is_import_node,
-    partition_walk, scan_call_edges,
 };
 
 const DEFAULT_CODE_CHUNK_CHARS: usize = 3_600;
@@ -76,9 +76,8 @@ fn extract_code(
             .copied()
             .find(|format| resolve_adapter(*format).is_some())
     };
-    let Some((adapter, language, code_format)) = format.and_then(|format| {
-        Some((resolve_adapter(format)?, grammar(format, jsx)?, format))
-    })
+    let Some((adapter, language, code_format)) =
+        format.and_then(|format| Some((resolve_adapter(format)?, grammar(format, jsx)?, format)))
     else {
         return Ok(IndexingExtractionOutput {
             fragments: fallback(source, max_chars, overlap_chars),
@@ -275,7 +274,15 @@ fn walk_code_node<'tree>(
             if is_import_node(child, format) {
                 collect_import_edge(child, source, format, graph_context);
             }
-            walk_code_node(child, adapter, source, breadcrumb, out, graph_context, format);
+            walk_code_node(
+                child,
+                adapter,
+                source,
+                breadcrumb,
+                out,
+                graph_context,
+                format,
+            );
         }
     }
 }
@@ -1650,8 +1657,7 @@ mod tests {
                 "}\n",
             ),
         );
-        let extracted =
-            extract_for_indexing(&source, ChunkOptions::default()).expect("extracts");
+        let extracted = extract_for_indexing(&source, ChunkOptions::default()).expect("extracts");
         let graph = extracted.graph.expect("code walk produces a graph");
 
         // Entities in walk order: Widget = 0, constructor = 1, main = 2. Head
@@ -1664,7 +1670,10 @@ mod tests {
         // The constructor's containment under the class passes through.
         assert_eq!(graph.contains.len(), 1);
         assert_eq!(
-            (graph.contains[0].source_index, graph.contains[0].target_index),
+            (
+                graph.contains[0].source_index,
+                graph.contains[0].target_index
+            ),
             (0, 1)
         );
 
@@ -1687,12 +1696,24 @@ mod tests {
         assert_eq!(pending[0].ref_kind, GraphRefKind::Imports);
         assert_eq!(pending[0].owner_index, FILE_SCOPE_INDEX);
         assert_eq!(pending[0].ref_name, "./utils.js");
-        assert_eq!((pending[1].ref_kind, pending[1].ref_name.as_str()), (GraphRefKind::Calls, "init"));
+        assert_eq!(
+            (pending[1].ref_kind, pending[1].ref_name.as_str()),
+            (GraphRefKind::Calls, "init")
+        );
         assert_eq!(pending[1].owner_index, 0);
         assert_eq!(pending[1].receiver_name.as_deref(), Some("this"));
-        assert_eq!((pending[2].ref_kind, pending[2].ref_name.as_str()), (GraphRefKind::Extends, "Base"));
-        assert_eq!((pending[3].owner_index, pending[3].ref_name.as_str()), (1, "init"));
-        assert_eq!((pending[4].owner_index, pending[4].ref_name.as_str()), (2, "helper"));
+        assert_eq!(
+            (pending[2].ref_kind, pending[2].ref_name.as_str()),
+            (GraphRefKind::Extends, "Base")
+        );
+        assert_eq!(
+            (pending[3].owner_index, pending[3].ref_name.as_str()),
+            (1, "init")
+        );
+        assert_eq!(
+            (pending[4].owner_index, pending[4].ref_name.as_str()),
+            (2, "helper")
+        );
     }
 
     // Manual inspection harness, not part of CI: run with
@@ -1705,8 +1726,8 @@ mod tests {
         use super::{Parser, WalkContext, grammar, resolve_adapter};
         use crate::domain::GraphRefKind;
 
-        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("src/extraction/graph.rs");
+        let path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/extraction/graph.rs");
         let text = std::fs::read_to_string(&path).expect("graph.rs is readable");
         let adapter = resolve_adapter(FileFormat::Rust).expect("rust adapter");
         let language = grammar(FileFormat::Rust, false).expect("rust grammar");
@@ -1739,7 +1760,10 @@ mod tests {
         let contains = context.resolved_edges();
         println!("=== {} contains edges ===", contains.len());
         for edge in contains {
-            println!("{} -> {} (L{})", edge.source_index, edge.target_index, edge.line);
+            println!(
+                "{} -> {} (L{})",
+                edge.source_index, edge.target_index, edge.line
+            );
         }
 
         let names = context.name_edges();
@@ -1764,6 +1788,10 @@ mod tests {
 
         assert!(!entities.is_empty());
         assert!(contains.len() >= 10);
-        assert!(names.iter().any(|edge| edge.ref_kind == GraphRefKind::Imports));
+        assert!(
+            names
+                .iter()
+                .any(|edge| edge.ref_kind == GraphRefKind::Imports)
+        );
     }
 }

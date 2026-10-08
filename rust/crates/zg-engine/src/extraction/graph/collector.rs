@@ -10,11 +10,11 @@ use tree_sitter::Node;
 use crate::domain::{FileFormat, GraphRefKind};
 use crate::utils::collapse_whitespace;
 
-use super::vocabulary::{
-    CALLEE_FIELDS, COMMON_CALL_TYPES, HeritageVocabulary, import_vocabulary_for,
-    heritage_vocabulary_for,
-};
 use super::WalkContext;
+use super::vocabulary::{
+    CALLEE_FIELDS, COMMON_CALL_TYPES, HeritageVocabulary, heritage_vocabulary_for,
+    import_vocabulary_for,
+};
 
 const MAX_CALLEE_TEXT_CHARS: usize = 180;
 
@@ -94,9 +94,7 @@ fn is_identifier_like(value: &str) -> bool {
         return false;
     };
     let first_ok = first.is_ascii_alphabetic() || matches!(first, '_' | '$');
-    first_ok
-        && chars
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '$' | '.' | ':'))
+    first_ok && chars.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '$' | '.' | ':'))
 }
 
 /// Scans an entity body for call sites and buffers one `calls` reference per
@@ -113,12 +111,7 @@ pub(crate) fn scan_call_edges(
     visit_for_calls(entity_node, owner_index, source, context);
 }
 
-fn visit_for_calls(
-    node: Node<'_>,
-    owner_index: usize,
-    source: &[u8],
-    context: &mut WalkContext,
-) {
+fn visit_for_calls(node: Node<'_>, owner_index: usize, source: &[u8], context: &mut WalkContext) {
     if is_call_node(node) {
         if let Some(callee) = callee_text_of(node, source) {
             if callee.len() <= MAX_CALLEE_TEXT_CHARS && is_identifier_like(callee) {
@@ -149,9 +142,7 @@ fn normalize_module_path(module_text: &str) -> String {
         .trim()
         .trim_start_matches(['<', '"', '\'', '`'])
         .trim_end_matches(['>', '"', '\'', '`']);
-    strip_trailing_semicolons(unquoted)
-        .trim()
-        .to_owned()
+    strip_trailing_semicolons(unquoted).trim().to_owned()
 }
 
 /// Removes a trailing semicolon run plus following whitespace (`/;+\s*$/`).
@@ -243,9 +234,11 @@ fn strip_rust_use_path(normalized: &str) -> Option<String> {
 
 /// Strips a leading `use` keyword (`/^use\s+/i`).
 fn strip_leading_use(text: &str) -> &str {
-    if text.as_bytes().get(..3).is_some_and(|prefix| {
-        prefix.eq_ignore_ascii_case(b"use")
-    }) {
+    if text
+        .as_bytes()
+        .get(..3)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"use"))
+    {
         let rest = text[3..].trim_start();
         if rest.len() < text.len() - 3 {
             return rest;
@@ -263,7 +256,9 @@ fn strip_trailing_as_alias(text: &str) -> String {
         let alias = words[words.len() - 2];
         let last = words[words.len() - 1];
         if alias.eq_ignore_ascii_case("as")
-            && last.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+            && last
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
         {
             return words[..words.len() - 2].join(" ");
         }
@@ -325,7 +320,10 @@ pub(crate) fn collect_inheritance_edges(
                 }
             })
             .collect::<Vec<_>>(),
-        HeritageVocabulary::Fields { extends, implements } => extends
+        HeritageVocabulary::Fields {
+            extends,
+            implements,
+        } => extends
             .iter()
             .filter_map(|field| {
                 entity_node
@@ -394,10 +392,7 @@ mod tests {
 
     #[test]
     fn splits_callee_names_into_receiver_and_member() {
-        assert_eq!(
-            split_callee_name("helper"),
-            ("helper".to_owned(), None)
-        );
+        assert_eq!(split_callee_name("helper"), ("helper".to_owned(), None));
         assert_eq!(
             split_callee_name("dog.bark"),
             ("bark".to_owned(), Some("dog".to_owned()))
@@ -473,9 +468,7 @@ mod tests {
             .set_language(&tree_sitter_rust::LANGUAGE.into())
             .expect("rust grammar loads");
         let source = "use std::collections::HashMap;\n";
-        let tree = parser
-            .parse(source, None)
-            .expect("rust source parses");
+        let tree = parser.parse(source, None).expect("rust source parses");
         let use_node = tree
             .root_node()
             .named_child(0)

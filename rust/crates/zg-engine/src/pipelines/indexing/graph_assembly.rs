@@ -11,10 +11,10 @@
 use std::collections::BTreeMap;
 
 use crate::domain::{
-    EdgeProvenance, Entity, EntityMetadata, FileEdge, FileFormat, FileGraphNode,
-    FileGraphResult, GraphEdgeKind, PendingRef, PendingRefStatus, Range, SymbolType,
+    EdgeProvenance, Entity, EntityMetadata, FileEdge, FileFormat, FileGraphNode, FileGraphResult,
+    GraphEdgeKind, PendingRef, PendingRefStatus, Range, SymbolType,
 };
-use crate::extraction::{PartitionedGraph, FILE_SCOPE_INDEX};
+use crate::extraction::{FILE_SCOPE_INDEX, PartitionedGraph};
 use crate::utils::sha256_hex;
 
 /// File-node ID marking the file scope itself (import owner).
