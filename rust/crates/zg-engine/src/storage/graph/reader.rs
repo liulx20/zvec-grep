@@ -45,6 +45,23 @@ impl SqliteGraphStorage {
             .query_map(params_from_iter(values), edge_from_row)?
             .collect::<rusqlite::Result<_>>()?)
     }
+
+    /// Entity IDs owned by a file in the last persisted snapshot, recovered
+    /// from its `contains` edges. The coordinator reads this right before
+    /// `write_file_graph` so stale inbound references can be invalidated.
+    /// Returns an empty set for files that were never persisted.
+    ///
+    /// # Errors
+    /// Propagates SQLite errors.
+    pub(crate) fn file_entity_ids(&self, file_id: u32) -> Result<Vec<String>> {
+        let mut statement = self.connection.prepare(
+            "SELECT DISTINCT target FROM edges
+             WHERE file_id = ?1 AND kind = 'contains' AND target IS NOT NULL
+             ORDER BY target",
+        )?;
+        let rows = statement.query_map([file_id], |row| row.get::<_, String>(0))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<String>>>()?)
+    }
 }
 
 fn edge_from_row(row: &Row<'_>) -> rusqlite::Result<Edge> {

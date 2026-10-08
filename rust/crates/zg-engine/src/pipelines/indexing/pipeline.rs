@@ -44,7 +44,7 @@ use crate::{
     utils::{collapse_whitespace, decode_text, sha256_hex},
 };
 
-use super::{graph_assembly, input_budget::index_chunk_options, model_progress};
+use super::{graph_assembly, graph_sink, input_budget::index_chunk_options, model_progress};
 
 const MAX_SKIPPED_FILE_SAMPLES: usize = 20;
 // All default file-size limits are at least this large.
@@ -97,6 +97,10 @@ impl IndexEmbeddingRuntime for ModelRuntimeLease {
 pub(crate) struct IndexingContext<'context> {
     pub workspace_index: &'context Workspace,
     pub storage: &'context dyn WorkspaceIndexStorage,
+    /// Graph persistence handle opened alongside the zvec storage; `None`
+    /// skips graph writes (tests, graph-less callers). Writers take `&mut`,
+    /// so the handle is shared through a mutex.
+    pub graph: Option<&'context Mutex<crate::storage::graph::SqliteGraphStorage>>,
     pub scanner: &'context dyn WorkspaceScannerPort,
     pub embedding_models: &'context [&'context dyn IndexEmbeddingRuntime],
     pub embedding_concurrency: Option<usize>,
@@ -280,6 +284,8 @@ struct IndexWriteStats {
     entities_created: usize,
     failed_files: Vec<PathBuf>,
     failed_reasons: Vec<String>,
+    /// Graph writes that degraded after a successful zvec commit.
+    graph_failures: usize,
 }
 
 #[derive(Default)]
@@ -421,6 +427,26 @@ async fn run_index_pass(
                 file.relative_path.display()
             ))
         })?;
+        if let Some(graph) = context.graph {
+            // Fails loudly: zvec rows are already gone, so a silent leftover
+            // would strand pending references on deleted files. Deletion is
+            // idempotent, so a retry pass converges.
+            let mut graph = lock_graph(graph);
+            let old_entity_ids = graph.file_entity_ids(file.id.get()).map_err(|error| {
+                EngineError::storage_failure(format!(
+                    "read stale graph for {}: {error}",
+                    file.relative_path.display()
+                ))
+            })?;
+            graph
+                .delete_file_graph(file.id.get(), &old_entity_ids)
+                .map_err(|error| {
+                    EngineError::storage_failure(format!(
+                        "delete stale graph for {}: {error}",
+                        file.relative_path.display()
+                    ))
+                })?;
+        }
     }
     timings.record(
         "index_delete_stale",
@@ -559,10 +585,9 @@ struct PreparedFile {
     file: FileRecord,
     entities: Vec<Entity>,
     fragments: Vec<PreparedFragment>,
-    /// Assembled per-file graph, when the extraction produced one. Carried to
-    /// the graph persistence sink, which lands after this pipeline wiring.
-    #[allow(dead_code, reason = "read by the graph storage sink, staged next")]
-    graph: Option<crate::domain::FileGraphResult>,
+    /// Persistence-ready per-file graph, when the extraction produced one.
+    /// Consumed by `commit_file` alongside the zvec replacement.
+    graph: Option<crate::storage::graph::FileGraph>,
 }
 
 enum PreparedCandidate {
@@ -652,7 +677,13 @@ async fn index_candidates(
 
         if prepared.fragments.is_empty() {
             let commit_started = Instant::now();
-            if let Err(error) = commit_file(context.storage, prepared, Vec::new(), &mut stats) {
+            if let Err(error) = commit_file(
+                context.storage,
+                context.graph,
+                prepared,
+                Vec::new(),
+                &mut stats,
+            ) {
                 let reason =
                     mark_file_failed(context.storage, &error.file, "commit", &error.error)?;
                 record_file_failed(&mut stats, &error.file, &reason);
@@ -782,7 +813,9 @@ fn apply_embedding_files(
             EmbeddedFileOutcome::Success { file, vectors } => {
                 let path = file.file.relative_path.clone();
                 let commit_started = Instant::now();
-                if let Err(error) = commit_file(context.storage, file, vectors, stats) {
+                if let Err(error) =
+                    commit_file(context.storage, context.graph, file, vectors, stats)
+                {
                     let file = error.file;
                     let reason = mark_file_failed(context.storage, &file, "commit", &error.error)?;
                     record_file_failed(stats, &file, &reason);
@@ -826,6 +859,7 @@ struct CommitError {
 
 fn commit_file(
     storage: &dyn WorkspaceIndexStorage,
+    graph: Option<&Mutex<crate::storage::graph::SqliteGraphStorage>>,
     file: PreparedFile,
     vectors: Vec<Vec<f32>>,
     stats: &mut IndexWriteStats,
@@ -858,9 +892,42 @@ fn commit_file(
             file: Box::new(file.file.clone()),
             error,
         })?;
+    // zvec succeeded, so a graph failure degrades instead of failing the
+    // commit; the snapshot can be rebuilt by reindexing the file.
+    if let Some(graph) = graph {
+        if let Err(_error) = persist_file_graph(graph, file.file.id, file.graph.as_ref()) {
+            stats.graph_failures += 1;
+        }
+    }
     stats.files_indexed += 1;
     stats.entities_created += public_entities;
     Ok(())
+}
+
+/// Writes or clears one file's graph rows. `write_file_graph` recovers the
+/// previous entity IDs from the graph itself; both stores were mutated under
+/// the same workspace write lock, so the recovered set matches zvec unless an
+/// earlier graph write degraded.
+///
+/// # Errors
+/// Propagates graph persistence failures for the caller to degrade on.
+fn persist_file_graph(
+    graph: &Mutex<crate::storage::graph::SqliteGraphStorage>,
+    file_id: FileId,
+    snapshot: Option<&crate::storage::graph::FileGraph>,
+) -> Result<(), crate::storage::graph::Error> {
+    let mut graph = lock_graph(graph);
+    let old_entity_ids = graph.file_entity_ids(file_id.get())?;
+    match snapshot {
+        Some(snapshot) => graph.write_file_graph(file_id.get(), snapshot, &old_entity_ids),
+        None => graph.delete_file_graph(file_id.get(), &old_entity_ids),
+    }
+}
+
+fn lock_graph(
+    graph: &Mutex<crate::storage::graph::SqliteGraphStorage>,
+) -> MutexGuard<'_, crate::storage::graph::SqliteGraphStorage> {
+    graph.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 async fn prepare_candidate(
@@ -927,14 +994,24 @@ async fn prepare_candidate(
     for fragment in &mut fragments {
         fragment.model = owners[&fragment.entity_id].clone();
     }
-    let graph = graph_source.map(|graph| {
-        graph_assembly::assemble_file_graph(
-            &file.id.to_string(),
-            graph_language(formats),
-            &graph,
-            &entities,
-        )
-    });
+    let graph = graph_source
+        .map(|graph| {
+            let language = graph_language(formats);
+            let assembled = graph_assembly::assemble_file_graph(
+                &file.id.to_string(),
+                language,
+                &graph,
+                &entities,
+            );
+            graph_sink::file_graph(file.id, language, &assembled)
+        })
+        .transpose()
+        .map_err(|error| {
+            EngineError::storage_failure(format!(
+                "prepare graph snapshot for {}: {error}",
+                file.relative_path.display()
+            ))
+        })?;
     Ok(PreparedCandidate::File(Box::new(PreparedFile {
         file,
         entities,
@@ -2150,6 +2227,113 @@ mod tests {
 
     use super::*;
 
+    /// End-to-end sink check: the coordinator's persist path must recover the
+    /// previous entity IDs from the graph itself, and rewriting a file must
+    /// invalidate cross-file resolutions that targeted the old IDs.
+    #[test]
+    fn persist_file_graph_rewrites_and_invalidates_inbound_resolutions() {
+        use crate::storage::graph::{Direction, EdgeKind, Provenance, Resolution};
+
+        let graph = Mutex::new(
+            crate::storage::graph::SqliteGraphStorage::in_memory().expect("graph opens"),
+        );
+        let contains_edge = |target: &str| crate::storage::graph::Edge {
+            kind: EdgeKind::Contains,
+            source: "f42".to_owned(),
+            target: target.to_owned(),
+            line: Some(1),
+            column: Some(0),
+            provenance: Provenance::FileLocal,
+            metadata: serde_json::Map::new(),
+        };
+        let snapshot = |entity: &str| crate::storage::graph::FileGraph {
+            entity_ids: vec![entity.to_owned()],
+            edges: vec![contains_edge(entity)],
+            pending_refs: Vec::new(),
+        };
+
+        // Round 1: file 42 declares entity-a.
+        persist_file_graph(&graph, FileId::new(42), Some(&snapshot("entity-a")))
+            .expect("first write");
+        assert_eq!(
+            lock_graph(&graph).file_entity_ids(42).expect("entity ids"),
+            vec!["entity-a".to_owned()]
+        );
+
+        // File 43 imports entity-a across files; the resolver resolved it.
+        let importer = crate::storage::graph::FileGraph {
+            entity_ids: vec!["entity-c".to_owned()],
+            edges: vec![crate::storage::graph::Edge {
+                kind: EdgeKind::Contains,
+                source: "f43".to_owned(),
+                target: "entity-c".to_owned(),
+                line: Some(2),
+                column: Some(0),
+                provenance: Provenance::FileLocal,
+                metadata: serde_json::Map::new(),
+            }],
+            pending_refs: vec![crate::storage::graph::PendingRef {
+                from_node_id: "f43".to_owned(),
+                reference_name: "entity-a".to_owned(),
+                receiver_name: None,
+                reference_kind: EdgeKind::Imports,
+                arity: None,
+                line: 3,
+                col: 4,
+                metadata: serde_json::Map::new(),
+                candidates: None,
+                language: "typescript".to_owned(),
+                name_tail: "entity-a".to_owned(),
+            }],
+        };
+        persist_file_graph(&graph, FileId::new(43), Some(&importer)).expect("importer write");
+        let ref_id = {
+            let mut graph = lock_graph(&graph);
+            let page = graph.list_pending_refs(10, 0).expect("pending page");
+            assert_eq!(page.refs.len(), 1);
+            page.refs[0].id
+        };
+        {
+            let mut graph = lock_graph(&graph);
+            let stats = graph
+                .apply_resolutions(&[Resolution {
+                    ref_id,
+                    target_id: "entity-a".to_owned(),
+                    provenance: Provenance::ImportScoped,
+                }])
+                .expect("resolution applies");
+            assert_eq!(stats.resolved, 1);
+        }
+        assert_eq!(
+            lock_graph(&graph)
+                .neighborhood("entity-a", Direction::In, Some(&[EdgeKind::Imports]))
+                .expect("inbound")
+                .len(),
+            1
+        );
+
+        // Round 2: file 42 rewrites with a fresh entity ID; the resolution
+        // that targeted entity-a must return to pending.
+        persist_file_graph(&graph, FileId::new(42), Some(&snapshot("entity-b"))).expect("rewrite");
+        let mut graph = lock_graph(&graph);
+        assert_eq!(
+            graph.file_entity_ids(42).expect("entity ids"),
+            vec!["entity-b".to_owned()]
+        );
+        assert!(
+            graph
+                .neighborhood("entity-a", Direction::In, Some(&[EdgeKind::Imports]))
+                .expect("inbound")
+                .is_empty(),
+            "stale resolution must be invalidated"
+        );
+        let page = graph.list_pending_refs(10, 0).expect("pending page");
+        assert!(
+            page.refs.iter().any(|stored| stored.file_id == 43),
+            "invalidated reference returns to pending"
+        );
+    }
+
     #[test]
     fn binding_preserves_complete_entities_and_independent_fragment_ids() {
         let source = TextSource {
@@ -2527,6 +2711,7 @@ mod tests {
             let context = IndexingContext {
                 workspace_index: &workspace,
                 storage: &storage,
+                graph: None,
                 scanner: &scanner,
                 embedding_models: &models,
                 embedding_concurrency: None,
@@ -2561,6 +2746,7 @@ mod tests {
         let context = IndexingContext {
             workspace_index: &workspace,
             storage: &storage,
+            graph: None,
             scanner: &scanner,
             embedding_models: &[&model],
             embedding_concurrency: None,
@@ -2677,6 +2863,7 @@ mod tests {
         let context = IndexingContext {
             workspace_index: &workspace,
             storage: &storage,
+            graph: None,
             scanner: &scanner,
             embedding_models: &[&model],
             embedding_concurrency: None,
@@ -2734,6 +2921,7 @@ mod tests {
         let result = index_workspace(&IndexingContext {
             workspace_index: &workspace,
             storage: &storage,
+            graph: None,
             scanner: &scanner,
             embedding_models: &[&model],
             embedding_concurrency: None,
@@ -2785,6 +2973,7 @@ mod tests {
         let context = IndexingContext {
             workspace_index: &workspace,
             storage: &storage,
+            graph: None,
             scanner: &scanner,
             embedding_models: &[&model],
             embedding_concurrency: Some(2),
@@ -2839,6 +3028,7 @@ mod tests {
         index_workspace(&IndexingContext {
             workspace_index: &workspace,
             storage: &storage,
+            graph: None,
             scanner: &scanner,
             embedding_models: &[&model],
             embedding_concurrency: Some(2),
@@ -2855,6 +3045,7 @@ mod tests {
         let result = index_workspace(&IndexingContext {
             workspace_index: &workspace,
             storage: &storage,
+            graph: None,
             scanner: &scanner,
             embedding_models: &[&model],
             embedding_concurrency: Some(2),
@@ -2939,6 +3130,7 @@ mod tests {
         let result = index_workspace(&IndexingContext {
             workspace_index: &workspace,
             storage: &storage,
+            graph: None,
             scanner: &scanner,
             embedding_models: &[&model],
             embedding_concurrency: Some(1),

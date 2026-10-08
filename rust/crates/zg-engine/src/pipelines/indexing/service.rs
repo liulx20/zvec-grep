@@ -258,6 +258,19 @@ impl WorkspaceIndexService {
                 storage_path: manifest.storage_home(),
                 embeddings: models.iter().map(|model| model.info().clone()).collect(),
             })?;
+        // The graph database lives beside the zvec collections and shares
+        // their generation lifecycle: build generations carry it, resets and
+        // generation drops remove it. Opening fails loudly so schema rejects
+        // surface instead of silently skipping graph persistence.
+        let graph = std::sync::Mutex::new(
+            crate::storage::graph::SqliteGraphStorage::open(
+                &manifest.storage_home().join("graph.sqlite"),
+                crate::storage::graph::OpenMode::ReadWrite,
+            )
+            .map_err(|error| {
+                EngineError::storage_failure(format!("open graph database: {error}"))
+            })?,
+        );
         let embedding_models = models
             .iter()
             .map(|model| model as &dyn IndexEmbeddingRuntime)
@@ -265,6 +278,7 @@ impl WorkspaceIndexService {
         let result = index_workspace(&IndexingContext {
             workspace_index: &manifest.workspace,
             storage: storage.as_ref(),
+            graph: Some(&graph),
             scanner: &self.scanner,
             embedding_models: &embedding_models,
             embedding_concurrency: options.embedding_concurrency,
