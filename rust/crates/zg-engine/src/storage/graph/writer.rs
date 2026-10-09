@@ -48,6 +48,22 @@ impl SqliteGraphStorage {
             )?;
         }
         tx.execute("DELETE FROM edges WHERE file_id = ?", [file_id])?;
+        tx.execute("DELETE FROM entities WHERE file_id = ?", [file_id])?;
+        {
+            let mut insert = tx.prepare(
+                "INSERT INTO entities (file_id, entity_id, name, qualified_name, is_exported)
+                VALUES (?, ?, ?, ?, ?)",
+            )?;
+            for record in &graph.entities {
+                insert.execute(params![
+                    file_id,
+                    record.entity_id,
+                    record.name,
+                    record.qualified_name,
+                    i64::from(record.is_exported)
+                ])?;
+            }
+        }
         {
             let mut insert = tx.prepare(
                 "INSERT INTO edges
@@ -138,6 +154,15 @@ fn validate(file_id: &str, graph: &FileGraph, old_entity_ids: &[String]) -> Resu
         if !owns(&reference.from_node_id) || reference.line == 0 {
             return Err(Error::InvalidInput(
                 "pending refs require local ownership and one-based lines",
+            ));
+        }
+    }
+    let mut named = HashSet::new();
+    for record in &graph.entities {
+        nonempty(&record.name)?;
+        if !owns(&record.entity_id) || !named.insert(record.entity_id.as_str()) {
+            return Err(Error::InvalidInput(
+                "entity records must reference unique snapshot entity IDs",
             ));
         }
     }

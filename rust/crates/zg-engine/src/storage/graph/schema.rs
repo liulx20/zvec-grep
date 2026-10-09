@@ -3,7 +3,7 @@ use rusqlite::{Connection, TransactionBehavior};
 use super::{Error, Result};
 
 // Unsupported versions require an index rebuild; no schema migration is provided.
-pub(crate) const VERSION: i64 = 10;
+pub(crate) const VERSION: i64 = 11;
 pub(crate) const APPLICATION_ID: i64 = 0x5a47_5250;
 
 pub(crate) fn validate(connection: &Connection) -> Result<()> {
@@ -79,4 +79,15 @@ CREATE INDEX edges_source_kind ON edges(source, kind);
 CREATE INDEX edges_target_kind ON edges(target, kind);
 -- Index only the pending queue so resolved queries use the endpoint indexes.
 CREATE INDEX edges_pending_id ON edges(id) WHERE status = 'pending';
+-- Workspace name index consumed by the cross-file resolver. Rows follow the
+-- file snapshot lifecycle; unnamed entities are omitted.
+CREATE TABLE entities (
+    file_id INTEGER NOT NULL CHECK (file_id BETWEEN 0 AND 4294967295),
+    entity_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    qualified_name TEXT NOT NULL,
+    is_exported INTEGER NOT NULL CHECK (is_exported IN (0, 1)),
+    PRIMARY KEY (file_id, entity_id)
+) STRICT;
+CREATE INDEX entities_name ON entities(name);
 ";

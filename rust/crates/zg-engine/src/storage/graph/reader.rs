@@ -1,5 +1,6 @@
 use super::{
-    Direction, Edge, EdgeKind, Result, SqliteGraphStorage, decode_enum, decode_metadata, nonempty,
+    Direction, Edge, EdgeKind, NameIndexEntry, Result, SqliteGraphStorage, decode_enum,
+    decode_metadata, nonempty,
 };
 use rusqlite::{Row, params_from_iter};
 
@@ -61,6 +62,39 @@ impl SqliteGraphStorage {
         )?;
         let rows = statement.query_map([file_id], |row| row.get::<_, String>(0))?;
         Ok(rows.collect::<rusqlite::Result<Vec<String>>>()?)
+    }
+
+    /// Every workspace entity that declares `name`, ordered by entity ID.
+    /// This is the resolver's name index; empty names never occur because
+    /// unnamed entities are not persisted.
+    ///
+    /// # Errors
+    /// Rejects blank names, invalid stored data, and SQLite errors.
+    pub(crate) fn lookup_by_name(&self, name: &str) -> Result<Vec<NameIndexEntry>> {
+        nonempty(name)?;
+        let mut statement = self.connection.prepare(
+            "SELECT entity_id, file_id, qualified_name, is_exported FROM entities
+             WHERE name = ?1 ORDER BY entity_id",
+        )?;
+        let rows = statement.query_map([name], |row| {
+            Ok(NameIndexEntry {
+                entity_id: row.get(0)?,
+                file_id: row.get(1)?,
+                qualified_name: row.get(2)?,
+                is_exported: row.get::<_, i64>(3)? == 1,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// The single workspace entity declaring `name`, or `None` when absent or
+    /// ambiguous. Backs the resolver's unique-name fast path.
+    ///
+    /// # Errors
+    /// Rejects blank names, invalid stored data, and SQLite errors.
+    pub(crate) fn lookup_unique(&self, name: &str) -> Result<Option<NameIndexEntry>> {
+        let mut hits = self.lookup_by_name(name)?;
+        Ok((hits.len() == 1).then(|| hits.pop().expect("single hit")))
     }
 }
 

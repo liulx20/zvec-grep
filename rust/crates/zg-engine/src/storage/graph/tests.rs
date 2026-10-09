@@ -1,8 +1,8 @@
 use std::path::Path;
 
 use super::{
-    Direction, Edge, EdgeKind, Error, FileGraph, Metadata, OpenMode, PendingRef, Provenance,
-    Resolution, ResolutionStats, SqliteGraphStorage,
+    Direction, Edge, EdgeKind, EntityRecord, Error, FileGraph, Metadata, OpenMode, PendingRef,
+    Provenance, Resolution, ResolutionStats, SqliteGraphStorage,
 };
 use rusqlite::Connection;
 use serde_json::json;
@@ -38,6 +38,7 @@ fn reference(owner: &str, name: &str) -> PendingRef {
 fn graph(ids: &[&str], edges: Vec<Edge>, refs: Vec<PendingRef>) -> FileGraph {
     FileGraph {
         entity_ids: ids.iter().map(|id| (*id).into()).collect(),
+        entities: Vec::new(),
         edges,
         pending_refs: refs,
     }
@@ -55,6 +56,90 @@ fn proposal(storage: &SqliteGraphStorage, target: &str) -> Resolution {
 
 fn open(path: &Path) -> SqliteGraphStorage {
     SqliteGraphStorage::open(path, OpenMode::ReadWrite).expect("open writer")
+}
+
+fn record(entity_id: &str, name: &str) -> EntityRecord {
+    EntityRecord {
+        entity_id: entity_id.into(),
+        name: name.into(),
+        qualified_name: format!("scope::{name}"),
+        is_exported: true,
+    }
+}
+
+#[test]
+fn name_index_follows_file_snapshots() {
+    let mut storage = SqliteGraphStorage::in_memory().expect("graph opens");
+
+    let mut first = graph(&["entity-1", "entity-2"], Vec::new(), Vec::new());
+    first.entities = vec![record("entity-1", "helper"), record("entity-2", "helper")];
+    storage
+        .write_file_graph(1, &first, &[])
+        .expect("first write");
+    let mut second = graph(&["entity-3"], Vec::new(), Vec::new());
+    second.entities = vec![record("entity-3", "helper")];
+    storage
+        .write_file_graph(2, &second, &[])
+        .expect("second write");
+
+    let hits = storage.lookup_by_name("helper").expect("name lookup");
+    assert_eq!(hits.len(), 3);
+    assert!(hits.iter().all(|hit| hit.is_exported));
+    assert!(hits.iter().all(|hit| hit.qualified_name == "scope::helper"));
+    assert_eq!(storage.lookup_unique("helper").expect("unique"), None);
+    assert!(
+        storage
+            .lookup_by_name("never-indexed")
+            .expect("name lookup")
+            .is_empty()
+    );
+
+    // Rewriting a file replaces its name records in the same snapshot.
+    let mut rewrite = graph(&["entity-3"], Vec::new(), Vec::new());
+    rewrite.entities = vec![record("entity-3", "solo")];
+    storage
+        .write_file_graph(2, &rewrite, &["entity-3".to_owned()])
+        .expect("rewrite");
+    let solo = storage
+        .lookup_unique("solo")
+        .expect("unique")
+        .expect("single hit");
+    assert_eq!(solo.entity_id, "entity-3");
+    assert_eq!(solo.file_id, 2);
+    assert_eq!(
+        storage.lookup_by_name("helper").expect("name lookup").len(),
+        2
+    );
+
+    storage
+        .delete_file_graph(2, &["entity-3".to_owned()])
+        .expect("delete");
+    assert!(
+        storage
+            .lookup_by_name("solo")
+            .expect("name lookup")
+            .is_empty()
+    );
+
+    // Entity records must reference owned snapshot IDs and non-blank names.
+    let mut foreign = graph(&["entity-9"], Vec::new(), Vec::new());
+    foreign.entities = vec![record("missing", "ghost")];
+    assert!(storage.write_file_graph(3, &foreign, &[]).is_err());
+    let mut duplicate = graph(&["entity-9"], Vec::new(), Vec::new());
+    duplicate.entities = vec![record("entity-9", "twin"), record("entity-9", "twin")];
+    assert!(storage.write_file_graph(3, &duplicate, &[]).is_err());
+    let mut blank = graph(&["entity-9"], Vec::new(), Vec::new());
+    blank.entities = vec![EntityRecord {
+        entity_id: "entity-9".into(),
+        name: "  ".into(),
+        qualified_name: String::new(),
+        is_exported: false,
+    }];
+    assert!(storage.write_file_graph(3, &blank, &[]).is_err());
+    assert!(matches!(
+        storage.lookup_by_name(""),
+        Err(Error::InvalidInput(_))
+    ));
 }
 
 #[test]
@@ -527,7 +612,7 @@ fn schemas_reject_foreign_and_newer_databases_without_rewriting_versions() {
 }
 
 #[test]
-fn schema_contains_only_edges_and_enforces_json_objects() {
+fn schema_contains_edges_and_entities_and_enforces_json_objects() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("graph.sqlite");
     open(&path).close().expect("init");
@@ -540,9 +625,10 @@ fn schema_contains_only_edges_and_enforces_json_objects() {
         .expect("query")
         .collect::<rusqlite::Result<_>>()
         .expect("rows");
-    assert_eq!(names, ["edges", "sqlite_sequence"]);
+    assert_eq!(names, ["edges", "entities", "sqlite_sequence"]);
     assert!(raw.execute("INSERT INTO edges (file_id, kind, source, target, provenance, status, metadata) VALUES (1, 'calls', 'a', 'b', 'file_local', 'resolved', '[]')", []).is_err());
     assert!(raw.execute("INSERT INTO edges (file_id, kind, source, target, provenance, status, line) VALUES (1, 'calls', 'a', 'b', 'file_local', 'resolved', 0)", []).is_err());
+    assert!(raw.execute("INSERT INTO entities (file_id, entity_id, name, qualified_name, is_exported) VALUES (1, 'a', 'a', 'a', 2)", []).is_err());
 }
 
 #[test]

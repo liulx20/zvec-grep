@@ -2248,6 +2248,12 @@ mod tests {
         };
         let snapshot = |entity: &str| crate::storage::graph::FileGraph {
             entity_ids: vec![entity.to_owned()],
+            entities: vec![crate::storage::graph::EntityRecord {
+                entity_id: entity.to_owned(),
+                name: entity.to_owned(),
+                qualified_name: entity.to_owned(),
+                is_exported: false,
+            }],
             edges: vec![contains_edge(entity)],
             pending_refs: Vec::new(),
         };
@@ -2258,6 +2264,14 @@ mod tests {
         assert_eq!(
             lock_graph(&graph).file_entity_ids(42).expect("entity ids"),
             vec!["entity-a".to_owned()]
+        );
+        assert_eq!(
+            lock_graph(&graph)
+                .lookup_unique("entity-a")
+                .expect("name index")
+                .expect("declared name")
+                .entity_id,
+            "entity-a"
         );
 
         // File 43 imports entity-a across files; the resolver resolved it.
@@ -2272,6 +2286,7 @@ mod tests {
                 provenance: Provenance::FileLocal,
                 metadata: serde_json::Map::new(),
             }],
+            entities: Vec::new(),
             pending_refs: vec![crate::storage::graph::PendingRef {
                 from_node_id: "f43".to_owned(),
                 reference_name: "entity-a".to_owned(),
@@ -2288,7 +2303,7 @@ mod tests {
         };
         persist_file_graph(&graph, FileId::new(43), Some(&importer)).expect("importer write");
         let ref_id = {
-            let mut graph = lock_graph(&graph);
+            let graph = lock_graph(&graph);
             let page = graph.list_pending_refs(10, 0).expect("pending page");
             assert_eq!(page.refs.len(), 1);
             page.refs[0].id
@@ -2315,7 +2330,14 @@ mod tests {
         // Round 2: file 42 rewrites with a fresh entity ID; the resolution
         // that targeted entity-a must return to pending.
         persist_file_graph(&graph, FileId::new(42), Some(&snapshot("entity-b"))).expect("rewrite");
-        let mut graph = lock_graph(&graph);
+        assert!(
+            lock_graph(&graph)
+                .lookup_by_name("entity-a")
+                .expect("name index")
+                .is_empty(),
+            "renamed entity must leave the name index"
+        );
+        let graph = lock_graph(&graph);
         assert_eq!(
             graph.file_entity_ids(42).expect("entity ids"),
             vec!["entity-b".to_owned()]

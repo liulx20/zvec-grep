@@ -68,6 +68,20 @@ pub(super) fn file_graph(
 
     let entity_ids = result.nodes.iter().map(|node| node.id.clone()).collect();
 
+    // Unnamed entities cannot be found by name, so they stay out of the index.
+    let entities = result
+        .nodes
+        .iter()
+        .filter_map(|node| {
+            node.name.as_deref().map(|name| graph::EntityRecord {
+                entity_id: node.id.clone(),
+                name: name.to_owned(),
+                qualified_name: node.qualified_name.clone(),
+                is_exported: node.is_exported,
+            })
+        })
+        .collect();
+
     let mut edges = Vec::with_capacity(result.edges.len());
     for edge in &result.edges {
         edges.push(graph::Edge {
@@ -105,6 +119,7 @@ pub(super) fn file_graph(
 
     Ok(graph::FileGraph {
         entity_ids,
+        entities,
         edges,
         pending_refs,
     })
@@ -155,6 +170,30 @@ mod tests {
 
     fn sample_language() -> FileFormat {
         FileFormat::TypeScript
+    }
+
+    fn node(
+        id: &str,
+        name: Option<&str>,
+        qualified_name: &str,
+        is_exported: bool,
+    ) -> FileGraphNode {
+        FileGraphNode {
+            id: id.to_owned(),
+            kind: SymbolType::Function,
+            name: name.map(str::to_owned),
+            qualified_name: qualified_name.to_owned(),
+            language: "typescript".to_owned(),
+            start_line: 1,
+            end_line: 2,
+            start_column: 0,
+            end_column: 8,
+            signature: None,
+            doc: None,
+            arity: None,
+            visibility: None,
+            is_exported,
+        }
     }
 
     fn sample_pending(owner_id: &str) -> PendingRef {
@@ -209,6 +248,15 @@ mod tests {
 
         assert_eq!(snapshot.entity_ids, vec!["entity-1".to_owned()]);
         assert_eq!(snapshot.pending_refs, Vec::new());
+        assert_eq!(
+            snapshot.entities,
+            vec![graph::EntityRecord {
+                entity_id: "entity-1".to_owned(),
+                name: "a".to_owned(),
+                qualified_name: "a".to_owned(),
+                is_exported: false,
+            }]
+        );
         let [edge] = snapshot.edges.as_slice() else {
             panic!("expected one edge");
         };
@@ -242,6 +290,31 @@ mod tests {
         assert_eq!(file_owned.line, 10);
         assert_eq!(file_owned.col, 4);
         assert_eq!(file_owned.arity, Some(2));
+    }
+
+    #[test]
+    fn omits_unnamed_entities_from_the_name_index() {
+        let result = FileGraphResult {
+            nodes: vec![
+                node("named", Some("visible"), "scope::visible", true),
+                node("unnamed", None, "", false),
+            ],
+            ..FileGraphResult::default()
+        };
+
+        let snapshot =
+            file_graph(sample_file_id(), sample_language(), &result).expect("snapshot converts");
+
+        assert_eq!(snapshot.entity_ids.len(), 2);
+        assert_eq!(
+            snapshot.entities,
+            vec![graph::EntityRecord {
+                entity_id: "named".to_owned(),
+                name: "visible".to_owned(),
+                qualified_name: "scope::visible".to_owned(),
+                is_exported: true,
+            }]
+        );
     }
 
     #[test]
