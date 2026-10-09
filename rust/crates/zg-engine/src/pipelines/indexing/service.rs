@@ -287,6 +287,16 @@ impl WorkspaceIndexService {
             changes: &options.changes,
         })
         .await;
+        // Cross-file resolution runs once per pass while the graph handle is
+        // still open. A failed sweep degrades quietly: every reference stays
+        // pending and the next pass retries, so resolution must not fail an
+        // index whose zvec writes already succeeded.
+        if result.is_ok() {
+            let mut guard = graph
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _ = super::graph_resolver::resolve_pending(&mut guard);
+        }
         // Closing precedes publication: all checkpoints and native handles belong
         // to the completed generation before the active manifest can select it.
         let close_result = storage.close();

@@ -5,8 +5,10 @@ use serde_json::{Map, Value};
 pub(crate) type Metadata = Map<String, Value>;
 
 /// Direction of a one-hop query relative to its endpoint.
+/// Awaits read-side consumers (query pipelines, MCP tools); tests use it.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) enum Direction {
     In,
     Out,

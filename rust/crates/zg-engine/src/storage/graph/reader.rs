@@ -8,9 +8,11 @@ impl SqliteGraphStorage {
     /// All resolved one-hop edges in insertion order, with no result limit.
     /// `None` selects all kinds; `Some(&[])` selects none.
     /// Self-loops appear once; distinct stored call sites are preserved.
+    /// Awaits read-side consumers (query pipelines, MCP tools); tests use it.
     ///
     /// # Errors
     /// Rejects blank IDs, invalid stored data, and SQLite errors.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn neighborhood(
         &self,
         id: &str,
@@ -98,6 +100,7 @@ impl SqliteGraphStorage {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn edge_from_row(row: &Row<'_>) -> rusqlite::Result<Edge> {
     Ok(Edge {
         kind: decode_enum(row.get(0)?)?,

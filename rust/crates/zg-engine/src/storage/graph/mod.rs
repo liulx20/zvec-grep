@@ -41,6 +41,8 @@ pub(crate) type Result<T> = std::result::Result<T, Error>;
 /// Read-only opening never creates a database or modifies its schema.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum OpenMode {
+    /// Awaits read-side consumers (query pipelines, MCP tools); tests use it.
+    #[cfg_attr(not(test), allow(dead_code))]
     ReadOnly,
     ReadWrite,
 }
@@ -77,6 +79,7 @@ impl SqliteGraphStorage {
     ///
     /// # Errors
     /// Returns SQLite initialization errors.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn in_memory() -> Result<Self> {
         Self::configure(Connection::open_in_memory()?, OpenMode::ReadWrite)
     }
@@ -98,6 +101,7 @@ impl SqliteGraphStorage {
     ///
     /// # Errors
     /// Reports SQLite close failures.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn close(self) -> Result<()> {
         self.connection.close().map_err(|(_, error)| error.into())
     }

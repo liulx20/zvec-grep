@@ -2356,6 +2356,90 @@ mod tests {
         );
     }
 
+    /// Real-chain check: two TypeScript sources flow through the actual
+    /// extraction, partition, assembly, sink, and persistence path, and the
+    /// resolver connects the consumer's call to the definition's entity.
+    #[test]
+    fn real_extraction_chain_resolves_cross_file_references() {
+        use crate::storage::graph::{Direction, EdgeKind, Provenance};
+
+        let definition = TextSource {
+            relative_path: SourcePath::new("lib/helper.ts").expect("source path"),
+            formats: vec![FileFormat::TypeScript],
+            text: "export function helper(value: number): number {\n  return value + 1;\n}\n"
+                .to_owned(),
+        };
+        let consumer = TextSource {
+            relative_path: SourcePath::new("run.ts").expect("source path"),
+            formats: vec![FileFormat::TypeScript],
+            text: "import { helper } from './lib/helper';\n\nexport function run(): number {\n  return helper(1);\n}\n".to_owned(),
+        };
+        let options = crate::extraction::ChunkOptions {
+            max_chunk_chars: Some(4096),
+            chunk_overlap_chars: Some(0),
+        };
+        let graph = Mutex::new(
+            crate::storage::graph::SqliteGraphStorage::in_memory().expect("graph opens"),
+        );
+
+        let persist = |source: &TextSource, file_id: FileId| {
+            let extracted = extract_for_indexing(source, options).expect("extract typescript");
+            let language = graph_language(&source.formats);
+            let partitioned = extracted.graph;
+            let entities = bind_entities(file_id, extracted.fragments);
+            let snapshot = partitioned.map(|partitioned| {
+                let assembled = graph_assembly::assemble_file_graph(
+                    &file_id.to_string(),
+                    language,
+                    &partitioned,
+                    &entities,
+                );
+                graph_sink::file_graph(file_id, language, &assembled).expect("snapshot converts")
+            });
+            persist_file_graph(&graph, file_id, snapshot.as_ref()).expect("persist");
+        };
+        persist(&definition, FileId::new(7));
+        persist(&consumer, FileId::new(8));
+
+        let helper = lock_graph(&graph)
+            .lookup_unique("helper")
+            .expect("name index")
+            .expect("helper is workspace-unique");
+        assert_eq!(helper.file_id, 7);
+        let pending = lock_graph(&graph)
+            .list_pending_refs(100, 0)
+            .expect("pending page");
+        assert!(
+            pending
+                .refs
+                .iter()
+                .any(|stored| stored.file_id == 8 && stored.reference.name_tail == "helper"),
+            "the consumer's call must be pending before resolution"
+        );
+
+        let sweep = {
+            let mut storage = lock_graph(&graph);
+            super::super::graph_resolver::resolve_pending(&mut storage).expect("sweep")
+        };
+        assert_eq!(sweep.resolved, 1);
+        assert_eq!(sweep.stale, 0);
+
+        let inbound = lock_graph(&graph)
+            .neighborhood(&helper.entity_id, Direction::In, Some(&[EdgeKind::Calls]))
+            .expect("inbound edges");
+        assert_eq!(inbound.len(), 1, "resolved call edge: {inbound:?}");
+        assert_eq!(inbound[0].target, helper.entity_id);
+        assert_eq!(inbound[0].provenance, Provenance::WorkspaceUnique);
+        let remaining = lock_graph(&graph).list_pending_refs(100, 0).expect("page");
+        assert!(
+            remaining
+                .refs
+                .iter()
+                .all(|stored| stored.reference.name_tail != "helper"),
+            "no helper reference stays pending"
+        );
+    }
+
     #[test]
     fn binding_preserves_complete_entities_and_independent_fragment_ids() {
         let source = TextSource {

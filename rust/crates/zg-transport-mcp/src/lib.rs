@@ -2000,7 +2000,7 @@ mod tests {
 
     #[test]
     fn index_status_exposes_exact_source_bytes_without_truncation_statistics() {
-        use zg_engine::api::info::result::{IndexStats, WorkspaceIndexInfo};
+        use zg_engine::api::info::result::{IndexCompatibility, IndexStats, WorkspaceIndexInfo};
 
         let count = u64::from(u32::MAX) + 1;
         let root = test_root();
@@ -2009,6 +2009,7 @@ mod tests {
             index_path: root.join(".zvec-grep/storage"),
             root: root.clone(),
             indexed: true,
+            compatibility: IndexCompatibility::Compatible { version: 2 },
             index_policy: super::WorkspaceIndexPolicy::Enabled,
             source: super::InfoSource::Index,
             workspace_index: Some(WorkspaceIndexInfo {

@@ -1,6 +1,7 @@
 //! Workspace discovery, extraction, embedding, and storage orchestration.
 
 mod graph_assembly;
+mod graph_resolver;
 mod graph_sink;
 mod input_budget;
 mod model_progress;

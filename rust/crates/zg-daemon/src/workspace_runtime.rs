@@ -1241,10 +1241,13 @@ mod tests {
     }
 
     fn inspected_info() -> zg_engine::api::info::InfoResult {
-        use zg_engine::api::info::result::{IndexStats, InfoSource, WorkspaceIndexPolicy};
+        use zg_engine::api::info::result::{
+            IndexCompatibility, IndexStats, InfoSource, WorkspaceIndexPolicy,
+        };
         zg_engine::api::info::InfoResult {
             root: "/workspace".into(),
             indexed: true,
+            compatibility: IndexCompatibility::Compatible { version: 2 },
             index_policy: WorkspaceIndexPolicy::Enabled,
             home: "/workspace/.zvec-grep".into(),
             index_path: "/workspace/.zvec-grep/storage".into(),

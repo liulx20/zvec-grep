@@ -279,13 +279,17 @@ mod tests {
         use zg_engine::api::index::options::ScanRules;
         use zg_engine::api::info::{
             InfoResult,
-            result::{IndexStats, InfoSource, WorkspaceIndexInfo, WorkspaceIndexPolicy},
+            result::{
+                IndexCompatibility, IndexStats, InfoSource, WorkspaceIndexInfo,
+                WorkspaceIndexPolicy,
+            },
         };
 
         let count = u64::from(u32::MAX) + 1;
         let reply = super::DaemonReply::Info(Box::new(InfoResult {
             root: "/workspace".into(),
             indexed: true,
+            compatibility: IndexCompatibility::Compatible { version: 2 },
             index_policy: WorkspaceIndexPolicy::Enabled,
             home: "/workspace/.zvec-grep".into(),
             index_path: "/workspace/.zvec-grep/storage".into(),
