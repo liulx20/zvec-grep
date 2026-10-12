@@ -3,7 +3,7 @@ use rusqlite::{Connection, TransactionBehavior};
 use super::{Error, Result};
 
 // Unsupported versions require an index rebuild; no schema migration is provided.
-pub(crate) const VERSION: i64 = 13;
+pub(crate) const VERSION: i64 = 14;
 pub(crate) const APPLICATION_ID: i64 = 0x5a47_5250;
 
 pub(crate) fn validate(connection: &Connection) -> Result<()> {
@@ -61,7 +61,7 @@ CREATE TABLE edges (
     candidates TEXT CHECK (candidates IS NULL OR (json_valid(candidates) AND json_type(candidates) = 'array')),
     language TEXT NOT NULL DEFAULT 'unknown',
     name_tail TEXT NOT NULL DEFAULT '',
-    provenance TEXT CHECK (provenance IN ('file_local', 'import_bound', 'import_scoped', 'preferred_file', 'workspace_unique')),
+    provenance TEXT CHECK (provenance IN ('file_local', 'file_scoped', 'import_bound', 'import_scoped', 'preferred_file', 'workspace_unique')),
     metadata TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(metadata) AND json_type(metadata) = 'object'),
     CHECK ((status = 'resolved' AND target IS NOT NULL AND provenance IS NOT NULL)
         OR (status IN ('pending', 'failed') AND target IS NULL AND provenance IS NULL)),

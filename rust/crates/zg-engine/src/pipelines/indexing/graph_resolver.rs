@@ -6,7 +6,8 @@
 //! import specifiers resolve through [`SqliteGraphStorage::file_id_by_path`],
 //! [`SqliteGraphStorage::lookup_by_name`] narrows name candidates, ambiguous
 //! bare names resolve through [`SqliteGraphStorage::imported_file_ids`] when
-//! the file's imports pin them to one module, and
+//! the file's imports pin them to one module, `self`/`this` receiver calls
+//! bind to the one same-file declaration of the invoked member, and
 //! [`SqliteGraphStorage::apply_resolutions`] writes each batch atomically.
 
 use std::collections::HashMap;
@@ -27,19 +28,24 @@ pub(super) struct ResolutionSweep {
     pub stale: usize,
     /// Ambiguous references resolved through import scoping this sweep.
     pub import_bound: usize,
+    /// Receiver-qualified calls bound to a same-file declaration this sweep.
+    pub file_scoped: usize,
     /// Ambiguous references whose candidate sets `record_candidates` stored.
     pub candidates_recorded: usize,
 }
 
 /// Resolves pending references each sweep: relative import specifiers onto
-/// file endpoints, workspace-unique names onto their single definition, and
-/// ambiguous bare names onto the one module their file imports.
+/// file endpoints, workspace-unique names onto their single definition,
+/// ambiguous bare names onto the one module their file imports, and
+/// `self`/`this` receiver calls onto the one same-file declaration.
 ///
 /// Matching stays conservative. Same-file name hits stay pending — partition
 /// already resolved unambiguous local names, so a survivor in the same file
-/// is a receiver-typed call that needs type inference — and names that stay
-/// ambiguous after import scoping record their candidate set for consumers
-/// and later evidence rules (receiver names, arity).
+/// is a receiver-typed call that needs type inference, except where the
+/// receiver names the enclosing instance (`self`/`this`) and the file declares
+/// the member exactly once — and names that stay ambiguous after import
+/// scoping record their candidate set for consumers and later evidence
+/// rules (receiver names, arity).
 ///
 /// The entire read/resolve/writeback cycle runs under the caller's graph
 /// storage lock, matching the serialization contract of `apply_resolutions`.
@@ -84,6 +90,11 @@ pub(super) fn resolve_pending(
                 continue;
             }
             let hits = graph.lookup_by_name(&stored.reference.name_tail)?;
+            if let Some(resolution) = resolve_receiver_local(stored, &hits) {
+                resolutions.push(resolution);
+                sweep.file_scoped += 1;
+                continue;
+            }
             if let [hit] = hits.as_slice() {
                 if hit.file_id != stored.file_id {
                     resolutions.push(Resolution {
@@ -203,6 +214,35 @@ fn resolve_import_bound(
         }));
     }
     Ok(None)
+}
+
+/// Binds a `self.`/`this.` receiver call to the one entity declaring the
+/// invoked member in the same file: the receiver names the enclosing
+/// instance, so a unique same-file declaration is that member's definition.
+/// Members inherited from base classes and members declared more than once
+/// in the file stay pending.
+fn resolve_receiver_local(
+    stored: &StoredPendingRef,
+    hits: &[NameIndexEntry],
+) -> Option<Resolution> {
+    if !matches!(
+        stored.reference.receiver_name.as_deref(),
+        Some("self" | "this")
+    ) {
+        return None;
+    }
+    let local: Vec<&NameIndexEntry> = hits
+        .iter()
+        .filter(|hit| hit.file_id == stored.file_id)
+        .collect();
+    if let [hit] = local.as_slice() {
+        return Some(Resolution {
+            ref_id: stored.id,
+            target_id: hit.entity_id.clone(),
+            provenance: Provenance::FileScoped,
+        });
+    }
+    None
 }
 
 /// Directory prefix of a forward-slash workspace path; the workspace root
@@ -397,6 +437,7 @@ mod tests {
                 resolved: 1,
                 stale: 0,
                 import_bound: 0,
+                file_scoped: 0,
                 candidates_recorded: 0,
             }
         );
@@ -674,6 +715,169 @@ mod tests {
             stored.reference.candidates,
             Some(vec!["first".to_owned(), "second".to_owned()])
         );
+    }
+
+    fn graph_with_self_call(member: &str, language: &str) -> FileGraph {
+        let mut graph = empty_graph(Vec::new());
+        let mut reference = pending_reference(
+            "f9",
+            member,
+            crate::storage::graph::EdgeKind::Calls,
+            language,
+        );
+        reference.receiver_name = Some("self".to_owned());
+        graph.pending_refs.push(reference);
+        graph
+    }
+
+    #[test]
+    fn self_receiver_binds_to_unique_local_member() {
+        let mut graph = open_memory();
+        graph
+            .write_file_graph(
+                2,
+                "sibling.py",
+                &empty_graph(vec![record("other-run", "run")]),
+                &[],
+            )
+            .expect("sibling write");
+        let mut caller = empty_graph(vec![record("run-method", "run")]);
+        caller.pending_refs = graph_with_self_call("run", "python").pending_refs;
+        graph
+            .write_file_graph(9, "counter.py", &caller, &[])
+            .expect("reference write");
+
+        let sweep = resolve_pending(&mut graph).expect("sweep");
+
+        assert_eq!(sweep.scanned, 1);
+        assert_eq!(sweep.resolved, 1);
+        assert_eq!(sweep.file_scoped, 1);
+        assert_eq!(sweep.candidates_recorded, 0);
+        assert!(
+            graph
+                .list_pending_refs(10, 0)
+                .expect("pending page")
+                .refs
+                .is_empty()
+        );
+        let inbound = graph
+            .neighborhood(
+                "run-method",
+                crate::storage::graph::Direction::In,
+                Some(&[crate::storage::graph::EdgeKind::Calls]),
+            )
+            .expect("inbound calls");
+        assert_eq!(inbound.len(), 1);
+        assert_eq!(inbound[0].source, "f9");
+        assert_eq!(inbound[0].provenance, Provenance::FileScoped);
+    }
+
+    #[test]
+    fn this_receiver_binds_to_unique_local_member() {
+        let mut graph = open_memory();
+        graph
+            .write_file_graph(
+                2,
+                "sibling.ts",
+                &empty_graph(vec![record("other-step", "step")]),
+                &[],
+            )
+            .expect("sibling write");
+        let mut caller = empty_graph(vec![record("step-method", "step")]);
+        let mut reference = pending_reference(
+            "f9",
+            "step",
+            crate::storage::graph::EdgeKind::Calls,
+            "typescript",
+        );
+        reference.receiver_name = Some("this".to_owned());
+        caller.pending_refs.push(reference);
+        graph
+            .write_file_graph(9, "counter.ts", &caller, &[])
+            .expect("reference write");
+
+        let sweep = resolve_pending(&mut graph).expect("sweep");
+
+        assert_eq!(sweep.resolved, 1);
+        assert_eq!(sweep.file_scoped, 1);
+        let inbound = graph
+            .neighborhood(
+                "step-method",
+                crate::storage::graph::Direction::In,
+                Some(&[crate::storage::graph::EdgeKind::Calls]),
+            )
+            .expect("inbound calls");
+        assert_eq!(inbound.len(), 1);
+        assert_eq!(inbound[0].provenance, Provenance::FileScoped);
+    }
+
+    #[test]
+    fn same_file_duplicate_members_stay_pending() {
+        let mut graph = open_memory();
+        let mut caller = empty_graph(vec![
+            record("counter-run", "run"),
+            record("gauge-run", "run"),
+        ]);
+        caller.pending_refs = graph_with_self_call("run", "python").pending_refs;
+        graph
+            .write_file_graph(9, "counter.py", &caller, &[])
+            .expect("reference write");
+
+        let sweep = resolve_pending(&mut graph).expect("sweep");
+
+        assert_eq!(sweep.resolved, 0);
+        assert_eq!(sweep.file_scoped, 0);
+        assert_eq!(sweep.candidates_recorded, 1);
+        let page = graph.list_pending_refs(10, 0).expect("pending page");
+        let [stored] = page.refs.as_slice() else {
+            panic!("expected one pending ref");
+        };
+        let mut candidates = stored.reference.candidates.clone().unwrap_or_default();
+        candidates.sort();
+        assert_eq!(
+            candidates,
+            vec!["counter-run".to_owned(), "gauge-run".to_owned()]
+        );
+    }
+
+    #[test]
+    fn inherited_member_without_local_declaration_stays_pending() {
+        let mut graph = open_memory();
+        graph
+            .write_file_graph(
+                1,
+                "base.py",
+                &empty_graph(vec![record("base-step", "step")]),
+                &[],
+            )
+            .expect("base write");
+        graph
+            .write_file_graph(
+                2,
+                "mixin.py",
+                &empty_graph(vec![record("mixin-step", "step")]),
+                &[],
+            )
+            .expect("mixin write");
+        graph
+            .write_file_graph(
+                9,
+                "counter.py",
+                &graph_with_self_call("step", "python"),
+                &[],
+            )
+            .expect("reference write");
+
+        let sweep = resolve_pending(&mut graph).expect("sweep");
+
+        assert_eq!(sweep.resolved, 0);
+        assert_eq!(sweep.file_scoped, 0);
+        assert_eq!(sweep.candidates_recorded, 1);
+        let page = graph.list_pending_refs(10, 0).expect("pending page");
+        let [stored] = page.refs.as_slice() else {
+            panic!("expected the self call to stay pending");
+        };
+        assert_eq!(stored.reference.receiver_name, Some("self".to_owned()));
     }
 
     #[test]

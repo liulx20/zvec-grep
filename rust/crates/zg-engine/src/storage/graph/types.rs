@@ -44,6 +44,7 @@ impl EdgeKind {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Provenance {
     FileLocal,
+    FileScoped,
     ImportBound,
     ImportScoped,
     PreferredFile,
@@ -54,6 +55,7 @@ impl Provenance {
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::FileLocal => "file_local",
+            Self::FileScoped => "file_scoped",
             Self::ImportBound => "import_bound",
             Self::ImportScoped => "import_scoped",
             Self::PreferredFile => "preferred_file",
