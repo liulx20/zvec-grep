@@ -258,13 +258,15 @@ impl WorkspaceIndexService {
                 storage_path: manifest.storage_home(),
                 embeddings: models.iter().map(|model| model.info().clone()).collect(),
             })?;
-        // The graph database lives beside the zvec collections and shares
-        // their generation lifecycle: build generations carry it, resets and
-        // generation drops remove it. Opening fails loudly so schema rejects
+        // The graph database lives in its own directory beside the zvec
+        // collections and shares their generation lifecycle: build generations
+        // carry it, resets and generation drops remove it. The directory name
+        // stays domain-neutral ("graph", not "code-graph") so non-code graphs
+        // can share the same layout. Opening fails loudly so schema rejects
         // surface instead of silently skipping graph persistence.
         let graph = std::sync::Mutex::new(
             crate::storage::graph::SqliteGraphStorage::open(
-                &manifest.storage_home().join("graph.sqlite"),
+                &manifest.storage_home().join("graph").join("graph.sqlite"),
                 crate::storage::graph::OpenMode::ReadWrite,
             )
             .map_err(|error| {
