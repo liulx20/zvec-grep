@@ -4,14 +4,16 @@
 //! and file-path index, so it needs no extraction state:
 //! [`SqliteGraphStorage::list_pending_refs`] pages the backlog, relative
 //! import specifiers resolve through [`SqliteGraphStorage::file_id_by_path`],
-//! [`SqliteGraphStorage::lookup_by_name`] narrows name candidates, and
+//! [`SqliteGraphStorage::lookup_by_name`] narrows name candidates, ambiguous
+//! bare names resolve through [`SqliteGraphStorage::imported_file_ids`] when
+//! the file's imports pin them to one module, and
 //! [`SqliteGraphStorage::apply_resolutions`] writes each batch atomically.
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 
 use crate::storage::graph::{
-    EdgeKind, Provenance, Resolution, SqliteGraphStorage, StoredPendingRef,
+    EdgeKind, NameIndexEntry, Provenance, Resolution, SqliteGraphStorage, StoredPendingRef,
 };
 
 /// Outcome of one resolution sweep.
@@ -23,18 +25,21 @@ pub(super) struct ResolutionSweep {
     pub resolved: usize,
     /// Proposals that no longer matched a pending row.
     pub stale: usize,
+    /// Ambiguous references resolved through import scoping this sweep.
+    pub import_bound: usize,
     /// Ambiguous references whose candidate sets `record_candidates` stored.
     pub candidates_recorded: usize,
 }
 
 /// Resolves pending references each sweep: relative import specifiers onto
-/// file endpoints, and workspace-unique names onto their single definition.
+/// file endpoints, workspace-unique names onto their single definition, and
+/// ambiguous bare names onto the one module their file imports.
 ///
 /// Matching stays conservative. Same-file name hits stay pending — partition
 /// already resolved unambiguous local names, so a survivor in the same file
-/// is a receiver-typed call that needs type inference — and ambiguous names
-/// stay pending but record their candidate set for consumers and later
-/// evidence rules (receiver names, arity, import scoping of bare names).
+/// is a receiver-typed call that needs type inference — and names that stay
+/// ambiguous after import scoping record their candidate set for consumers
+/// and later evidence rules (receiver names, arity).
 ///
 /// The entire read/resolve/writeback cycle runs under the caller's graph
 /// storage lock, matching the serialization contract of `apply_resolutions`.
@@ -50,12 +55,31 @@ pub(super) fn resolve_pending(
     let mut resolutions = Vec::new();
     let mut candidate_sets: Vec<(i64, Vec<String>)> = Vec::new();
     let mut importing_paths: HashMap<u32, Option<String>> = HashMap::new();
+    let mut importing_files: HashMap<u32, Vec<u32>> = HashMap::new();
     let mut cursor = 0;
     loop {
         let page = graph.list_pending_refs(1000, cursor)?;
         sweep.scanned += page.refs.len();
         for stored in &page.refs {
             if let Some(resolution) = resolve_import(graph, stored, &mut importing_paths)? {
+                // The batch applies after the loop, so fold this sweep's fresh
+                // import targets into the in-memory scope for bare names.
+                if let Some(target_file) = resolution
+                    .target_id
+                    .strip_prefix('f')
+                    .and_then(|digits| digits.parse::<u32>().ok())
+                {
+                    if !importing_files.contains_key(&stored.file_id) {
+                        importing_files
+                            .insert(stored.file_id, graph.imported_file_ids(stored.file_id)?);
+                    }
+                    let modules = importing_files
+                        .get_mut(&stored.file_id)
+                        .expect("import scope just ensured");
+                    if !modules.contains(&target_file) {
+                        modules.push(target_file);
+                    }
+                }
                 resolutions.push(resolution);
                 continue;
             }
@@ -69,6 +93,13 @@ pub(super) fn resolve_pending(
                     });
                 }
             } else if hits.len() > 1 {
+                if let Some(resolution) =
+                    resolve_import_bound(graph, stored, &hits, &mut importing_files)?
+                {
+                    resolutions.push(resolution);
+                    sweep.import_bound += 1;
+                    continue;
+                }
                 candidate_sets.push((
                     stored.id,
                     hits.into_iter().map(|hit| hit.entity_id).collect(),
@@ -126,6 +157,50 @@ fn resolve_import(
                 provenance: Provenance::ImportScoped,
             }));
         }
+    }
+    Ok(None)
+}
+
+/// Resolves an ambiguous bare-name reference through the file's imports:
+/// when the imports pin the name to exactly one module and that module
+/// declares it exactly once, the reference targets that definition.
+/// Receiver-typed calls wait for receiver inference, and a local definition
+/// shadows any import binding, so both stay with the general ambiguity path.
+///
+/// # Errors
+/// Propagates graph storage failures; an unresolvable reference is `None`.
+fn resolve_import_bound(
+    graph: &SqliteGraphStorage,
+    stored: &StoredPendingRef,
+    hits: &[NameIndexEntry],
+    importing_files: &mut HashMap<u32, Vec<u32>>,
+) -> crate::storage::graph::Result<Option<Resolution>> {
+    let reference = &stored.reference;
+    if reference.receiver_name.is_some()
+        || !matches!(
+            reference.reference_kind,
+            EdgeKind::Calls | EdgeKind::Extends | EdgeKind::Implements
+        )
+        || hits.iter().any(|hit| hit.file_id == stored.file_id)
+    {
+        return Ok(None);
+    }
+    let modules = match importing_files.entry(stored.file_id) {
+        Entry::Occupied(entry) => entry.get().clone(),
+        Entry::Vacant(entry) => entry
+            .insert(graph.imported_file_ids(stored.file_id)?)
+            .clone(),
+    };
+    let scoped: Vec<&NameIndexEntry> = hits
+        .iter()
+        .filter(|hit| modules.contains(&hit.file_id))
+        .collect();
+    if let [hit] = scoped.as_slice() {
+        return Ok(Some(Resolution {
+            ref_id: stored.id,
+            target_id: hit.entity_id.clone(),
+            provenance: Provenance::ImportBound,
+        }));
     }
     Ok(None)
 }
@@ -274,6 +349,26 @@ mod tests {
         }
     }
 
+    fn graph_with_import_and_call(specifier: &str, call: &str) -> FileGraph {
+        FileGraph {
+            pending_refs: vec![
+                pending_reference(
+                    "f9",
+                    specifier,
+                    crate::storage::graph::EdgeKind::Imports,
+                    "typescript",
+                ),
+                pending_reference(
+                    "f9",
+                    call,
+                    crate::storage::graph::EdgeKind::Calls,
+                    "typescript",
+                ),
+            ],
+            ..empty_graph(Vec::new())
+        }
+    }
+
     fn open_memory() -> SqliteGraphStorage {
         SqliteGraphStorage::in_memory().expect("graph opens")
     }
@@ -301,6 +396,7 @@ mod tests {
                 scanned: 1,
                 resolved: 1,
                 stale: 0,
+                import_bound: 0,
                 candidates_recorded: 0,
             }
         );
@@ -386,6 +482,290 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn ambiguous_bare_names_resolve_through_imported_modules() {
+        let mut graph = open_memory();
+        graph
+            .write_file_graph(
+                1,
+                "first.ts",
+                &empty_graph(vec![record("first", "helper")]),
+                &[],
+            )
+            .expect("first write");
+        graph
+            .write_file_graph(
+                2,
+                "second.ts",
+                &empty_graph(vec![record("second", "helper")]),
+                &[],
+            )
+            .expect("second write");
+        graph
+            .write_file_graph(
+                9,
+                "run.ts",
+                &graph_with_import_and_call("./first", "helper"),
+                &[],
+            )
+            .expect("reference write");
+
+        let sweep = resolve_pending(&mut graph).expect("sweep");
+
+        assert_eq!(sweep.scanned, 2);
+        assert_eq!(sweep.resolved, 2);
+        assert_eq!(sweep.stale, 0);
+        assert_eq!(sweep.import_bound, 1);
+        assert_eq!(sweep.candidates_recorded, 0);
+        assert!(
+            graph
+                .list_pending_refs(10, 0)
+                .expect("pending page")
+                .refs
+                .is_empty()
+        );
+        let inbound = graph
+            .neighborhood(
+                "first",
+                crate::storage::graph::Direction::In,
+                Some(&[crate::storage::graph::EdgeKind::Calls]),
+            )
+            .expect("inbound calls");
+        assert_eq!(inbound.len(), 1);
+        assert_eq!(inbound[0].source, "f9");
+        assert_eq!(inbound[0].provenance, Provenance::ImportBound);
+    }
+
+    #[test]
+    fn import_bound_requires_one_declaring_module() {
+        let mut graph = open_memory();
+        graph
+            .write_file_graph(
+                1,
+                "first.ts",
+                &empty_graph(vec![record("first", "helper")]),
+                &[],
+            )
+            .expect("first write");
+        graph
+            .write_file_graph(
+                2,
+                "second.ts",
+                &empty_graph(vec![record("second", "helper")]),
+                &[],
+            )
+            .expect("second write");
+        graph
+            .write_file_graph(
+                9,
+                "run.ts",
+                &FileGraph {
+                    pending_refs: vec![
+                        pending_reference(
+                            "f9",
+                            "./first",
+                            crate::storage::graph::EdgeKind::Imports,
+                            "typescript",
+                        ),
+                        pending_reference(
+                            "f9",
+                            "./second",
+                            crate::storage::graph::EdgeKind::Imports,
+                            "typescript",
+                        ),
+                        pending_reference(
+                            "f9",
+                            "helper",
+                            crate::storage::graph::EdgeKind::Calls,
+                            "typescript",
+                        ),
+                    ],
+                    ..empty_graph(Vec::new())
+                },
+                &[],
+            )
+            .expect("reference write");
+
+        let sweep = resolve_pending(&mut graph).expect("sweep");
+
+        assert_eq!(sweep.resolved, 2);
+        assert_eq!(sweep.import_bound, 0);
+        assert_eq!(sweep.candidates_recorded, 1);
+        let page = graph.list_pending_refs(10, 0).expect("pending page");
+        let [stored] = page.refs.as_slice() else {
+            panic!("expected one pending ref");
+        };
+        assert_eq!(
+            stored.reference.candidates,
+            Some(vec!["first".to_owned(), "second".to_owned()])
+        );
+    }
+
+    #[test]
+    fn local_definitions_shadow_imported_names() {
+        let mut graph = open_memory();
+        graph
+            .write_file_graph(
+                1,
+                "first.ts",
+                &empty_graph(vec![record("first", "helper")]),
+                &[],
+            )
+            .expect("first write");
+        graph
+            .write_file_graph(
+                9,
+                "run.ts",
+                &FileGraph {
+                    entity_ids: vec!["local".to_owned()],
+                    entities: vec![record("local", "helper")],
+                    ..graph_with_import_and_call("./first", "helper")
+                },
+                &[],
+            )
+            .expect("reference write");
+
+        let sweep = resolve_pending(&mut graph).expect("sweep");
+
+        assert_eq!(sweep.import_bound, 0);
+        let page = graph.list_pending_refs(10, 0).expect("pending page");
+        let [stored] = page.refs.as_slice() else {
+            panic!("expected the call to stay pending");
+        };
+        assert_eq!(stored.reference.name_tail, "helper");
+    }
+
+    #[test]
+    fn receiver_calls_wait_for_receiver_inference() {
+        let mut graph = open_memory();
+        graph
+            .write_file_graph(
+                1,
+                "first.ts",
+                &empty_graph(vec![record("first", "helper")]),
+                &[],
+            )
+            .expect("first write");
+        graph
+            .write_file_graph(
+                2,
+                "second.ts",
+                &empty_graph(vec![record("second", "helper")]),
+                &[],
+            )
+            .expect("second write");
+        let mut receiver_call = graph_with_import_and_call("./first", "helper");
+        receiver_call.pending_refs[1].receiver_name = Some("utils".to_owned());
+        graph
+            .write_file_graph(9, "run.ts", &receiver_call, &[])
+            .expect("reference write");
+
+        let sweep = resolve_pending(&mut graph).expect("sweep");
+
+        assert_eq!(sweep.import_bound, 0);
+        let page = graph.list_pending_refs(10, 0).expect("pending page");
+        let [stored] = page.refs.as_slice() else {
+            panic!("expected the receiver call to stay pending");
+        };
+        assert_eq!(stored.reference.receiver_name, Some("utils".to_owned()));
+        assert_eq!(
+            stored.reference.candidates,
+            Some(vec!["first".to_owned(), "second".to_owned()])
+        );
+    }
+
+    #[test]
+    fn entity_targeted_imports_scope_bare_names() {
+        let mut graph = open_memory();
+        graph
+            .write_file_graph(
+                1,
+                "first.ts",
+                &empty_graph(vec![record("first", "helper")]),
+                &[],
+            )
+            .expect("first write");
+        graph
+            .write_file_graph(
+                2,
+                "second.ts",
+                &empty_graph(vec![record("second", "helper")]),
+                &[],
+            )
+            .expect("second write");
+        graph
+            .write_file_graph(
+                9,
+                "run.ts",
+                &graph_with_import_and_call("first.helper", "helper"),
+                &[],
+            )
+            .expect("reference write");
+        // Name-unique import resolution targeted the entity, mirroring R1.
+        let mut refs = graph.list_pending_refs(10, 0).expect("pending page").refs;
+        let import = refs.remove(0);
+        graph
+            .apply_resolutions(&[Resolution {
+                ref_id: import.id,
+                target_id: "first".to_owned(),
+                provenance: Provenance::WorkspaceUnique,
+            }])
+            .expect("entity-targeted import");
+
+        let sweep = resolve_pending(&mut graph).expect("sweep");
+
+        assert_eq!(sweep.resolved, 1);
+        assert_eq!(sweep.import_bound, 1);
+        let inbound = graph
+            .neighborhood(
+                "first",
+                crate::storage::graph::Direction::In,
+                Some(&[crate::storage::graph::EdgeKind::Calls]),
+            )
+            .expect("inbound calls");
+        assert_eq!(inbound.len(), 1);
+        assert_eq!(inbound[0].provenance, Provenance::ImportBound);
+    }
+
+    #[test]
+    fn import_bound_covers_extends_references() {
+        let mut graph = open_memory();
+        graph
+            .write_file_graph(
+                1,
+                "first.ts",
+                &empty_graph(vec![record("first", "Base")]),
+                &[],
+            )
+            .expect("first write");
+        graph
+            .write_file_graph(
+                2,
+                "second.ts",
+                &empty_graph(vec![record("second", "Base")]),
+                &[],
+            )
+            .expect("second write");
+        let mut inheritance = graph_with_import_and_call("./first", "Base");
+        inheritance.pending_refs[1].reference_kind = crate::storage::graph::EdgeKind::Extends;
+        graph
+            .write_file_graph(9, "run.ts", &inheritance, &[])
+            .expect("reference write");
+
+        let sweep = resolve_pending(&mut graph).expect("sweep");
+
+        assert_eq!(sweep.import_bound, 1);
+        let inbound = graph
+            .neighborhood(
+                "first",
+                crate::storage::graph::Direction::In,
+                Some(&[crate::storage::graph::EdgeKind::Extends]),
+            )
+            .expect("inbound extends");
+        assert_eq!(inbound.len(), 1);
+        assert_eq!(inbound[0].provenance, Provenance::ImportBound);
     }
 
     #[test]

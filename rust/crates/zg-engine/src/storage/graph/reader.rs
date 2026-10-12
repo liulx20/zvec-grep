@@ -133,6 +133,47 @@ impl SqliteGraphStorage {
             None => None,
         })
     }
+
+    /// Files whose modules one file's resolved imports point at, deduplicated:
+    /// `f{file_id}` endpoints from import-scoped resolution plus the owning
+    /// files of name-unique entity targets. This is the import scope that
+    /// anchors bare-name resolution.
+    ///
+    /// # Errors
+    /// Propagates SQLite errors.
+    pub(crate) fn imported_file_ids(&self, file_id: u32) -> Result<Vec<u32>> {
+        let mut statement = self.connection.prepare(
+            "SELECT DISTINCT e.target, n.file_id FROM edges e
+             LEFT JOIN entities n ON n.entity_id = e.target
+             WHERE e.file_id = ?1 AND e.kind = 'imports' AND e.status = 'resolved'
+               AND e.target IS NOT NULL",
+        )?;
+        let rows = statement.query_map([file_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?))
+        })?;
+        let mut ids = Vec::new();
+        for row in rows {
+            let (target, owner) = row?;
+            if let Some(id) = parse_file_endpoint(&target) {
+                ids.push(id);
+            } else if let Some(owner) = owner.and_then(|owner| u32::try_from(owner).ok()) {
+                ids.push(owner);
+            }
+        }
+        ids.sort_unstable();
+        ids.dedup();
+        Ok(ids)
+    }
+}
+
+/// A file endpoint `f{file_id}`. Entity IDs are long hex digests whose
+/// digits-only tails of bounded length never collide with this shape.
+fn parse_file_endpoint(target: &str) -> Option<u32> {
+    let digits = target.strip_prefix('f')?;
+    if digits.is_empty() || digits.len() > 10 || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse().ok()
 }
 
 #[cfg_attr(not(test), allow(dead_code))]

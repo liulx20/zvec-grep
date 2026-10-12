@@ -3,7 +3,7 @@ use rusqlite::{Connection, TransactionBehavior};
 use super::{Error, Result};
 
 // Unsupported versions require an index rebuild; no schema migration is provided.
-pub(crate) const VERSION: i64 = 12;
+pub(crate) const VERSION: i64 = 13;
 pub(crate) const APPLICATION_ID: i64 = 0x5a47_5250;
 
 pub(crate) fn validate(connection: &Connection) -> Result<()> {
@@ -61,7 +61,7 @@ CREATE TABLE edges (
     candidates TEXT CHECK (candidates IS NULL OR (json_valid(candidates) AND json_type(candidates) = 'array')),
     language TEXT NOT NULL DEFAULT 'unknown',
     name_tail TEXT NOT NULL DEFAULT '',
-    provenance TEXT CHECK (provenance IN ('file_local', 'import_scoped', 'preferred_file', 'workspace_unique')),
+    provenance TEXT CHECK (provenance IN ('file_local', 'import_bound', 'import_scoped', 'preferred_file', 'workspace_unique')),
     metadata TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(metadata) AND json_type(metadata) = 'object'),
     CHECK ((status = 'resolved' AND target IS NOT NULL AND provenance IS NOT NULL)
         OR (status IN ('pending', 'failed') AND target IS NULL AND provenance IS NULL)),
@@ -90,6 +90,9 @@ CREATE TABLE entities (
     PRIMARY KEY (file_id, entity_id)
 ) STRICT;
 CREATE INDEX entities_name ON entities(name);
+-- Backs joining import-edge entity targets onto their owning file for the
+-- resolver's import scope; the composite primary key cannot serve this lookup.
+CREATE INDEX entities_entity ON entities(entity_id);
 -- Workspace-relative paths keyed by file, consumed by the resolver to map
 -- import specifiers onto file endpoints. Paths use forward slashes on every
 -- platform; rows follow the file snapshot lifecycle.

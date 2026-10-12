@@ -35,6 +35,19 @@ fn reference(owner: &str, name: &str) -> PendingRef {
     }
 }
 
+fn import_reference(owner: &str, specifier: &str) -> PendingRef {
+    PendingRef {
+        receiver_name: None,
+        reference_kind: EdgeKind::Imports,
+        arity: None,
+        language: "typescript".into(),
+        line: 1,
+        col: 0,
+        metadata: Metadata::new(),
+        ..reference(owner, specifier)
+    }
+}
+
 fn graph(ids: &[&str], edges: Vec<Edge>, refs: Vec<PendingRef>) -> FileGraph {
     FileGraph {
         entity_ids: ids.iter().map(|id| (*id).into()).collect(),
@@ -759,6 +772,72 @@ fn record_candidates_is_atomic_and_skips_non_pending_rows() {
     assert!(db.record_candidates(&[(0, vec!["x".into()])]).is_err());
     assert!(db.record_candidates(&[(second.id, Vec::new())]).is_err());
     assert!(db.record_candidates(&[]).is_ok());
+}
+
+#[test]
+fn imported_file_ids_merge_endpoint_and_entity_targets() {
+    let mut db = SqliteGraphStorage::in_memory().expect("open");
+    let mut one = graph(&["first"], vec![], vec![]);
+    one.entities = vec![record("first", "helper")];
+    db.write_file_graph(1, "one.ts", &one, &[])
+        .expect("write one");
+    // An entity whose ID collides with the file-endpoint spelling: the
+    // endpoint interpretation must win over the entity's owning file.
+    let mut two = graph(&["f9"], vec![], vec![]);
+    two.entities = vec![record("f9", "colliding")];
+    db.write_file_graph(2, "two.ts", &two, &[])
+        .expect("write two");
+    db.write_file_graph(4, "four.ts", &graph(&["x"], vec![], vec![]), &[])
+        .expect("write four");
+    db.write_file_graph(
+        9,
+        "nine.ts",
+        &graph(
+            &["a"],
+            vec![],
+            vec![
+                import_reference("f9", "./four"),
+                import_reference("f9", "./one"),
+                import_reference("f9", "./two"),
+            ],
+        ),
+        &[],
+    )
+    .expect("write nine");
+    let ids: Vec<i64> = db
+        .list_pending_refs(10, 0)
+        .expect("refs")
+        .refs
+        .iter()
+        .map(|reference| reference.id)
+        .collect();
+    db.apply_resolutions(&[
+        Resolution {
+            ref_id: ids[0],
+            target_id: "f4".into(),
+            provenance: Provenance::ImportScoped,
+        },
+        Resolution {
+            ref_id: ids[1],
+            target_id: "first".into(),
+            provenance: Provenance::WorkspaceUnique,
+        },
+        Resolution {
+            ref_id: ids[2],
+            target_id: "f9".into(),
+            provenance: Provenance::ImportScoped,
+        },
+    ])
+    .expect("resolve imports");
+
+    // File endpoints from import-scoped targets, the owning file of the
+    // entity target, and the endpoint reading of the colliding ID.
+    assert_eq!(db.imported_file_ids(9).expect("scope"), vec![1, 4, 9]);
+    assert!(
+        db.imported_file_ids(4)
+            .expect("file without imports")
+            .is_empty()
+    );
 }
 
 #[test]
