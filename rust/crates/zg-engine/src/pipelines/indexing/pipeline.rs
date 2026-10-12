@@ -2655,6 +2655,94 @@ mod tests {
         );
     }
 
+    /// Real-chain check for qualified receivers: two classes declare the
+    /// same static member name, and a `Class.member()` call binds through
+    /// the entity's qualified name instead of leaving the ambiguity pending.
+    #[test]
+    fn real_extraction_chain_binds_qualified_calls_through_names() {
+        use crate::storage::graph::{Direction, EdgeKind, Provenance};
+
+        let definition = TextSource {
+            relative_path: SourcePath::new("codegraph.ts").expect("source path"),
+            formats: vec![FileFormat::TypeScript],
+            text: "export class CodeGraph {\n  static init(): number {\n    return 1;\n  }\n}\n"
+                .to_owned(),
+        };
+        let sibling = TextSource {
+            relative_path: SourcePath::new("registry.ts").expect("source path"),
+            formats: vec![FileFormat::TypeScript],
+            text: "export class Registry {\n  static init(): number {\n    return 0;\n  }\n}\n"
+                .to_owned(),
+        };
+        let consumer = TextSource {
+            relative_path: SourcePath::new("run.ts").expect("source path"),
+            formats: vec![FileFormat::TypeScript],
+            text: "import { CodeGraph } from './codegraph';\n\nexport function main(): number {\n  return CodeGraph.init();\n}\n".to_owned(),
+        };
+        let options = crate::extraction::ChunkOptions {
+            max_chunk_chars: Some(4096),
+            chunk_overlap_chars: Some(0),
+        };
+        let graph = Mutex::new(
+            crate::storage::graph::SqliteGraphStorage::in_memory().expect("graph opens"),
+        );
+
+        let persist = |source: &TextSource, file_id: FileId| {
+            let extracted = extract_for_indexing(source, options).expect("extract typescript");
+            let language = graph_language(&source.formats);
+            let partitioned = extracted.graph;
+            let entities = bind_entities(file_id, extracted.fragments);
+            let snapshot = partitioned.map(|partitioned| {
+                let assembled = graph_assembly::assemble_file_graph(
+                    &file_id.to_string(),
+                    language,
+                    &partitioned,
+                    &entities,
+                );
+                graph_sink::file_graph(file_id, language, &assembled).expect("snapshot converts")
+            });
+            persist_file_graph(
+                &graph,
+                file_id,
+                source.relative_path.as_path(),
+                snapshot.as_ref(),
+            )
+            .expect("persist");
+        };
+        persist(&definition, FileId::new(7));
+        persist(&sibling, FileId::new(8));
+        persist(&consumer, FileId::new(9));
+
+        let hits = lock_graph(&graph)
+            .lookup_by_name("init")
+            .expect("name index");
+        assert_eq!(hits.len(), 2, "init is ambiguous across classes");
+
+        let sweep = {
+            let mut storage = lock_graph(&graph);
+            super::super::graph_resolver::resolve_pending(&mut storage).expect("sweep")
+        };
+        assert_eq!(sweep.resolved, 2);
+        assert_eq!(sweep.stale, 0);
+        assert_eq!(sweep.preferred_file, 1);
+
+        let target = hits
+            .iter()
+            .find(|hit| hit.file_id == 7)
+            .expect("definition hit");
+        let inbound = lock_graph(&graph)
+            .neighborhood(&target.entity_id, Direction::In, Some(&[EdgeKind::Calls]))
+            .expect("inbound edges");
+        assert_eq!(inbound.len(), 1, "qualified call edge: {inbound:?}");
+        assert_eq!(inbound[0].provenance, Provenance::PreferredFile);
+        let remaining = lock_graph(&graph).list_pending_refs(100, 0).expect("page");
+        assert!(
+            remaining.refs.is_empty(),
+            "every reference resolves: {:?}",
+            remaining.refs
+        );
+    }
+
     #[test]
     fn binding_preserves_complete_entities_and_independent_fragment_ids() {
         let source = TextSource {

@@ -7,7 +7,9 @@
 //! [`SqliteGraphStorage::lookup_by_name`] narrows name candidates, ambiguous
 //! bare names resolve through [`SqliteGraphStorage::imported_file_ids`] when
 //! the file's imports pin them to one module, `self`/`this` receiver calls
-//! bind to the one same-file declaration of the invoked member, and
+//! bind to the one same-file declaration of the invoked member, qualified
+//! `Class::method` receivers bind to the entity whose `qualified_name`
+//! spells the same path, and
 //! [`SqliteGraphStorage::apply_resolutions`] writes each batch atomically.
 
 use std::collections::HashMap;
@@ -30,14 +32,18 @@ pub(super) struct ResolutionSweep {
     pub import_bound: usize,
     /// Receiver-qualified calls bound to a same-file declaration this sweep.
     pub file_scoped: usize,
+    /// Qualified references bound through `qualified_name` this sweep.
+    pub preferred_file: usize,
     /// Ambiguous references whose candidate sets `record_candidates` stored.
     pub candidates_recorded: usize,
 }
 
 /// Resolves pending references each sweep: relative import specifiers onto
 /// file endpoints, workspace-unique names onto their single definition,
-/// ambiguous bare names onto the one module their file imports, and
-/// `self`/`this` receiver calls onto the one same-file declaration.
+/// ambiguous bare names onto the one module their file imports,
+/// `self`/`this` receiver calls onto the one same-file declaration, and
+/// qualified `Class::method` receivers onto the entity declaring that
+/// exact `qualified_name`.
 ///
 /// Matching stays conservative. Same-file name hits stay pending — partition
 /// already resolved unambiguous local names, so a survivor in the same file
@@ -93,6 +99,11 @@ pub(super) fn resolve_pending(
             if let Some(resolution) = resolve_receiver_local(stored, &hits) {
                 resolutions.push(resolution);
                 sweep.file_scoped += 1;
+                continue;
+            }
+            if let Some(resolution) = resolve_qualified_name(stored, &hits) {
+                resolutions.push(resolution);
+                sweep.preferred_file += 1;
                 continue;
             }
             if let [hit] = hits.as_slice() {
@@ -240,6 +251,38 @@ fn resolve_receiver_local(
             ref_id: stored.id,
             target_id: hit.entity_id.clone(),
             provenance: Provenance::FileScoped,
+        });
+    }
+    None
+}
+
+/// Binds a qualified call (`Class::method()`, including receivers spelled as
+/// full `crate::path::Class` paths reduced to their last `::` segment) to the
+/// entity whose `qualified_name` spells exactly that scope and member. The
+/// qualified name carries the declaring scope, so a unique match resolves
+/// even when the short member name is ambiguous workspace-wide. Duplicate
+/// `qualified_name` declarations and instance-style dotted receivers, which
+/// never spell a `::`-scoped path, stay pending.
+fn resolve_qualified_name(
+    stored: &StoredPendingRef,
+    hits: &[NameIndexEntry],
+) -> Option<Resolution> {
+    let reference = &stored.reference;
+    if reference.reference_kind != EdgeKind::Calls {
+        return None;
+    }
+    let receiver = reference.receiver_name.as_deref()?;
+    let scope = receiver.rsplit("::").next().unwrap_or(receiver);
+    let expected = format!("{scope}::{}", reference.name_tail);
+    let matches: Vec<&NameIndexEntry> = hits
+        .iter()
+        .filter(|hit| hit.qualified_name == expected)
+        .collect();
+    if let [hit] = matches.as_slice() {
+        return Some(Resolution {
+            ref_id: stored.id,
+            target_id: hit.entity_id.clone(),
+            provenance: Provenance::PreferredFile,
         });
     }
     None
@@ -438,6 +481,7 @@ mod tests {
                 stale: 0,
                 import_bound: 0,
                 file_scoped: 0,
+                preferred_file: 0,
                 candidates_recorded: 0,
             }
         );
@@ -878,6 +922,209 @@ mod tests {
             panic!("expected the self call to stay pending");
         };
         assert_eq!(stored.reference.receiver_name, Some("self".to_owned()));
+    }
+
+    fn qualified_record(entity_id: &str, qualified_name: &str) -> EntityRecord {
+        EntityRecord {
+            entity_id: entity_id.to_owned(),
+            name: qualified_name
+                .rsplit("::")
+                .next()
+                .unwrap_or_default()
+                .to_owned(),
+            qualified_name: qualified_name.to_owned(),
+            is_exported: true,
+        }
+    }
+
+    fn graph_with_qualified_call(receiver: &str, member: &str) -> FileGraph {
+        let mut graph = empty_graph(Vec::new());
+        let mut reference =
+            pending_reference("f9", member, crate::storage::graph::EdgeKind::Calls, "rust");
+        reference.receiver_name = Some(receiver.to_owned());
+        graph.pending_refs.push(reference);
+        graph
+    }
+
+    #[test]
+    fn qualified_static_calls_bind_through_qualified_name() {
+        let mut graph = open_memory();
+        graph
+            .write_file_graph(
+                1,
+                "tables.rs",
+                &empty_graph(vec![qualified_record("tables-default", "Tables::default")]),
+                &[],
+            )
+            .expect("tables write");
+        graph
+            .write_file_graph(
+                2,
+                "gauges.rs",
+                &empty_graph(vec![qualified_record("gauges-default", "Gauges::default")]),
+                &[],
+            )
+            .expect("gauges write");
+        graph
+            .write_file_graph(
+                9,
+                "run.rs",
+                &graph_with_qualified_call("Tables", "default"),
+                &[],
+            )
+            .expect("reference write");
+
+        let sweep = resolve_pending(&mut graph).expect("sweep");
+
+        assert_eq!(sweep.scanned, 1);
+        assert_eq!(sweep.resolved, 1);
+        assert_eq!(sweep.preferred_file, 1);
+        assert_eq!(sweep.candidates_recorded, 0);
+        assert!(
+            graph
+                .list_pending_refs(10, 0)
+                .expect("pending page")
+                .refs
+                .is_empty()
+        );
+        let inbound = graph
+            .neighborhood(
+                "tables-default",
+                crate::storage::graph::Direction::In,
+                Some(&[crate::storage::graph::EdgeKind::Calls]),
+            )
+            .expect("inbound calls");
+        assert_eq!(inbound.len(), 1);
+        assert_eq!(inbound[0].source, "f9");
+        assert_eq!(inbound[0].provenance, Provenance::PreferredFile);
+    }
+
+    #[test]
+    fn crate_path_receivers_match_the_last_segment() {
+        let mut graph = open_memory();
+        graph
+            .write_file_graph(
+                1,
+                "tables.rs",
+                &empty_graph(vec![qualified_record("tables-default", "Tables::default")]),
+                &[],
+            )
+            .expect("tables write");
+        graph
+            .write_file_graph(
+                2,
+                "gauges.rs",
+                &empty_graph(vec![qualified_record("gauges-default", "Gauges::default")]),
+                &[],
+            )
+            .expect("gauges write");
+        graph
+            .write_file_graph(
+                9,
+                "run.rs",
+                &graph_with_qualified_call("crate::kernel::Tables", "default"),
+                &[],
+            )
+            .expect("reference write");
+
+        let sweep = resolve_pending(&mut graph).expect("sweep");
+
+        assert_eq!(sweep.resolved, 1);
+        assert_eq!(sweep.preferred_file, 1);
+        let inbound = graph
+            .neighborhood(
+                "tables-default",
+                crate::storage::graph::Direction::In,
+                Some(&[crate::storage::graph::EdgeKind::Calls]),
+            )
+            .expect("inbound calls");
+        assert_eq!(inbound.len(), 1);
+        assert_eq!(inbound[0].provenance, Provenance::PreferredFile);
+    }
+
+    #[test]
+    fn duplicate_qualified_names_stay_pending() {
+        let mut graph = open_memory();
+        graph
+            .write_file_graph(
+                1,
+                "first.rs",
+                &empty_graph(vec![qualified_record("first-default", "Tables::default")]),
+                &[],
+            )
+            .expect("first write");
+        graph
+            .write_file_graph(
+                2,
+                "second.rs",
+                &empty_graph(vec![qualified_record("second-default", "Tables::default")]),
+                &[],
+            )
+            .expect("second write");
+        graph
+            .write_file_graph(
+                9,
+                "run.rs",
+                &graph_with_qualified_call("Tables", "default"),
+                &[],
+            )
+            .expect("reference write");
+
+        let sweep = resolve_pending(&mut graph).expect("sweep");
+
+        assert_eq!(sweep.resolved, 0);
+        assert_eq!(sweep.preferred_file, 0);
+        assert_eq!(sweep.candidates_recorded, 1);
+        let page = graph.list_pending_refs(10, 0).expect("pending page");
+        let [stored] = page.refs.as_slice() else {
+            panic!("expected one pending ref");
+        };
+        let mut candidates = stored.reference.candidates.clone().unwrap_or_default();
+        candidates.sort();
+        assert_eq!(
+            candidates,
+            vec!["first-default".to_owned(), "second-default".to_owned()]
+        );
+    }
+
+    #[test]
+    fn dotted_instance_receivers_stay_pending() {
+        let mut graph = open_memory();
+        graph
+            .write_file_graph(
+                1,
+                "tables.rs",
+                &empty_graph(vec![qualified_record("tables-default", "Tables::default")]),
+                &[],
+            )
+            .expect("tables write");
+        graph
+            .write_file_graph(
+                2,
+                "gauges.rs",
+                &empty_graph(vec![qualified_record("gauges-default", "Gauges::default")]),
+                &[],
+            )
+            .expect("gauges write");
+        let mut graph_with_call = graph_with_qualified_call("service.queue", "default");
+        graph_with_call.pending_refs[0].language = "typescript".to_owned();
+        graph
+            .write_file_graph(9, "run.ts", &graph_with_call, &[])
+            .expect("reference write");
+
+        let sweep = resolve_pending(&mut graph).expect("sweep");
+
+        assert_eq!(sweep.resolved, 0);
+        assert_eq!(sweep.preferred_file, 0);
+        assert_eq!(sweep.candidates_recorded, 1);
+        let page = graph.list_pending_refs(10, 0).expect("pending page");
+        let [stored] = page.refs.as_slice() else {
+            panic!("expected the dotted call to stay pending");
+        };
+        assert_eq!(
+            stored.reference.receiver_name,
+            Some("service.queue".to_owned())
+        );
     }
 
     #[test]
