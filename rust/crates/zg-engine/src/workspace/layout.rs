@@ -5,7 +5,10 @@ use std::{
 
 use crate::{EngineError, storage::spi::WorkspaceIndexStorageFactory};
 
-use super::manifest::{delete_workspace_manifest, workspace_manifest_path};
+use super::manifest::{
+    CURRENT_MANIFEST_VERSION, delete_workspace_manifest, read_manifest_version,
+    workspace_manifest_path,
+};
 
 pub(crate) const ZVEC_GREP_DIRECTORY: &str = ".zvec-grep";
 const WORKSPACE_INDEX_DIRECTORY: &str = "storage";
@@ -54,7 +57,11 @@ pub(crate) fn find_nearest_workspace(
     start: &Path,
 ) -> Result<Option<WorkspaceIndexLocation>, EngineError> {
     find_nearest_workspace_location(start, |location| {
-        Ok(location.manifest_path.is_file() || super::build::has_build(&location.home))
+        // Adopt only manifests written by this build: the Node implementation
+        // pins its own schema and its workspaces must stay untouched.
+        let adopted = location.manifest_path.is_file()
+            && read_manifest_version(&location.home)? == Some(CURRENT_MANIFEST_VERSION);
+        Ok(adopted || super::build::has_build(&location.home))
     })
 }
 
@@ -120,7 +127,8 @@ mod tests {
         fs::create_dir_all(&nested).expect("nested directory");
         let home = directory.path().join(".zvec-grep");
         fs::create_dir_all(&home).expect("workspace home");
-        fs::write(home.join("manifest.json"), b"{}").expect("manifest marker");
+        fs::write(home.join("manifest.json"), br#"{"manifestVersion":5}"#)
+            .expect("manifest marker");
 
         let nearest = find_nearest_workspace(&nested)
             .expect("nearest workspace lookup")
@@ -129,6 +137,27 @@ mod tests {
         assert_eq!(
             nearest.root,
             fs::canonicalize(directory.path()).expect("canonical workspace root")
+        );
+    }
+
+    #[test]
+    fn foreign_manifests_are_not_adopted_as_workspaces() {
+        let directory = tempdir().expect("workspace");
+        let nested = directory.path().join("src/nested");
+        fs::create_dir_all(&nested).expect("nested directory");
+        let home = directory.path().join(".zvec-grep");
+        fs::create_dir_all(&home).expect("workspace home");
+        // A Node-implementation manifest: manifestVersion 1 with id/rootPaths.
+        fs::write(
+            home.join("manifest.json"),
+            br#"{"manifestVersion":1,"id":"0d06ac3d-89e2-47d1-aa73-a001711ae081","name":"zvec-grep","rootPaths":[{"absolutePath":"/tmp/demo","recursive":true}],"indexPolicy":"enabled","createdTime":1788253826102,"updatedTime":1788253834412}"#,
+        )
+        .expect("legacy manifest");
+
+        assert!(
+            find_nearest_workspace(&nested)
+                .expect("workspace lookup")
+                .is_none()
         );
     }
 

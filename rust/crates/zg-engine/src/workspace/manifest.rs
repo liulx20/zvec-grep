@@ -212,6 +212,29 @@ pub(crate) fn workspace_manifest_path(home: &Path) -> PathBuf {
     home.join(WORKSPACE_MANIFEST_FILE)
 }
 
+/// Reports the on-disk manifest version without parsing the full schema.
+///
+/// Layout lookups adopt only manifests written by this build: the Node
+/// implementation pins its own schema version and rejects ours, so foreign
+/// manifests must stay untouched rather than being adopted or overwritten.
+pub(crate) fn read_manifest_version(home: &Path) -> Result<Option<u32>, EngineError> {
+    let path = workspace_manifest_path(home);
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(manifest_io("read", &path, &error)),
+    };
+    Ok(manifest_version_hint(&text))
+}
+
+/// Best-effort `manifestVersion` extraction; unparsable or malformed
+/// payloads carry no recognizable version.
+fn manifest_version_hint(text: &str) -> Option<u32> {
+    let value: serde_json::Value = serde_json::from_str(text).ok()?;
+    let version = value.get("manifestVersion")?.as_u64()?;
+    u32::try_from(version).ok()
+}
+
 pub(crate) fn read_workspace_manifest(
     home: &Path,
 ) -> Result<Option<WorkspaceManifest>, EngineError> {
@@ -221,8 +244,19 @@ pub(crate) fn read_workspace_manifest(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(manifest_io("read", &path, &error)),
     };
-    let mut manifest: WorkspaceManifest = serde_json::from_str(&text)
-        .map_err(|error| invalid_manifest(format!("path={} cause={error}", path.display())))?;
+    let mut manifest: WorkspaceManifest = serde_json::from_str(&text).map_err(|error| {
+        // Foreign manifests (the Node implementation pins manifestVersion 1)
+        // must report their origin instead of a wall of unknown-field noise.
+        let cause = match manifest_version_hint(&text) {
+            Some(version) if version != CURRENT_MANIFEST_VERSION => format!(
+                "unsupported manifestVersion {version}: written by another \
+                 implementation; this build reads manifestVersion \
+                 {CURRENT_MANIFEST_VERSION} only",
+            ),
+            _ => format!("cause={error}"),
+        };
+        invalid_manifest(format!("path={} {cause}", path.display()))
+    })?;
     manifest.validate_published()?;
     // The directory containing the manifest defines the workspace location.
     // Persisted absolute paths may refer to where the workspace lived before a move.
@@ -613,6 +647,81 @@ mod tests {
                 "{field}"
             );
         }
+    }
+
+    #[test]
+    fn version_probing_recognizes_only_manifests_this_build_owns() {
+        let directory = tempdir().expect("workspace");
+        let home = directory.path().join(".zvec-grep");
+        fs::create_dir_all(&home).expect("workspace home");
+        assert_eq!(
+            read_manifest_version(&home).expect("missing manifest"),
+            None
+        );
+
+        write_workspace_manifest(&home, &fixture_manifest(&home)).expect("current manifest");
+        assert_eq!(
+            read_manifest_version(&home).expect("current manifest"),
+            Some(CURRENT_MANIFEST_VERSION)
+        );
+
+        for (payload, version) in [
+            (r#"{"manifestVersion":1}"#.as_bytes(), Some(1)),
+            (b"{}".as_slice(), None),
+            (br#"{"manifestVersion":"1"}"#.as_slice(), None),
+            (b"not json".as_slice(), None),
+        ] {
+            fs::write(workspace_manifest_path(&home), payload).expect("probe payload");
+            assert_eq!(
+                read_manifest_version(&home).expect("probe read"),
+                version,
+                "payload={payload:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn foreign_manifests_report_their_implementation_not_field_noise() {
+        let directory = tempdir().expect("workspace");
+        let home = directory.path().join(".zvec-grep");
+        fs::create_dir_all(&home).expect("workspace home");
+        let legacy = r#"{
+            "manifestVersion": 1,
+            "id": "0d06ac3d-89e2-47d1-aa73-a001711ae081",
+            "name": "zvec-grep",
+            "path": "/tmp/demo/.zvec-grep",
+            "rootPaths": [{"absolutePath": "/tmp/demo", "recursive": true}],
+            "indexPolicy": "enabled",
+            "embedding": {"provider": "local", "model": "potion-code-16m-v2", "dimension": 256, "metric": "cosine"},
+            "indexVersion": 2,
+            "createdTime": 1788253826102,
+            "updatedTime": 1788253834412,
+            "embeddingRuntime": {"device": "auto"}
+        }"#;
+        fs::write(workspace_manifest_path(&home), legacy).expect("legacy manifest");
+        let error = read_workspace_manifest(&home)
+            .expect_err("legacy manifests are foreign")
+            .message()
+            .to_owned();
+        assert!(error.contains("manifestVersion 1"), "{error}");
+        assert!(error.contains("another implementation"), "{error}");
+
+        // Current-schema payloads keep their field-level causes.
+        let mut broken = serde_json::to_value(&fixture_manifest(&home)).expect("manifest JSON");
+        broken
+            .as_object_mut()
+            .expect("manifest object")
+            .remove("root");
+        fs::write(
+            workspace_manifest_path(&home),
+            serde_json::to_vec(&broken).expect("encode broken manifest"),
+        )
+        .expect("broken manifest");
+        let error = read_workspace_manifest(&home)
+            .expect_err("broken current manifests keep their causes")
+            .message()
+            .to_owned();
+        assert!(error.contains("cause="), "{error}");
     }
 
     #[test]
