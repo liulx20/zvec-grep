@@ -77,6 +77,38 @@ impl SqliteGraphStorage {
         tx.commit()?;
         Ok(stats)
     }
+
+    /// Atomically records ambiguous-name candidate sets on pending refs so
+    /// consumers can inspect who a reference might target. Rows already
+    /// resolved or invalidated are skipped; the same caller serialization as
+    /// `apply_resolutions` applies.
+    ///
+    /// # Errors
+    /// Rejects invalid proposals and SQLite failures; the entire batch rolls back.
+    pub(crate) fn record_candidates(&mut self, entries: &[(i64, Vec<String>)]) -> Result<usize> {
+        for (ref_id, candidates) in entries {
+            if *ref_id < 1 || candidates.is_empty() {
+                return Err(Error::InvalidInput(
+                    "candidate sets require a positive ref ID and at least one candidate",
+                ));
+            }
+        }
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut recorded = 0;
+        {
+            let mut update =
+                tx.prepare("UPDATE edges SET candidates = ? WHERE id = ? AND status = 'pending'")?;
+            for (ref_id, candidates) in entries {
+                let payload = serde_json::to_string(candidates)?;
+                let changed = update.execute(params![payload, ref_id])?;
+                recorded += changed;
+            }
+        }
+        tx.commit()?;
+        Ok(recorded)
+    }
 }
 
 fn ref_from_row(row: &Row<'_>) -> rusqlite::Result<StoredPendingRef> {

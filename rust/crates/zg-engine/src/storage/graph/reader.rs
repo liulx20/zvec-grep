@@ -90,13 +90,48 @@ impl SqliteGraphStorage {
     }
 
     /// The single workspace entity declaring `name`, or `None` when absent or
-    /// ambiguous. Backs the resolver's unique-name fast path.
+    /// ambiguous. Awaits read-side consumers (query pipelines, MCP tools);
+    /// tests use it.
     ///
     /// # Errors
     /// Rejects blank names, invalid stored data, and SQLite errors.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn lookup_unique(&self, name: &str) -> Result<Option<NameIndexEntry>> {
         let mut hits = self.lookup_by_name(name)?;
         Ok((hits.len() == 1).then(|| hits.pop().expect("single hit")))
+    }
+
+    /// The workspace-relative path of one file, or `None` when it has no
+    /// persisted snapshot. Anchors relative import specifiers for the resolver.
+    ///
+    /// # Errors
+    /// Propagates SQLite errors.
+    pub(crate) fn file_path(&self, file_id: u32) -> Result<Option<String>> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT relative_path FROM file_paths WHERE file_id = ?1")?;
+        let mut rows = statement.query_map([file_id], |row| row.get::<_, String>(0))?;
+        Ok(match rows.next() {
+            Some(row) => Some(row?),
+            None => None,
+        })
+    }
+
+    /// The file owning `relative_path`, or `None` when no snapshot matches.
+    /// Paths are workspace-relative with forward slashes.
+    ///
+    /// # Errors
+    /// Rejects blank paths and SQLite errors.
+    pub(crate) fn file_id_by_path(&self, relative_path: &str) -> Result<Option<u32>> {
+        nonempty(relative_path)?;
+        let mut statement = self
+            .connection
+            .prepare("SELECT file_id FROM file_paths WHERE relative_path = ?1")?;
+        let mut rows = statement.query_map([relative_path], |row| row.get::<_, i64>(0))?;
+        Ok(match rows.next() {
+            Some(row) => u32::try_from(row?).ok(),
+            None => None,
+        })
     }
 }
 

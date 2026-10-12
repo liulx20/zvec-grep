@@ -74,12 +74,12 @@ fn name_index_follows_file_snapshots() {
     let mut first = graph(&["entity-1", "entity-2"], Vec::new(), Vec::new());
     first.entities = vec![record("entity-1", "helper"), record("entity-2", "helper")];
     storage
-        .write_file_graph(1, &first, &[])
+        .write_file_graph(1, "file-1.ts", &first, &[])
         .expect("first write");
     let mut second = graph(&["entity-3"], Vec::new(), Vec::new());
     second.entities = vec![record("entity-3", "helper")];
     storage
-        .write_file_graph(2, &second, &[])
+        .write_file_graph(2, "file-2.ts", &second, &[])
         .expect("second write");
 
     let hits = storage.lookup_by_name("helper").expect("name lookup");
@@ -98,7 +98,7 @@ fn name_index_follows_file_snapshots() {
     let mut rewrite = graph(&["entity-3"], Vec::new(), Vec::new());
     rewrite.entities = vec![record("entity-3", "solo")];
     storage
-        .write_file_graph(2, &rewrite, &["entity-3".to_owned()])
+        .write_file_graph(2, "file-2.ts", &rewrite, &["entity-3".to_owned()])
         .expect("rewrite");
     let solo = storage
         .lookup_unique("solo")
@@ -124,10 +124,18 @@ fn name_index_follows_file_snapshots() {
     // Entity records must reference owned snapshot IDs and non-blank names.
     let mut foreign = graph(&["entity-9"], Vec::new(), Vec::new());
     foreign.entities = vec![record("missing", "ghost")];
-    assert!(storage.write_file_graph(3, &foreign, &[]).is_err());
+    assert!(
+        storage
+            .write_file_graph(3, "file-3.ts", &foreign, &[])
+            .is_err()
+    );
     let mut duplicate = graph(&["entity-9"], Vec::new(), Vec::new());
     duplicate.entities = vec![record("entity-9", "twin"), record("entity-9", "twin")];
-    assert!(storage.write_file_graph(3, &duplicate, &[]).is_err());
+    assert!(
+        storage
+            .write_file_graph(3, "file-3.ts", &duplicate, &[])
+            .is_err()
+    );
     let mut blank = graph(&["entity-9"], Vec::new(), Vec::new());
     blank.entities = vec![EntityRecord {
         entity_id: "entity-9".into(),
@@ -135,7 +143,11 @@ fn name_index_follows_file_snapshots() {
         qualified_name: String::new(),
         is_exported: false,
     }];
-    assert!(storage.write_file_graph(3, &blank, &[]).is_err());
+    assert!(
+        storage
+            .write_file_graph(3, "file-3.ts", &blank, &[])
+            .is_err()
+    );
     assert!(matches!(
         storage.lookup_by_name(""),
         Err(Error::InvalidInput(_))
@@ -156,6 +168,7 @@ fn local_queries_preserve_direction_kinds_order_metadata_and_call_sites() {
     ];
     db.write_file_graph(
         1,
+        "file-1.ts",
         &graph(&["a", "b"], edges.clone(), vec![reference("a", "external")]),
         &[],
     )
@@ -191,6 +204,7 @@ fn replacement_and_repeated_deletion_remove_only_owned_rows() {
     let mut db = SqliteGraphStorage::in_memory().expect("open");
     db.write_file_graph(
         2,
+        "file-2.ts",
         &graph(
             &["a", "b"],
             vec![edge(EdgeKind::Calls, "a", "b", 1)],
@@ -200,11 +214,17 @@ fn replacement_and_repeated_deletion_remove_only_owned_rows() {
     )
     .expect("first");
     let other = edge(EdgeKind::Calls, "x", "y", 2);
-    db.write_file_graph(3, &graph(&["x", "y"], vec![other.clone()], vec![]), &[])
-        .expect("second");
+    db.write_file_graph(
+        3,
+        "file-3.ts",
+        &graph(&["x", "y"], vec![other.clone()], vec![]),
+        &[],
+    )
+    .expect("second");
     let new = edge(EdgeKind::Calls, "c", "d", 3);
     db.write_file_graph(
         2,
+        "file-2.ts",
         &graph(&["c", "d"], vec![new.clone()], vec![]),
         &["a".into(), "b".into()],
     )
@@ -247,6 +267,7 @@ fn cross_file_resolution_is_idempotent_and_invalidation_requeues_refs() {
     let local = edge(EdgeKind::Calls, "a", "b", 1);
     db.write_file_graph(
         4,
+        "file-4.ts",
         &graph(
             &["a", "b"],
             vec![local.clone()],
@@ -255,7 +276,7 @@ fn cross_file_resolution_is_idempotent_and_invalidation_requeues_refs() {
         &[],
     )
     .expect("caller");
-    db.write_file_graph(5, &graph(&["remote"], vec![], vec![]), &[])
+    db.write_file_graph(5, "file-5.ts", &graph(&["remote"], vec![], vec![]), &[])
         .expect("target");
     let resolution = proposal(&db, "remote");
     assert_eq!(
@@ -312,14 +333,24 @@ fn cross_file_resolution_is_idempotent_and_invalidation_requeues_refs() {
 #[test]
 fn replacing_a_target_with_the_same_id_invalidates_resolutions() {
     let mut db = SqliteGraphStorage::in_memory().expect("open");
-    db.write_file_graph(4, &graph(&["a"], vec![], vec![reference("a", "b")]), &[])
-        .expect("caller");
-    db.write_file_graph(5, &graph(&["b"], vec![], vec![]), &[])
+    db.write_file_graph(
+        4,
+        "file-4.ts",
+        &graph(&["a"], vec![], vec![reference("a", "b")]),
+        &[],
+    )
+    .expect("caller");
+    db.write_file_graph(5, "file-5.ts", &graph(&["b"], vec![], vec![]), &[])
         .expect("target");
     let resolution = proposal(&db, "b");
     db.apply_resolutions(&[resolution]).expect("resolve");
-    db.write_file_graph(5, &graph(&["b"], vec![], vec![]), &["b".into()])
-        .expect("replace");
+    db.write_file_graph(
+        5,
+        "file-5.ts",
+        &graph(&["b"], vec![], vec![]),
+        &["b".into()],
+    )
+    .expect("replace");
     assert!(
         db.neighborhood("b", Direction::In, Some(&[EdgeKind::Calls]))
             .expect("invalidated")
@@ -350,7 +381,7 @@ fn file_level_import_targets_are_invalidated_without_entity_ids() {
     };
     let mut import = reference("f6", "module");
     import.reference_kind = EdgeKind::Imports;
-    db.write_file_graph(6, &graph(&[], vec![], vec![import]), &[])
+    db.write_file_graph(6, "file-6.ts", &graph(&[], vec![], vec![import]), &[])
         .expect("import");
     let resolution = proposal(&db, "f7");
     db.apply_resolutions(&[resolution]).expect("resolve");
@@ -369,7 +400,7 @@ fn pagination_is_pending_only_and_readers_do_not_truncate_edges() {
     let edges = (1..=1100)
         .map(|i| edge(EdgeKind::Calls, "a", "b", i))
         .collect();
-    db.write_file_graph(1, &graph(&["a", "b"], edges, refs), &[])
+    db.write_file_graph(1, "file-1.ts", &graph(&["a", "b"], edges, refs), &[])
         .expect("large graph");
     assert_eq!(
         db.neighborhood("a", Direction::Out, Some(&[EdgeKind::Calls]))
@@ -403,6 +434,7 @@ fn deletion_chunks_large_entity_lists() {
     let mut db = SqliteGraphStorage::in_memory().expect("open");
     db.write_file_graph(
         8,
+        "file-8.ts",
         &graph(&["owner"], vec![], vec![reference("owner", "last")]),
         &[],
     )
@@ -410,6 +442,7 @@ fn deletion_chunks_large_entity_lists() {
     let ids: Vec<String> = (0..1600).map(|i| format!("entity-{i}")).collect();
     db.write_file_graph(
         5,
+        "file-5.ts",
         &FileGraph {
             entity_ids: ids.clone(),
             ..FileGraph::default()
@@ -432,8 +465,13 @@ fn deletion_chunks_large_entity_lists() {
 fn ownership_validation_prevents_cross_file_snapshot_writes() {
     let mut db = SqliteGraphStorage::in_memory().expect("open");
     let original = edge(EdgeKind::Calls, "a", "b", 1);
-    db.write_file_graph(1, &graph(&["a", "b"], vec![original.clone()], vec![]), &[])
-        .expect("write");
+    db.write_file_graph(
+        1,
+        "file-1.ts",
+        &graph(&["a", "b"], vec![original.clone()], vec![]),
+        &[],
+    )
+    .expect("write");
     let mut nonlocal = original.clone();
     nonlocal.provenance = Provenance::WorkspaceUnique;
     for invalid in [
@@ -454,7 +492,7 @@ fn ownership_validation_prevents_cross_file_snapshot_writes() {
         graph(&[], vec![], vec![reference("external", "b")]),
     ] {
         assert!(
-            db.write_file_graph(1, &invalid, &["a".into(), "b".into()])
+            db.write_file_graph(1, "file-1.ts", &invalid, &["a".into(), "b".into()])
                 .is_err()
         );
         assert_eq!(
@@ -471,9 +509,14 @@ fn sql_failure_rolls_back_replacement_and_invalidation() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("graph.sqlite");
     let mut db = open(&path);
-    db.write_file_graph(8, &graph(&["a"], vec![], vec![reference("a", "b")]), &[])
-        .expect("source");
-    db.write_file_graph(5, &graph(&["b"], vec![], vec![]), &[])
+    db.write_file_graph(
+        8,
+        "file-8.ts",
+        &graph(&["a"], vec![], vec![reference("a", "b")]),
+        &[],
+    )
+    .expect("source");
+    db.write_file_graph(5, "file-5.ts", &graph(&["b"], vec![], vec![]), &[])
         .expect("target");
     db.apply_resolutions(&[proposal(&db, "b")])
         .expect("resolve");
@@ -482,6 +525,7 @@ fn sql_failure_rolls_back_replacement_and_invalidation() {
     assert!(
         db.write_file_graph(
             5,
+            "file-5.ts",
             &graph(&["b"], vec![edge(EdgeKind::Calls, "b", "b", 1)], vec![]),
             &["b".into()]
         )
@@ -508,6 +552,7 @@ fn sql_failure_rolls_back_an_entire_resolution_batch() {
     let mut db = open(&path);
     db.write_file_graph(
         1,
+        "file-1.ts",
         &graph(
             &["a"],
             vec![],
@@ -552,6 +597,7 @@ fn readonly_connections_reopen_data_and_never_create_or_write() {
     let expected = edge(EdgeKind::Calls, "a'\"\\", "b", 1);
     db.write_file_graph(
         1,
+        "file-1.ts",
         &graph(&["a'\"\\", "b"], vec![expected.clone()], vec![]),
         &[],
     )
@@ -625,17 +671,106 @@ fn schema_contains_edges_and_entities_and_enforces_json_objects() {
         .expect("query")
         .collect::<rusqlite::Result<_>>()
         .expect("rows");
-    assert_eq!(names, ["edges", "entities", "sqlite_sequence"]);
+    assert_eq!(
+        names,
+        ["edges", "entities", "file_paths", "sqlite_sequence"]
+    );
     assert!(raw.execute("INSERT INTO edges (file_id, kind, source, target, provenance, status, metadata) VALUES (1, 'calls', 'a', 'b', 'file_local', 'resolved', '[]')", []).is_err());
     assert!(raw.execute("INSERT INTO edges (file_id, kind, source, target, provenance, status, line) VALUES (1, 'calls', 'a', 'b', 'file_local', 'resolved', 0)", []).is_err());
     assert!(raw.execute("INSERT INTO entities (file_id, entity_id, name, qualified_name, is_exported) VALUES (1, 'a', 'a', 'a', 2)", []).is_err());
+    assert!(
+        raw.execute(
+            "INSERT INTO file_paths (file_id, relative_path) VALUES (1, '  ')",
+            []
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn file_paths_follow_snapshots_and_anchor_import_resolution() {
+    let mut db = SqliteGraphStorage::in_memory().expect("open");
+    db.write_file_graph(4, "src/lib/helper.ts", &graph(&["a"], vec![], vec![]), &[])
+        .expect("write");
+    assert_eq!(
+        db.file_path(4).expect("path"),
+        Some("src/lib/helper.ts".to_owned())
+    );
+    assert_eq!(
+        db.file_id_by_path("src/lib/helper.ts").expect("lookup"),
+        Some(4)
+    );
+    assert_eq!(db.file_path(9).expect("absent"), None);
+    assert_eq!(db.file_id_by_path("src/missing.ts").expect("missing"), None);
+    assert!(matches!(
+        db.file_id_by_path("  "),
+        Err(Error::InvalidInput(_))
+    ));
+
+    // Rewrites replace the row; the path never points at a stale file ID.
+    db.write_file_graph(5, "src/lib/helper.ts", &graph(&["a"], vec![], vec![]), &[])
+        .expect("rewrite under a new file ID");
+    assert_eq!(db.file_path(4).expect("old id"), None);
+    assert_eq!(
+        db.file_id_by_path("src/lib/helper.ts").expect("path owner"),
+        Some(5)
+    );
+
+    // Deletion drops the path row with the snapshot.
+    db.delete_file_graph(5, &["a".into()]).expect("delete");
+    assert_eq!(db.file_id_by_path("src/lib/helper.ts").expect("gone"), None);
+}
+
+#[test]
+fn record_candidates_is_atomic_and_skips_non_pending_rows() {
+    let mut db = SqliteGraphStorage::in_memory().expect("open");
+    db.write_file_graph(
+        9,
+        "src/consumer.ts",
+        &graph(
+            &["a"],
+            vec![],
+            vec![reference("a", "one"), reference("a", "two")],
+        ),
+        &[],
+    )
+    .expect("write");
+    let mut refs = db.list_pending_refs(100, 0).expect("refs").refs;
+    let second = refs.remove(1);
+    db.apply_resolutions(&[Resolution {
+        ref_id: refs[0].id,
+        target_id: "target".into(),
+        provenance: Provenance::WorkspaceUnique,
+    }])
+    .expect("resolve first");
+
+    let entries = vec![
+        (refs[0].id, vec!["target".to_owned()]),
+        (second.id, vec!["first".to_owned(), "second".to_owned()]),
+    ];
+    assert_eq!(db.record_candidates(&entries).expect("record"), 1);
+    let pending = db.list_pending_refs(100, 0).expect("pending").refs;
+    assert_eq!(pending.len(), 1);
+    assert_eq!(
+        pending[0].reference.candidates,
+        Some(vec!["first".to_owned(), "second".to_owned()])
+    );
+
+    assert!(db.record_candidates(&[(0, vec!["x".into()])]).is_err());
+    assert!(db.record_candidates(&[(second.id, Vec::new())]).is_err());
+    assert!(db.record_candidates(&[]).is_ok());
 }
 
 #[test]
 fn invalid_and_stale_resolution_proposals_do_not_mutate_pending_refs() {
     let mut db = SqliteGraphStorage::in_memory().expect("open");
-    db.write_file_graph(9, &graph(&["a"], vec![], vec![reference("a", "b")]), &[])
-        .expect("write");
+    db.write_file_graph(
+        9,
+        "file-9.ts",
+        &graph(&["a"], vec![], vec![reference("a", "b")]),
+        &[],
+    )
+    .expect("write");
     let valid = proposal(&db, "b");
     for invalid in [
         Resolution {
@@ -684,7 +819,12 @@ fn independent_connections_observe_commits_and_skip_deleted_refs() {
     let path = dir.path().join("graph.sqlite");
     let mut writer = open(&path);
     writer
-        .write_file_graph(9, &graph(&["a"], vec![], vec![reference("a", "b")]), &[])
+        .write_file_graph(
+            9,
+            "file-9.ts",
+            &graph(&["a"], vec![], vec![reference("a", "b")]),
+            &[],
+        )
         .expect("write");
     let mut resolver = open(&path);
     let reader = SqliteGraphStorage::open(&path, OpenMode::ReadOnly).expect("reader");
@@ -714,6 +854,7 @@ fn neighborhood_filters_direction_and_kinds() {
     ];
     db.write_file_graph(
         1,
+        "file-1.ts",
         &graph(
             &["a", "b", "c"],
             edges.clone(),
@@ -772,8 +913,13 @@ fn neighborhood_returns_all_edges_without_a_limit() {
     let edges: Vec<_> = (1..=1100)
         .map(|line| edge(EdgeKind::Calls, "a", "b", line))
         .collect();
-    db.write_file_graph(1, &graph(&["a", "b"], edges.clone(), vec![]), &[])
-        .expect("write");
+    db.write_file_graph(
+        1,
+        "file-1.ts",
+        &graph(&["a", "b"], edges.clone(), vec![]),
+        &[],
+    )
+    .expect("write");
     assert_eq!(
         db.neighborhood("a", Direction::Both, None)
             .expect("all edges"),
@@ -790,8 +936,13 @@ fn graph_queries_skip_unrelated_resolved_edges() {
 
     let mut db = SqliteGraphStorage::in_memory().expect("open");
     let expected = edge(EdgeKind::Calls, "needle", "needle", 1);
-    db.write_file_graph(1, &graph(&["needle"], vec![expected.clone()], vec![]), &[])
-        .expect("write one relevant edge");
+    db.write_file_graph(
+        1,
+        "file-1.ts",
+        &graph(&["needle"], vec![expected.clone()], vec![]),
+        &[],
+    )
+    .expect("write one relevant edge");
     let steps = Arc::new(AtomicUsize::new(0));
     let counter = Arc::clone(&steps);
     db.connection.progress_handler(
@@ -819,6 +970,7 @@ fn graph_queries_skip_unrelated_resolved_edges() {
         // pending index would make even this one-row queue scan through them.
         db.write_file_graph(
             3,
+            "file-3.ts",
             &graph(&["waiting"], vec![], vec![reference("waiting", "external")]),
             &[],
         )
@@ -892,8 +1044,13 @@ fn resolution_retains_reference_context_and_invalidation_resets_candidates() {
     let mut db = open(&path);
     let mut original = reference("source", "module::target");
     original.candidates = Some(vec!["target".into(), "alternative".into()]);
-    db.write_file_graph(6, &graph(&["source"], vec![], vec![original.clone()]), &[])
-        .expect("write");
+    db.write_file_graph(
+        6,
+        "file-6.ts",
+        &graph(&["source"], vec![], vec![original.clone()]),
+        &[],
+    )
+    .expect("write");
     let stored = db.list_pending_refs(100, 0).expect("refs").refs.remove(0);
     assert_eq!(stored.reference, original);
     assert!(
@@ -1023,9 +1180,10 @@ fn reference_schema_defaults_and_state_constraints() {
 fn replaced_reference_ids_are_not_reused() {
     let mut db = SqliteGraphStorage::in_memory().expect("open");
     let snapshot = graph(&["a"], vec![], vec![reference("a", "b")]);
-    db.write_file_graph(1, &snapshot, &[]).expect("write");
+    db.write_file_graph(1, "file-1.ts", &snapshot, &[])
+        .expect("write");
     let old = proposal(&db, "b");
-    db.write_file_graph(1, &snapshot, &["a".into()])
+    db.write_file_graph(1, "file-1.ts", &snapshot, &["a".into()])
         .expect("replace");
     let new = proposal(&db, "b");
     assert!(new.ref_id > old.ref_id);
@@ -1045,6 +1203,7 @@ fn file_ids_round_trip_as_u32_and_sqlite_rejects_out_of_range_values() {
         let key = format!("f{id}");
         db.write_file_graph(
             id,
+            &format!("file-{id}.ts"),
             &graph(&[], vec![], vec![reference(&key, "external")]),
             &[],
         )
@@ -1086,8 +1245,13 @@ fn contains_references_use_the_same_kinds_as_resolved_edges() {
     let mut db = SqliteGraphStorage::in_memory().expect("open");
     let mut pending = reference("owner", "member");
     pending.reference_kind = EdgeKind::Contains;
-    db.write_file_graph(1, &graph(&["owner"], vec![], vec![pending.clone()]), &[])
-        .expect("write contains ref");
+    db.write_file_graph(
+        1,
+        "file-1.ts",
+        &graph(&["owner"], vec![], vec![pending.clone()]),
+        &[],
+    )
+    .expect("write contains ref");
     assert_eq!(
         db.list_pending_refs(100, 0).expect("pending").refs[0].reference,
         pending

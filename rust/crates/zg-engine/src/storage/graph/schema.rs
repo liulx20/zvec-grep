@@ -3,7 +3,7 @@ use rusqlite::{Connection, TransactionBehavior};
 use super::{Error, Result};
 
 // Unsupported versions require an index rebuild; no schema migration is provided.
-pub(crate) const VERSION: i64 = 11;
+pub(crate) const VERSION: i64 = 12;
 pub(crate) const APPLICATION_ID: i64 = 0x5a47_5250;
 
 pub(crate) fn validate(connection: &Connection) -> Result<()> {
@@ -90,4 +90,12 @@ CREATE TABLE entities (
     PRIMARY KEY (file_id, entity_id)
 ) STRICT;
 CREATE INDEX entities_name ON entities(name);
+-- Workspace-relative paths keyed by file, consumed by the resolver to map
+-- import specifiers onto file endpoints. Paths use forward slashes on every
+-- platform; rows follow the file snapshot lifecycle.
+CREATE TABLE file_paths (
+    file_id INTEGER PRIMARY KEY CHECK (file_id BETWEEN 0 AND 4294967295),
+    relative_path TEXT NOT NULL CHECK (length(trim(relative_path)) > 0)
+) STRICT;
+CREATE UNIQUE INDEX file_paths_relative ON file_paths(relative_path);
 ";

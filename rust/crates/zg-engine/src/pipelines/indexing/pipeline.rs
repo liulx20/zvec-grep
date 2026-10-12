@@ -895,7 +895,12 @@ fn commit_file(
     // zvec succeeded, so a graph failure degrades instead of failing the
     // commit; the snapshot can be rebuilt by reindexing the file.
     if let Some(graph) = graph {
-        if let Err(_error) = persist_file_graph(graph, file.file.id, file.graph.as_ref()) {
+        if let Err(_error) = persist_file_graph(
+            graph,
+            file.file.id,
+            &file.file.relative_path,
+            file.graph.as_ref(),
+        ) {
             stats.graph_failures += 1;
         }
     }
@@ -907,19 +912,24 @@ fn commit_file(
 /// Writes or clears one file's graph rows. `write_file_graph` recovers the
 /// previous entity IDs from the graph itself; both stores were mutated under
 /// the same workspace write lock, so the recovered set matches zvec unless an
-/// earlier graph write degraded.
+/// earlier graph write degraded. `relative_path` anchors import resolution;
+/// it is normalized to forward slashes on every platform.
 ///
 /// # Errors
 /// Propagates graph persistence failures for the caller to degrade on.
 fn persist_file_graph(
     graph: &Mutex<crate::storage::graph::SqliteGraphStorage>,
     file_id: FileId,
+    relative_path: &std::path::Path,
     snapshot: Option<&crate::storage::graph::FileGraph>,
 ) -> Result<(), crate::storage::graph::Error> {
     let mut graph = lock_graph(graph);
     let old_entity_ids = graph.file_entity_ids(file_id.get())?;
+    let relative_path = relative_path.to_string_lossy().replace('\\', "/");
     match snapshot {
-        Some(snapshot) => graph.write_file_graph(file_id.get(), snapshot, &old_entity_ids),
+        Some(snapshot) => {
+            graph.write_file_graph(file_id.get(), &relative_path, snapshot, &old_entity_ids)
+        }
         None => graph.delete_file_graph(file_id.get(), &old_entity_ids),
     }
 }
@@ -2259,8 +2269,13 @@ mod tests {
         };
 
         // Round 1: file 42 declares entity-a.
-        persist_file_graph(&graph, FileId::new(42), Some(&snapshot("entity-a")))
-            .expect("first write");
+        persist_file_graph(
+            &graph,
+            FileId::new(42),
+            std::path::Path::new("src/definition.ts"),
+            Some(&snapshot("entity-a")),
+        )
+        .expect("first write");
         assert_eq!(
             lock_graph(&graph).file_entity_ids(42).expect("entity ids"),
             vec!["entity-a".to_owned()]
@@ -2301,7 +2316,13 @@ mod tests {
                 name_tail: "entity-a".to_owned(),
             }],
         };
-        persist_file_graph(&graph, FileId::new(43), Some(&importer)).expect("importer write");
+        persist_file_graph(
+            &graph,
+            FileId::new(43),
+            std::path::Path::new("src/importer.ts"),
+            Some(&importer),
+        )
+        .expect("importer write");
         let ref_id = {
             let graph = lock_graph(&graph);
             let page = graph.list_pending_refs(10, 0).expect("pending page");
@@ -2329,7 +2350,13 @@ mod tests {
 
         // Round 2: file 42 rewrites with a fresh entity ID; the resolution
         // that targeted entity-a must return to pending.
-        persist_file_graph(&graph, FileId::new(42), Some(&snapshot("entity-b"))).expect("rewrite");
+        persist_file_graph(
+            &graph,
+            FileId::new(42),
+            std::path::Path::new("src/definition.ts"),
+            Some(&snapshot("entity-b")),
+        )
+        .expect("rewrite");
         assert!(
             lock_graph(&graph)
                 .lookup_by_name("entity-a")
@@ -2396,7 +2423,13 @@ mod tests {
                 );
                 graph_sink::file_graph(file_id, language, &assembled).expect("snapshot converts")
             });
-            persist_file_graph(&graph, file_id, snapshot.as_ref()).expect("persist");
+            persist_file_graph(
+                &graph,
+                file_id,
+                source.relative_path.as_path(),
+                snapshot.as_ref(),
+            )
+            .expect("persist");
         };
         persist(&definition, FileId::new(7));
         persist(&consumer, FileId::new(8));
@@ -2421,7 +2454,7 @@ mod tests {
             let mut storage = lock_graph(&graph);
             super::super::graph_resolver::resolve_pending(&mut storage).expect("sweep")
         };
-        assert_eq!(sweep.resolved, 1);
+        assert_eq!(sweep.resolved, 2);
         assert_eq!(sweep.stale, 0);
 
         let inbound = lock_graph(&graph)
@@ -2430,13 +2463,17 @@ mod tests {
         assert_eq!(inbound.len(), 1, "resolved call edge: {inbound:?}");
         assert_eq!(inbound[0].target, helper.entity_id);
         assert_eq!(inbound[0].provenance, Provenance::WorkspaceUnique);
+        let import = lock_graph(&graph)
+            .neighborhood("f8", Direction::Out, Some(&[EdgeKind::Imports]))
+            .expect("import edges");
+        assert_eq!(import.len(), 1, "resolved import edge: {import:?}");
+        assert_eq!(import[0].target, "f7");
+        assert_eq!(import[0].provenance, Provenance::ImportScoped);
         let remaining = lock_graph(&graph).list_pending_refs(100, 0).expect("page");
         assert!(
-            remaining
-                .refs
-                .iter()
-                .all(|stored| stored.reference.name_tail != "helper"),
-            "no helper reference stays pending"
+            remaining.refs.is_empty(),
+            "every reference resolves: {:?}",
+            remaining.refs
         );
     }
 
