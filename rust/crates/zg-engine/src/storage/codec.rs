@@ -820,6 +820,8 @@ mod tests {
                 parameter: None,
                 language: None,
                 documentation: Some("documentation".to_owned()),
+                arity: Some(2),
+                is_exported: true,
             }));
             round_trip(&entity);
             let record: Value =

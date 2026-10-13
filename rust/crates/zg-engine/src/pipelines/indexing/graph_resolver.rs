@@ -9,14 +9,16 @@
 //! the file's imports pin them to one module, `self`/`this` receiver calls
 //! bind to the one same-file declaration of the invoked member, qualified
 //! `Class::method` receivers bind to the entity whose `qualified_name`
-//! spells the same path, and
+//! spells the same path, export/arity evidence narrows the remaining
+//! ambiguities, external import specifiers terminate as failed, and
 //! [`SqliteGraphStorage::apply_resolutions`] writes each batch atomically.
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 
 use crate::storage::graph::{
-    EdgeKind, NameIndexEntry, Provenance, Resolution, SqliteGraphStorage, StoredPendingRef,
+    EdgeKind, NameIndexEntry, PendingRef, Provenance, Resolution, SqliteGraphStorage,
+    StoredPendingRef,
 };
 
 /// Outcome of one resolution sweep.
@@ -34,6 +36,12 @@ pub(super) struct ResolutionSweep {
     pub file_scoped: usize,
     /// Qualified references bound through `qualified_name` this sweep.
     pub preferred_file: usize,
+    /// Ambiguous references narrowed to the one exported candidate.
+    pub export_bound: usize,
+    /// Ambiguous references narrowed to the one arity-matching candidate.
+    pub arity_bound: usize,
+    /// Import references terminated as unresolvable by `apply_failures`.
+    pub failed: usize,
     /// Ambiguous references whose candidate sets `record_candidates` stored.
     pub candidates_recorded: usize,
 }
@@ -43,15 +51,17 @@ pub(super) struct ResolutionSweep {
 /// ambiguous bare names onto the one module their file imports,
 /// `self`/`this` receiver calls onto the one same-file declaration, and
 /// qualified `Class::method` receivers onto the entity declaring that
-/// exact `qualified_name`.
+/// exact `qualified_name`. Ambiguities surviving these rules narrow through
+/// export visibility and declared arity when the evidence picks exactly one
+/// candidate, and import specifiers that address modules outside the
+/// workspace terminate as failed.
 ///
 /// Matching stays conservative. Same-file name hits stay pending — partition
 /// already resolved unambiguous local names, so a survivor in the same file
 /// is a receiver-typed call that needs type inference, except where the
 /// receiver names the enclosing instance (`self`/`this`) and the file declares
-/// the member exactly once — and names that stay ambiguous after import
-/// scoping record their candidate set for consumers and later evidence
-/// rules (receiver names, arity).
+/// the member exactly once — and names that stay ambiguous after every
+/// evidence rule record their candidate set for consumers.
 ///
 /// The entire read/resolve/writeback cycle runs under the caller's graph
 /// storage lock, matching the serialization contract of `apply_resolutions`.
@@ -65,14 +75,20 @@ pub(super) fn resolve_pending(
 ) -> crate::storage::graph::Result<ResolutionSweep> {
     let mut sweep = ResolutionSweep::default();
     let mut resolutions = Vec::new();
+    let mut failures: Vec<i64> = Vec::new();
     let mut candidate_sets: Vec<(i64, Vec<String>)> = Vec::new();
     let mut importing_paths: HashMap<u32, Option<String>> = HashMap::new();
     let mut importing_files: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut module_paths: HashMap<(String, String), bool> = HashMap::new();
     let mut cursor = 0;
     loop {
         let page = graph.list_pending_refs(1000, cursor)?;
         sweep.scanned += page.refs.len();
         for stored in &page.refs {
+            if is_unresolvable_import(graph, &stored.reference, &mut module_paths)? {
+                failures.push(stored.id);
+                continue;
+            }
             if let Some(resolution) = resolve_import(graph, stored, &mut importing_paths)? {
                 // The batch applies after the loop, so fold this sweep's fresh
                 // import targets into the in-memory scope for bare names.
@@ -122,6 +138,16 @@ pub(super) fn resolve_pending(
                     sweep.import_bound += 1;
                     continue;
                 }
+                if let Some(resolution) = resolve_export_bound(stored, &hits) {
+                    resolutions.push(resolution);
+                    sweep.export_bound += 1;
+                    continue;
+                }
+                if let Some(resolution) = resolve_arity_bound(stored, &hits) {
+                    resolutions.push(resolution);
+                    sweep.arity_bound += 1;
+                    continue;
+                }
                 candidate_sets.push((
                     stored.id,
                     hits.into_iter().map(|hit| hit.entity_id).collect(),
@@ -136,6 +162,7 @@ pub(super) fn resolve_pending(
     let stats = graph.apply_resolutions(&resolutions)?;
     sweep.resolved = stats.resolved;
     sweep.stale = stats.stale;
+    sweep.failed = graph.apply_failures(&failures)?;
     if !candidate_sets.is_empty() {
         sweep.candidates_recorded = graph.record_candidates(&candidate_sets)?;
     }
@@ -288,6 +315,102 @@ fn resolve_qualified_name(
     None
 }
 
+/// Reports import references whose specifier can never address a workspace
+/// module: TS/JS bare package specifiers (anything not starting with `./`
+/// or `../`, reduced to its first path segment) and Python's bare top-level
+/// module imports (`import re`). A specifier whose leading segment matches
+/// a workspace file or directory — a monorepo package, a top-level module —
+/// stays in the queue for path-based rules instead of failing.
+///
+/// # Errors
+/// Propagates graph storage failures; every other reference is `false`.
+fn is_unresolvable_import(
+    graph: &SqliteGraphStorage,
+    reference: &PendingRef,
+    module_paths: &mut HashMap<(String, String), bool>,
+) -> crate::storage::graph::Result<bool> {
+    if reference.reference_kind != EdgeKind::Imports {
+        return Ok(false);
+    }
+    let specifier = reference.reference_name.as_str();
+    let root = match reference.language.as_str() {
+        "typescript" | "javascript"
+            if !specifier.starts_with("./") && !specifier.starts_with("../") =>
+        {
+            specifier
+                .split('/')
+                .find(|segment| !segment.is_empty())
+                .unwrap_or(specifier)
+        }
+        "python" if !specifier.starts_with('.') && !specifier.contains('.') => specifier,
+        _ => return Ok(false),
+    };
+    let key = (reference.language.clone(), root.to_owned());
+    let exists = match module_paths.entry(key) {
+        Entry::Occupied(entry) => *entry.get(),
+        Entry::Vacant(entry) => {
+            let exists = graph.path_has_module(root, extensions_for(&reference.language))?;
+            entry.insert(exists);
+            exists
+        }
+    };
+    Ok(!exists)
+}
+
+/// Narrows an ambiguous TS/JS reference to the one workspace-wide exported
+/// declaration: cross-file lookups only reach exported symbols, so when
+/// every candidate is declared in another file and exactly one is exported,
+/// the rest are unreachable shadows. A same-file candidate (free local
+/// access) or several exported declarations keeps the ambiguity path.
+fn resolve_export_bound(stored: &StoredPendingRef, hits: &[NameIndexEntry]) -> Option<Resolution> {
+    if !matches!(
+        stored.reference.language.as_str(),
+        "typescript" | "javascript"
+    ) || !matches!(
+        stored.reference.reference_kind,
+        EdgeKind::Calls | EdgeKind::Extends | EdgeKind::Implements
+    ) {
+        return None;
+    }
+    let exported: Vec<&NameIndexEntry> = hits.iter().filter(|hit| hit.is_exported).collect();
+    if exported.len() == 1 && hits.iter().all(|hit| hit.file_id != stored.file_id) {
+        return Some(Resolution {
+            ref_id: stored.id,
+            target_id: exported[0].entity_id.clone(),
+            provenance: Provenance::ExportBound,
+        });
+    }
+    None
+}
+
+/// Narrows an ambiguous reference to the one candidate whose declared
+/// parameter count equals the call's argument count: among candidates that
+/// all declare their arity, a single match is the invoked overload.
+/// Candidates with unknown arity cannot rule themselves out, so their
+/// presence keeps the reference pending.
+fn resolve_arity_bound(stored: &StoredPendingRef, hits: &[NameIndexEntry]) -> Option<Resolution> {
+    let expected = stored.reference.arity?;
+    let mut matched = None;
+    for hit in hits {
+        match hit.arity {
+            Some(arity) if arity == expected => {
+                if matched.is_some() {
+                    return None;
+                }
+                matched = Some(hit);
+            }
+            Some(_) => {}
+            None => return None,
+        }
+    }
+    let hit = matched?;
+    Some(Resolution {
+        ref_id: stored.id,
+        target_id: hit.entity_id.clone(),
+        provenance: Provenance::ArityBound,
+    })
+}
+
 /// Directory prefix of a forward-slash workspace path; the workspace root
 /// itself is the empty string.
 fn importing_dir(path: &str) -> &str {
@@ -368,6 +491,7 @@ mod tests {
             name: name.to_owned(),
             qualified_name: name.to_owned(),
             is_exported: true,
+            arity: None,
         }
     }
 
@@ -482,6 +606,9 @@ mod tests {
                 import_bound: 0,
                 file_scoped: 0,
                 preferred_file: 0,
+                export_bound: 0,
+                arity_bound: 0,
+                failed: 0,
                 candidates_recorded: 0,
             }
         );
@@ -934,6 +1061,7 @@ mod tests {
                 .to_owned(),
             qualified_name: qualified_name.to_owned(),
             is_exported: true,
+            arity: None,
         }
     }
 
@@ -1127,6 +1255,207 @@ mod tests {
         );
     }
 
+    fn indexed_record(entity_id: &str, name: &str, is_exported: bool, arity: u32) -> EntityRecord {
+        EntityRecord {
+            entity_id: entity_id.to_owned(),
+            name: name.to_owned(),
+            qualified_name: format!("scope::{name}"),
+            is_exported,
+            arity: (arity > 0).then_some(arity),
+        }
+    }
+
+    #[test]
+    fn external_imports_terminate_as_failed() {
+        let mut graph = open_memory();
+        let mut references = graph_with_import("f9", "fs");
+        references.pending_refs.push(pending_reference(
+            "f9",
+            "./util",
+            crate::storage::graph::EdgeKind::Imports,
+            "typescript",
+        ));
+        graph
+            .write_file_graph(9, "run.ts", &references, &[])
+            .expect("reference write");
+
+        let sweep = resolve_pending(&mut graph).expect("sweep");
+
+        assert_eq!(sweep.failed, 1);
+        assert_eq!(sweep.resolved, 0);
+        let page = graph.list_pending_refs(10, 0).expect("pending page");
+        let [stored] = page.refs.as_slice() else {
+            panic!("the relative import stays pending");
+        };
+        assert_eq!(stored.reference.reference_name, "./util");
+    }
+
+    #[test]
+    fn bare_imports_matching_workspace_modules_stay_pending() {
+        let mut graph = open_memory();
+        graph
+            .write_file_graph(1, "graphify/mod.py", &empty_graph(Vec::new()), &[])
+            .expect("module write");
+        let mut reference = graph_with_import("f9", "graphify");
+        reference.pending_refs[0].language = "python".to_owned();
+        graph
+            .write_file_graph(9, "run.py", &reference, &[])
+            .expect("reference write");
+
+        let sweep = resolve_pending(&mut graph).expect("sweep");
+
+        assert_eq!(sweep.failed, 0);
+        assert_eq!(sweep.resolved, 0);
+        assert_eq!(
+            graph
+                .list_pending_refs(10, 0)
+                .expect("pending page")
+                .refs
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn export_evidence_narrows_cross_file_ambiguity() {
+        let mut graph = open_memory();
+        graph
+            .write_file_graph(
+                1,
+                "first.ts",
+                &empty_graph(vec![indexed_record("first", "helper", true, 0)]),
+                &[],
+            )
+            .expect("first write");
+        graph
+            .write_file_graph(
+                2,
+                "second.ts",
+                &empty_graph(vec![indexed_record("second", "helper", false, 0)]),
+                &[],
+            )
+            .expect("second write");
+        graph
+            .write_file_graph(9, "run.ts", &graph_with_pending(Vec::new(), "helper"), &[])
+            .expect("reference write");
+
+        let sweep = resolve_pending(&mut graph).expect("sweep");
+
+        assert_eq!(sweep.export_bound, 1);
+        let inbound = graph
+            .neighborhood(
+                "first",
+                crate::storage::graph::Direction::In,
+                Some(&[crate::storage::graph::EdgeKind::Calls]),
+            )
+            .expect("inbound");
+        assert_eq!(inbound[0].provenance, Provenance::ExportBound);
+    }
+
+    #[test]
+    fn export_evidence_waits_for_unshadowed_candidates() {
+        let mut graph = open_memory();
+        graph
+            .write_file_graph(
+                1,
+                "first.ts",
+                &empty_graph(vec![indexed_record("first", "helper", true, 0)]),
+                &[],
+            )
+            .expect("first write");
+        graph
+            .write_file_graph(
+                2,
+                "second.ts",
+                &empty_graph(vec![indexed_record("second", "helper", true, 0)]),
+                &[],
+            )
+            .expect("second write");
+        graph
+            .write_file_graph(9, "run.ts", &graph_with_pending(Vec::new(), "helper"), &[])
+            .expect("reference write");
+
+        let sweep = resolve_pending(&mut graph).expect("sweep");
+
+        assert_eq!(sweep.export_bound, 0);
+        assert_eq!(sweep.candidates_recorded, 1);
+    }
+
+    #[test]
+    fn arity_evidence_narrows_fully_typed_candidates() {
+        let mut graph = open_memory();
+        graph
+            .write_file_graph(
+                1,
+                "unary.ts",
+                &empty_graph(vec![indexed_record("unary", "handler", true, 1)]),
+                &[],
+            )
+            .expect("unary write");
+        graph
+            .write_file_graph(
+                2,
+                "binary.ts",
+                &empty_graph(vec![indexed_record("binary", "handler", true, 2)]),
+                &[],
+            )
+            .expect("binary write");
+        let mut reference = graph_with_pending(Vec::new(), "handler");
+        reference.pending_refs[0].arity = Some(2);
+        graph
+            .write_file_graph(9, "run.ts", &reference, &[])
+            .expect("reference write");
+
+        let sweep = resolve_pending(&mut graph).expect("sweep");
+
+        assert_eq!(sweep.arity_bound, 1);
+        let inbound = graph
+            .neighborhood(
+                "binary",
+                crate::storage::graph::Direction::In,
+                Some(&[crate::storage::graph::EdgeKind::Calls]),
+            )
+            .expect("inbound");
+        assert_eq!(inbound[0].provenance, Provenance::ArityBound);
+    }
+
+    #[test]
+    fn arity_evidence_waits_for_untyped_candidates() {
+        let mut graph = open_memory();
+        graph
+            .write_file_graph(
+                1,
+                "typed.ts",
+                &empty_graph(vec![indexed_record("typed", "handler", true, 2)]),
+                &[],
+            )
+            .expect("typed write");
+        graph
+            .write_file_graph(
+                2,
+                "untyped.ts",
+                &empty_graph(vec![EntityRecord {
+                    entity_id: "untyped".to_owned(),
+                    name: "handler".to_owned(),
+                    qualified_name: "scope::handler".to_owned(),
+                    is_exported: true,
+                    arity: None,
+                }]),
+                &[],
+            )
+            .expect("untyped write");
+        let mut reference = graph_with_pending(Vec::new(), "handler");
+        reference.pending_refs[0].arity = Some(2);
+        graph
+            .write_file_graph(9, "run.ts", &reference, &[])
+            .expect("reference write");
+
+        let sweep = resolve_pending(&mut graph).expect("sweep");
+
+        assert_eq!(sweep.arity_bound, 0);
+        assert_eq!(sweep.candidates_recorded, 1);
+    }
+
     #[test]
     fn entity_targeted_imports_scope_bare_names() {
         let mut graph = open_memory();
@@ -1301,7 +1630,7 @@ mod tests {
     }
 
     #[test]
-    fn bare_and_unmatched_imports_stay_pending() {
+    fn bare_imports_fail_while_unmatched_relative_ones_stay_pending() {
         let mut graph = open_memory();
         graph
             .write_file_graph(9, "run.ts", &graph_with_import("f9", "react"), &[])
@@ -1327,13 +1656,14 @@ mod tests {
 
         assert_eq!(sweep.scanned, 3);
         assert_eq!(sweep.resolved, 0);
+        assert_eq!(sweep.failed, 1);
         assert_eq!(
             graph
                 .list_pending_refs(10, 0)
                 .expect("pending page")
                 .refs
                 .len(),
-            3
+            2
         );
     }
 

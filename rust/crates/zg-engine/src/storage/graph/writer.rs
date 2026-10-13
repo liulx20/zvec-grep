@@ -68,8 +68,8 @@ impl SqliteGraphStorage {
         tx.execute("DELETE FROM entities WHERE file_id = ?", [file_id])?;
         {
             let mut insert = tx.prepare(
-                "INSERT INTO entities (file_id, entity_id, name, qualified_name, is_exported)
-                VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO entities (file_id, entity_id, name, qualified_name, is_exported, arity)
+                VALUES (?, ?, ?, ?, ?, ?)",
             )?;
             for record in &graph.entities {
                 insert.execute(params![
@@ -77,7 +77,8 @@ impl SqliteGraphStorage {
                     record.entity_id,
                     record.name,
                     record.qualified_name,
-                    i64::from(record.is_exported)
+                    i64::from(record.is_exported),
+                    record.arity.map(i64::from)
                 ])?;
             }
         }

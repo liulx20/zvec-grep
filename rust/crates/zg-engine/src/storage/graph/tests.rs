@@ -77,6 +77,7 @@ fn record(entity_id: &str, name: &str) -> EntityRecord {
         name: name.into(),
         qualified_name: format!("scope::{name}"),
         is_exported: true,
+        arity: Some(1),
     }
 }
 
@@ -155,6 +156,7 @@ fn name_index_follows_file_snapshots() {
         name: "  ".into(),
         qualified_name: String::new(),
         is_exported: false,
+        arity: None,
     }];
     assert!(
         storage

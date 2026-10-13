@@ -331,6 +331,76 @@ impl LanguageAdapter {
         extract_preceding_doc(node, source)
     }
 
+    /// Counts a function-shaped entity's declared parameters, excluding the
+    /// implicit receiver (Rust's `self_parameter`, Python's leading
+    /// `self`/`cls`, Go's separate receiver field). Non-function entities
+    /// yield `None`.
+    pub(super) fn extract_arity(self, node: Node<'_>, source: &[u8]) -> Option<usize> {
+        if matches!(self.kind, Language::C | Language::Cpp) && !is_c_function_type(node.kind()) {
+            // C aggregates nest function declarators for their pointer fields;
+            // the aggregate itself declares no parameters.
+            return None;
+        }
+        let target = match self.kind {
+            Language::Python => inner_python_definition(node).unwrap_or(node),
+            Language::JavaScript | Language::TypeScript => node
+                .child_by_field_name("value")
+                .filter(|value| {
+                    matches!(
+                        value.kind(),
+                        "arrow_function"
+                            | "function_expression"
+                            | "generator_function"
+                            | "method_definition"
+                    )
+                })
+                .unwrap_or(node),
+            _ => node,
+        };
+        let parameters = match target.child_by_field_name("parameters") {
+            Some(parameters) => parameters,
+            // C/C++ nest the parameter list inside their function declarator.
+            None => find_descendant_by_kind(target, "function_declarator")?
+                .child_by_field_name("parameters")?,
+        };
+        Some(
+            named_children(parameters)
+                .into_iter()
+                .filter(|parameter| !is_receiver_parameter(self.kind, *parameter, source))
+                .count(),
+        )
+    }
+
+    /// Reports whether the symbol is importable from outside its module:
+    /// TS/JS follow the `export` wrapper chain, Rust follows a `pub`
+    /// modifier, and Python's top-level definitions are importable while
+    /// members nested in a scope are not. Other languages stay unreported.
+    pub(super) fn is_exported(self, node: Node<'_>, nested: bool) -> bool {
+        match self.kind {
+            Language::JavaScript | Language::TypeScript => {
+                let mut declaration = node;
+                while let Some(parent) = declaration.parent() {
+                    match parent.kind() {
+                        "lexical_declaration" | "variable_declaration" | "ambient_declaration" => {
+                            declaration = parent;
+                        }
+                        "export_statement" => return true,
+                        // Class and object bodies scope their members; the
+                        // member is reached through the container, not the
+                        // export.
+                        _ => return false,
+                    }
+                }
+                false
+            }
+            Language::Rust => named_children(node)
+                .into_iter()
+                .any(|child| child.kind() == "visibility_modifier"),
+            Language::Python => !nested,
+            _ => false,
+        }
+    }
+
     fn should_index_entity(self, node: Node<'_>) -> bool {
         match self.kind {
             Language::C | Language::Cpp => {
@@ -654,6 +724,20 @@ fn inner_python_definition(node: Node<'_>) -> Option<Node<'_>> {
     named_children(node)
         .into_iter()
         .find(|child| matches!(child.kind(), "function_definition" | "class_definition"))
+}
+
+/// Python spells the implicit receiver as a named leading parameter; typed
+/// receivers (`self: &Self`) stay counted and keep such candidates out of
+/// arity matches rather than mis-shaping the count.
+fn is_receiver_parameter(kind: Language, parameter: Node<'_>, source: &[u8]) -> bool {
+    match kind {
+        Language::Rust => parameter.kind() == "self_parameter",
+        Language::Python => {
+            parameter.prev_named_sibling().is_none()
+                && matches!(text(parameter, source), "self" | "cls")
+        }
+        _ => false,
+    }
 }
 
 fn extract_javascript_signature(node: Node<'_>, source: &[u8]) -> Option<String> {

@@ -3,7 +3,7 @@ use rusqlite::{Connection, TransactionBehavior};
 use super::{Error, Result};
 
 // Unsupported versions require an index rebuild; no schema migration is provided.
-pub(crate) const VERSION: i64 = 14;
+pub(crate) const VERSION: i64 = 15;
 pub(crate) const APPLICATION_ID: i64 = 0x5a47_5250;
 
 pub(crate) fn validate(connection: &Connection) -> Result<()> {
@@ -44,7 +44,9 @@ pub(crate) fn initialize(connection: &mut Connection) -> Result<()> {
 
 // Direct local edges and references share one table. Resolution fills the target
 // on the existing reference row; invalidation clears it and retains the evidence.
-// `failed` is reserved for resolver integration; no API currently sets it.
+// `failed` terminates import references whose specifier addresses modules
+// outside the workspace; they carry no target, so invalidation cannot
+// resurrect them and only a rewrite of the owning file re-enqueues them.
 const SCHEMA: &str = "
 CREATE TABLE edges (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -61,7 +63,7 @@ CREATE TABLE edges (
     candidates TEXT CHECK (candidates IS NULL OR (json_valid(candidates) AND json_type(candidates) = 'array')),
     language TEXT NOT NULL DEFAULT 'unknown',
     name_tail TEXT NOT NULL DEFAULT '',
-    provenance TEXT CHECK (provenance IN ('file_local', 'file_scoped', 'import_bound', 'import_scoped', 'preferred_file', 'workspace_unique')),
+    provenance TEXT CHECK (provenance IN ('arity_bound', 'export_bound', 'file_local', 'file_scoped', 'import_bound', 'import_scoped', 'preferred_file', 'workspace_unique')),
     metadata TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(metadata) AND json_type(metadata) = 'object'),
     CHECK ((status = 'resolved' AND target IS NOT NULL AND provenance IS NOT NULL)
         OR (status IN ('pending', 'failed') AND target IS NULL AND provenance IS NULL)),
@@ -87,6 +89,7 @@ CREATE TABLE entities (
     name TEXT NOT NULL,
     qualified_name TEXT NOT NULL,
     is_exported INTEGER NOT NULL CHECK (is_exported IN (0, 1)),
+    arity INTEGER CHECK (arity >= 0),
     PRIMARY KEY (file_id, entity_id)
 ) STRICT;
 CREATE INDEX entities_name ON entities(name);

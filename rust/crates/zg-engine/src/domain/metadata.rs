@@ -54,6 +54,12 @@ pub struct CodeMetadata {
     pub visibility: Option<Visibility>,
     pub parameter: Option<String>,
     pub language: Option<Language>,
+    /// Declared parameter count of function-shaped symbols, with the
+    /// implicit receiver excluded.
+    pub arity: Option<usize>,
+    /// Whether the symbol is importable from outside its module.
+    #[serde(default)]
+    pub is_exported: bool,
 }
 
 impl CodeMetadata {

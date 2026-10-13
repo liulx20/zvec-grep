@@ -75,7 +75,7 @@ impl SqliteGraphStorage {
     pub(crate) fn lookup_by_name(&self, name: &str) -> Result<Vec<NameIndexEntry>> {
         nonempty(name)?;
         let mut statement = self.connection.prepare(
-            "SELECT entity_id, file_id, qualified_name, is_exported FROM entities
+            "SELECT entity_id, file_id, qualified_name, is_exported, arity FROM entities
              WHERE name = ?1 ORDER BY entity_id",
         )?;
         let rows = statement.query_map([name], |row| {
@@ -84,6 +84,9 @@ impl SqliteGraphStorage {
                 file_id: row.get(1)?,
                 qualified_name: row.get(2)?,
                 is_exported: row.get::<_, i64>(3)? == 1,
+                arity: row
+                    .get::<_, Option<i64>>(4)?
+                    .and_then(|arity| u32::try_from(arity).ok()),
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -132,6 +135,29 @@ impl SqliteGraphStorage {
             Some(row) => u32::try_from(row?).ok(),
             None => None,
         })
+    }
+
+    /// Whether the workspace snapshot contains a module rooted at `name`:
+    /// a file matching one of `extensions`, or any path inside a directory
+    /// named `name`. Anchors the resolver's external-import detection;
+    /// specifiers are identifiers, so no LIKE escaping is needed.
+    ///
+    /// # Errors
+    /// Propagates SQLite errors.
+    pub(crate) fn path_has_module(&self, name: &str, extensions: &[&str]) -> Result<bool> {
+        for extension in extensions {
+            let mut statement = self
+                .connection
+                .prepare("SELECT EXISTS(SELECT 1 FROM file_paths WHERE relative_path = ?1)")?;
+            let path = format!("{name}.{extension}");
+            if statement.query_row([&path], |row| row.get::<_, i64>(0))? != 0 {
+                return Ok(true);
+            }
+        }
+        let mut statement = self.connection.prepare(
+            "SELECT EXISTS(SELECT 1 FROM file_paths WHERE relative_path LIKE ?1 || '/%')",
+        )?;
+        Ok(statement.query_row([name], |row| row.get::<_, i64>(0))? != 0)
     }
 
     /// Files whose modules one file's resolved imports point at, deduplicated:

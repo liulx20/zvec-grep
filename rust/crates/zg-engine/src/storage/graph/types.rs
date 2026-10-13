@@ -43,6 +43,8 @@ impl EdgeKind {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Provenance {
+    ArityBound,
+    ExportBound,
     FileLocal,
     FileScoped,
     ImportBound,
@@ -54,6 +56,8 @@ pub(crate) enum Provenance {
 impl Provenance {
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
+            Self::ArityBound => "arity_bound",
+            Self::ExportBound => "export_bound",
             Self::FileLocal => "file_local",
             Self::FileScoped => "file_scoped",
             Self::ImportBound => "import_bound",
@@ -108,6 +112,7 @@ pub(crate) struct EntityRecord {
     pub name: String,
     pub qualified_name: String,
     pub is_exported: bool,
+    pub arity: Option<u32>,
 }
 
 /// A complete per-file snapshot. Node metadata is deliberately not stored here,
@@ -130,6 +135,7 @@ pub(crate) struct NameIndexEntry {
     pub file_id: u32,
     pub qualified_name: String,
     pub is_exported: bool,
+    pub arity: Option<u32>,
 }
 
 /// A pending reference with its database identity.

@@ -182,6 +182,8 @@ struct CodeEntity<'tree> {
     breadcrumb: Vec<String>,
     signature: Option<String>,
     documentation: Option<String>,
+    arity: Option<usize>,
+    is_exported: bool,
 }
 
 fn walk_code_node<'tree>(
@@ -220,6 +222,8 @@ fn walk_code_node<'tree>(
                     breadcrumb: entity_breadcrumb,
                     signature: adapter.extract_signature(entity, source),
                     documentation: LanguageAdapter::extract_doc(entity, source),
+                    arity: adapter.extract_arity(entity, source),
+                    is_exported: adapter.is_exported(entity, !breadcrumb.is_empty()),
                 });
             }
             // Name-based references are collected from the first resolved
@@ -329,6 +333,8 @@ fn code_entity_metadata(entity: &CodeEntity<'_>) -> EntityMetadata {
         visibility: None,
         parameter: None,
         language: None,
+        arity: entity.arity,
+        is_exported: entity.is_exported,
     })
 }
 
@@ -607,6 +613,8 @@ mod tests {
                 parameter: None,
                 language: None,
                 documentation: Some("Adds one.".to_owned()),
+                arity: Some(1),
+                is_exported: false,
             }))
         );
         assert!(matches!(
@@ -624,6 +632,8 @@ mod tests {
                 parameter: None,
                 language: None,
                 documentation: None,
+                arity: Some(0),
+                is_exported: false,
             }))
         );
         assert!(matches!(
@@ -669,6 +679,8 @@ mod tests {
                 parameter: None,
                 language: None,
                 documentation: None,
+                arity: None,
+                is_exported: false,
             }))
         );
         assert!(matches!(
@@ -699,6 +711,8 @@ mod tests {
                 parameter: None,
                 language: None,
                 documentation: None,
+                arity: Some(0),
+                is_exported: false,
             }))
         );
         assert!(matches!(
@@ -730,6 +744,8 @@ mod tests {
                 parameter: None,
                 language: None,
                 documentation: None,
+                arity: Some(1),
+                is_exported: false,
             }))
         );
     }
@@ -1793,5 +1809,70 @@ mod tests {
                 .iter()
                 .any(|edge| edge.ref_kind == GraphRefKind::Imports)
         );
+    }
+
+    fn code_fields(entity: &super::ExtractedEntity) -> (Option<usize>, bool) {
+        let Some(EntityMetadata::Code(metadata)) = test_metadata(entity) else {
+            panic!("code metadata expected");
+        };
+        (metadata.arity, metadata.is_exported)
+    }
+
+    #[test]
+    fn arity_and_export_flags_follow_declaration_shapes() {
+        let typescript = test_source(
+            FileFormat::TypeScript,
+            "fixture.ts",
+            &[
+                "export function visible(count: number): void {}",
+                "function hidden() {}",
+                "export const bag = { grab(item: string) { return item; } };",
+            ]
+            .join("\n"),
+        );
+        let fragments = extract(&typescript, ChunkOptions::default()).expect("ts extraction");
+        assert_eq!(code_fields(named(&fragments, "visible")), (Some(1), true));
+        assert_eq!(code_fields(named(&fragments, "hidden")), (Some(0), false));
+        // The bag owns the export; its members stay module-internal.
+        assert_eq!(code_fields(named(&fragments, "grab")), (Some(1), false));
+
+        let rust = test_source(
+            FileFormat::Rust,
+            "lib.rs",
+            &[
+                "pub struct Gauge;",
+                "impl Gauge {",
+                "    pub fn add(&mut self, delta: u32) -> u32 { delta }",
+                "    fn reset(&self) {}",
+                "}",
+            ]
+            .join("\n"),
+        );
+        let fragments = extract(&rust, ChunkOptions::default()).expect("rust extraction");
+        assert_eq!(code_fields(named(&fragments, "Gauge")), (None, true));
+        assert_eq!(code_fields(named(&fragments, "add")), (Some(1), true));
+        assert_eq!(code_fields(named(&fragments, "reset")), (Some(0), false));
+
+        let python = test_source(
+            FileFormat::Python,
+            "mod.py",
+            &["def top(level):", "    return level", ""].join("\n"),
+        );
+        let fragments = extract(&python, ChunkOptions::default()).expect("py extraction");
+        assert_eq!(code_fields(named(&fragments, "top")), (Some(1), true));
+
+        let member = test_source(
+            FileFormat::Python,
+            "svc.py",
+            &[
+                "class Service:",
+                "    def fetch(self, value):",
+                "        return value",
+            ]
+            .join("\n"),
+        );
+        let fragments = extract(&member, ChunkOptions::default()).expect("py member extraction");
+        // The leading receiver is excluded; class members are not importable.
+        assert_eq!(code_fields(named(&fragments, "fetch")), (Some(1), false));
     }
 }

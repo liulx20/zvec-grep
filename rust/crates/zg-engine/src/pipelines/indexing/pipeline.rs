@@ -2263,6 +2263,7 @@ mod tests {
                 name: entity.to_owned(),
                 qualified_name: entity.to_owned(),
                 is_exported: false,
+                arity: None,
             }],
             edges: vec![contains_edge(entity)],
             pending_refs: Vec::new(),
@@ -2739,6 +2740,159 @@ mod tests {
         assert!(
             remaining.refs.is_empty(),
             "every reference resolves: {:?}",
+            remaining.refs
+        );
+    }
+
+    /// Real-chain check for export evidence: two files declare the same
+    /// function name and only one exports it, so a bare call from a third
+    /// file binds to the exported definition.
+    #[test]
+    fn real_extraction_chain_binds_exported_definitions_over_shadows() {
+        use crate::storage::graph::{Direction, EdgeKind, Provenance};
+
+        let definition = TextSource {
+            relative_path: SourcePath::new("entry.ts").expect("source path"),
+            formats: vec![FileFormat::TypeScript],
+            text: "export function setup(): number {\n  return 2;\n}\n".to_owned(),
+        };
+        let shadow = TextSource {
+            relative_path: SourcePath::new("interior.ts").expect("source path"),
+            formats: vec![FileFormat::TypeScript],
+            text: "function setup(): number {\n  return 1;\n}\n".to_owned(),
+        };
+        let consumer = TextSource {
+            relative_path: SourcePath::new("main.ts").expect("source path"),
+            formats: vec![FileFormat::TypeScript],
+            text: "export function main(): number {\n  return setup();\n}\n".to_owned(),
+        };
+        let options = crate::extraction::ChunkOptions {
+            max_chunk_chars: Some(4096),
+            chunk_overlap_chars: Some(0),
+        };
+        let graph = Mutex::new(
+            crate::storage::graph::SqliteGraphStorage::in_memory().expect("graph opens"),
+        );
+
+        let persist = |source: &TextSource, file_id: FileId| {
+            let extracted = extract_for_indexing(source, options).expect("extract typescript");
+            let language = graph_language(&source.formats);
+            let partitioned = extracted.graph;
+            let entities = bind_entities(file_id, extracted.fragments);
+            let snapshot = partitioned.map(|partitioned| {
+                let assembled = graph_assembly::assemble_file_graph(
+                    &file_id.to_string(),
+                    language,
+                    &partitioned,
+                    &entities,
+                );
+                graph_sink::file_graph(file_id, language, &assembled).expect("snapshot converts")
+            });
+            persist_file_graph(
+                &graph,
+                file_id,
+                source.relative_path.as_path(),
+                snapshot.as_ref(),
+            )
+            .expect("persist");
+        };
+        persist(&definition, FileId::new(7));
+        persist(&shadow, FileId::new(8));
+        persist(&consumer, FileId::new(9));
+
+        let hits = lock_graph(&graph)
+            .lookup_by_name("setup")
+            .expect("name index");
+        assert_eq!(hits.len(), 2, "setup is ambiguous across files");
+        let exported: Vec<_> = hits.iter().filter(|hit| hit.is_exported).collect();
+        assert_eq!(exported.len(), 1, "exactly one setup is exported");
+
+        let sweep = {
+            let mut storage = lock_graph(&graph);
+            super::super::graph_resolver::resolve_pending(&mut storage).expect("sweep")
+        };
+        assert_eq!(sweep.resolved, 1);
+        assert_eq!(sweep.export_bound, 1);
+
+        let inbound = lock_graph(&graph)
+            .neighborhood(
+                &exported[0].entity_id,
+                Direction::In,
+                Some(&[EdgeKind::Calls]),
+            )
+            .expect("inbound edges");
+        assert_eq!(inbound.len(), 1, "export-bound call edge: {inbound:?}");
+        assert_eq!(inbound[0].provenance, Provenance::ExportBound);
+        let remaining = lock_graph(&graph).list_pending_refs(100, 0).expect("page");
+        assert!(
+            remaining.refs.is_empty(),
+            "every reference resolves: {:?}",
+            remaining.refs
+        );
+    }
+
+    /// Real-chain check for failed termination: a Python `import re` addresses
+    /// a stdlib module outside the workspace, so the reference leaves the
+    /// pending queue instead of waiting for cross-file resolution.
+    #[test]
+    fn real_extraction_chain_fails_external_python_imports() {
+        let source = TextSource {
+            relative_path: SourcePath::new("mod.py").expect("source path"),
+            formats: vec![FileFormat::Python],
+            text: "import re\n\n\ndef run():\n    return 1\n".to_owned(),
+        };
+        let options = crate::extraction::ChunkOptions {
+            max_chunk_chars: Some(4096),
+            chunk_overlap_chars: Some(0),
+        };
+        let graph = Mutex::new(
+            crate::storage::graph::SqliteGraphStorage::in_memory().expect("graph opens"),
+        );
+
+        let extracted = extract_for_indexing(&source, options).expect("extract python");
+        let language = graph_language(&source.formats);
+        let file_id = FileId::new(9);
+        let partitioned = extracted.graph;
+        let entities = bind_entities(file_id, extracted.fragments);
+        let snapshot = partitioned.map(|partitioned| {
+            let assembled = graph_assembly::assemble_file_graph(
+                &file_id.to_string(),
+                language,
+                &partitioned,
+                &entities,
+            );
+            graph_sink::file_graph(file_id, language, &assembled).expect("snapshot converts")
+        });
+        persist_file_graph(
+            &graph,
+            file_id,
+            source.relative_path.as_path(),
+            snapshot.as_ref(),
+        )
+        .expect("persist");
+
+        let before = lock_graph(&graph).list_pending_refs(100, 0).expect("page");
+        assert_eq!(
+            before
+                .refs
+                .iter()
+                .filter(|reference| reference.reference.reference_kind
+                    == crate::storage::graph::EdgeKind::Imports)
+                .count(),
+            1,
+            "the stdlib import enters the queue"
+        );
+
+        let sweep = {
+            let mut storage = lock_graph(&graph);
+            super::super::graph_resolver::resolve_pending(&mut storage).expect("sweep")
+        };
+        assert_eq!(sweep.failed, 1);
+        assert_eq!(sweep.resolved, 0);
+        let remaining = lock_graph(&graph).list_pending_refs(100, 0).expect("page");
+        assert!(
+            remaining.refs.is_empty(),
+            "the external import leaves the queue: {:?}",
             remaining.refs
         );
     }

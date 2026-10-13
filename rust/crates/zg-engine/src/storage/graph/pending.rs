@@ -109,6 +109,35 @@ impl SqliteGraphStorage {
         tx.commit()?;
         Ok(recorded)
     }
+
+    /// Atomically terminates pending references whose specifier cannot
+    /// address any workspace module. Failed rows drop out of the queue until
+    /// the owning file is rewritten; they carry no target, so invalidation
+    /// never resurrects them. The same caller serialization as
+    /// `apply_resolutions` applies.
+    ///
+    /// # Errors
+    /// Rejects invalid proposals and SQLite failures; the entire batch rolls back.
+    pub(crate) fn apply_failures(&mut self, ref_ids: &[i64]) -> Result<usize> {
+        if ref_ids.iter().any(|ref_id| *ref_id < 1) {
+            return Err(Error::InvalidInput("failures require a positive ref ID"));
+        }
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut failed = 0;
+        {
+            let mut update = tx.prepare(
+                "UPDATE edges SET status = 'failed', candidates = NULL
+                 WHERE id = ? AND status = 'pending'",
+            )?;
+            for ref_id in ref_ids {
+                failed += update.execute(params![ref_id])?;
+            }
+        }
+        tx.commit()?;
+        Ok(failed)
+    }
 }
 
 fn ref_from_row(row: &Row<'_>) -> rusqlite::Result<StoredPendingRef> {

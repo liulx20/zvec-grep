@@ -127,25 +127,37 @@ pub(super) fn assemble_file_graph(
 /// Builds a graph node from a bound entity. Node identity is the entity ID
 /// string; qualified names join the breadcrumb with `::`.
 fn entity_node(entity: &Entity, language: FileFormat) -> FileGraphNode {
-    let (name, kind, qualified_name, signature, doc, visibility) = match entity.metadata.as_ref() {
-        Some(EntityMetadata::Code(code)) => {
-            let name = code.symbol_name.clone();
-            let qualified_name = match (&name, &code.scope) {
-                (Some(name), Some(scope)) => format!("{scope}::{name}"),
-                (Some(name), None) => name.clone(),
-                (None, _) => String::new(),
-            };
-            (
-                name,
-                code.symbol_type.unwrap_or(SymbolType::Value),
-                qualified_name,
-                code.signature.clone(),
-                code.documentation.clone(),
-                code.visibility.clone(),
-            )
-        }
-        _ => (None, SymbolType::Value, String::new(), None, None, None),
-    };
+    let (name, kind, qualified_name, signature, doc, visibility, arity, is_exported) =
+        match entity.metadata.as_ref() {
+            Some(EntityMetadata::Code(code)) => {
+                let name = code.symbol_name.clone();
+                let qualified_name = match (&name, &code.scope) {
+                    (Some(name), Some(scope)) => format!("{scope}::{name}"),
+                    (Some(name), None) => name.clone(),
+                    (None, _) => String::new(),
+                };
+                (
+                    name,
+                    code.symbol_type.unwrap_or(SymbolType::Value),
+                    qualified_name,
+                    code.signature.clone(),
+                    code.documentation.clone(),
+                    code.visibility.clone(),
+                    code.arity,
+                    code.is_exported,
+                )
+            }
+            _ => (
+                None,
+                SymbolType::Value,
+                String::new(),
+                None,
+                None,
+                None,
+                None,
+                false,
+            ),
+        };
     let range = match entity.source_range {
         Range::Text(range) => Some(range),
         _ => None,
@@ -162,13 +174,9 @@ fn entity_node(entity: &Entity, language: FileFormat) -> FileGraphNode {
         end_column: range.as_ref().map_or(0, |range| range.end_byte_column()),
         signature,
         doc,
-        // Parameter counts are not extracted today; the TS contract keeps the
-        // field for future outline enrichment.
-        arity: None,
+        arity,
         visibility: visibility.map(|visibility| visibility.as_str().to_owned()),
-        // Export detection needs modifiers, which the Rust walk does not
-        // collect yet; the TS original recorded `entity.modifiers`.
-        is_exported: false,
+        is_exported,
     }
 }
 

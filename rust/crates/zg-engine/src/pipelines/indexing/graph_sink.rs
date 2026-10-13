@@ -69,18 +69,19 @@ pub(super) fn file_graph(
     let entity_ids = result.nodes.iter().map(|node| node.id.clone()).collect();
 
     // Unnamed entities cannot be found by name, so they stay out of the index.
-    let entities = result
-        .nodes
-        .iter()
-        .filter_map(|node| {
-            node.name.as_deref().map(|name| graph::EntityRecord {
-                entity_id: node.id.clone(),
-                name: name.to_owned(),
-                qualified_name: node.qualified_name.clone(),
-                is_exported: node.is_exported,
-            })
-        })
-        .collect();
+    let mut entities = Vec::new();
+    for node in &result.nodes {
+        let Some(name) = node.name.as_deref() else {
+            continue;
+        };
+        entities.push(graph::EntityRecord {
+            entity_id: node.id.clone(),
+            name: name.to_owned(),
+            qualified_name: node.qualified_name.clone(),
+            is_exported: node.is_exported,
+            arity: position(node.arity)?,
+        });
+    }
 
     let mut edges = Vec::with_capacity(result.edges.len());
     for edge in &result.edges {
@@ -255,6 +256,7 @@ mod tests {
                 name: "a".to_owned(),
                 qualified_name: "a".to_owned(),
                 is_exported: false,
+                arity: None,
             }]
         );
         let [edge] = snapshot.edges.as_slice() else {
@@ -313,6 +315,7 @@ mod tests {
                 name: "visible".to_owned(),
                 qualified_name: "scope::visible".to_owned(),
                 is_exported: true,
+                arity: None,
             }]
         );
     }

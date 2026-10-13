@@ -285,6 +285,8 @@ fn metadata_fragments(
             parameter: None,
             language: None,
             documentation: Some("Produces the seasonal crop.".into()),
+            arity: Some(2),
+            is_exported: true,
         })),
         fragments: vec![
             EntityFragment {

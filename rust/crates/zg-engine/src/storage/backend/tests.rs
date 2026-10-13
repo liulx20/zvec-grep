@@ -609,6 +609,8 @@ fn fixture(
                 parameter: None,
                 language: None,
                 documentation: None,
+                arity: Some(2),
+                is_exported: true,
             })),
         },
         vector,
