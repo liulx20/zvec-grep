@@ -341,6 +341,12 @@ fn is_unresolvable_import(
     }
     let specifier = reference.reference_name.as_str();
     let root = match reference.language.as_str() {
+        // Angle-bracket includes address the standard library and `-I`
+        // include paths, which a workspace snapshot can never spell — the
+        // extraction layer only emits this form for `#include <x>`. Quoted
+        // forms arrive normalized to `./x` and flow through the relative
+        // path below.
+        "c" | "cpp" if specifier.starts_with('<') => return Ok(true),
         "typescript" | "javascript"
             if !specifier.starts_with("./") && !specifier.starts_with("../") =>
         {
@@ -1328,6 +1334,35 @@ mod tests {
                 .iter()
                 .all(|stored| stored.reference.reference_name.starts_with('@'))
         );
+    }
+
+    #[test]
+    fn system_includes_fail_while_quoted_ones_flow_through_relative_paths() {
+        let mut graph = open_memory();
+        let mut references = graph_with_import("f9", "<string>");
+        references.pending_refs[0].language = "cpp".to_owned();
+        references.pending_refs.push(pending_reference(
+            "f9",
+            "./alloc.h",
+            crate::storage::graph::EdgeKind::Imports,
+            "cpp",
+        ));
+        graph
+            .write_file_graph(9, "sample.cpp", &references, &[])
+            .expect("reference write");
+
+        let sweep = resolve_pending(&mut graph).expect("sweep");
+
+        // The angle-bracket include terminates as external; the quoted
+        // include keeps flowing through the relative-import rule (which
+        // holds it — no sibling file exists).
+        assert_eq!(sweep.failed, 1);
+        assert_eq!(sweep.resolved, 0);
+        let page = graph.list_pending_refs(10, 0).expect("pending page");
+        let [stored] = page.refs.as_slice() else {
+            panic!("only the quoted include stays pending");
+        };
+        assert_eq!(stored.reference.reference_name, "./alloc.h");
     }
 
     #[test]

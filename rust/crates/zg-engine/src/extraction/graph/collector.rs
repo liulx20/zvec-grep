@@ -164,6 +164,11 @@ fn module_path_of(node: Node<'_>, source: &[u8], format: FileFormat) -> Option<S
     if let Some(vocabulary) = import_vocabulary_for(format) {
         for field in vocabulary.module_fields {
             if let Some(target) = node.child_by_field_name(field) {
+                if matches!(format, FileFormat::C | FileFormat::Cpp) {
+                    if let Some(path) = c_include_module_path(target, source) {
+                        return Some(path);
+                    }
+                }
                 let path = normalize_module_path(node_text(target, source));
                 if !path.is_empty() {
                     return Some(path);
@@ -205,6 +210,32 @@ fn module_path_of(node: Node<'_>, source: &[u8], format: FileFormat) -> Option<S
         return Some(node_path);
     }
     None
+}
+
+/// Specializes C/C++ include paths by their node form, which tree-sitter
+/// spells distinctly. `<x>` (`system_lib_string`) addresses the standard
+/// library and `-I` include paths the workspace snapshot can never prove —
+/// the angle brackets survive so the resolver terminates them as external.
+/// `"x"` (`string_literal`) searches the includer's directory first per the
+/// C standard, so it normalizes to `./x` and the relative-import rule
+/// resolves it against the owning file. Other node kinds fall back to the
+/// generic path.
+fn c_include_module_path(target: Node<'_>, source: &[u8]) -> Option<String> {
+    let path = normalize_module_path(node_text(target, source));
+    if path.is_empty() {
+        return None;
+    }
+    match target.kind() {
+        "system_lib_string" => Some(format!("<{path}>")),
+        "string_literal" => {
+            if path.starts_with("./") || path.starts_with("../") {
+                Some(path)
+            } else {
+                Some(format!("./{path}"))
+            }
+        }
+        _ => None,
+    }
 }
 
 /// Named descendants within `max_depth` levels below `node`.

@@ -1732,6 +1732,42 @@ mod tests {
         );
     }
 
+    #[test]
+    fn c_include_forms_specialize_import_references() {
+        use crate::domain::GraphRefKind;
+
+        let source = test_source(
+            FileFormat::Cpp,
+            "fixture.cpp",
+            concat!(
+                "#include <string>\n",
+                "#include \"Foo.h\"\n",
+                "#include \"./sub/x.h\"\n",
+                "#include \"../peer.h\"\n",
+                "\n",
+                "int main() {\n",
+                "  return 0;\n",
+                "}\n",
+            ),
+        );
+        let extracted = extract_for_indexing(&source, ChunkOptions::default()).expect("extracts");
+        let graph = extracted.graph.expect("code walk produces a graph");
+
+        let imports: Vec<&str> = graph
+            .pending
+            .iter()
+            .filter(|edge| edge.ref_kind == GraphRefKind::Imports)
+            .map(|edge| edge.ref_name.as_str())
+            .collect();
+        // Angle-bracket includes keep their form (the resolver terminates
+        // them as external); quoted includes normalize to includer-relative
+        // paths per the C search rule.
+        assert_eq!(
+            imports,
+            vec!["<string>", "./Foo.h", "./sub/x.h", "../peer.h"]
+        );
+    }
+
     // Manual inspection harness, not part of CI: run with
     // `cargo test -p zg-engine --lib dump_walk_graph -- --ignored --nocapture`
     // to eyeball everything the walk collects over this crate's own graph.rs.
