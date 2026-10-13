@@ -322,6 +322,13 @@ fn resolve_qualified_name(
 /// a workspace file or directory — a monorepo package, a top-level module —
 /// stays in the queue for path-based rules instead of failing.
 ///
+/// Scoped specifiers (`@scope/pkg`) and path aliases (`@/x`) always stay
+/// queued: a workspace's own package name or `paths` mapping can route them
+/// inside the workspace while no file or directory spells the scope, so
+/// existence cannot be proven either way. They are safe to hold — their
+/// name tails contain `/`, which entity names never do, so the uniqueness
+/// rule cannot mis-bind them.
+///
 /// # Errors
 /// Propagates graph storage failures; every other reference is `false`.
 fn is_unresolvable_import(
@@ -337,6 +344,9 @@ fn is_unresolvable_import(
         "typescript" | "javascript"
             if !specifier.starts_with("./") && !specifier.starts_with("../") =>
         {
+            if specifier.starts_with('@') {
+                return Ok(false);
+            }
             specifier
                 .split('/')
                 .find(|segment| !segment.is_empty())
@@ -1288,6 +1298,36 @@ mod tests {
             panic!("the relative import stays pending");
         };
         assert_eq!(stored.reference.reference_name, "./util");
+    }
+
+    #[test]
+    fn scoped_package_imports_stay_pending() {
+        let mut graph = open_memory();
+        let mut references = graph_with_import("f9", "@zvec/zvec");
+        references.pending_refs.push(pending_reference(
+            "f9",
+            "@/utils",
+            crate::storage::graph::EdgeKind::Imports,
+            "typescript",
+        ));
+        graph
+            .write_file_graph(9, "run.ts", &references, &[])
+            .expect("reference write");
+
+        let sweep = resolve_pending(&mut graph).expect("sweep");
+
+        // A scoped specifier may address the workspace's own package (its
+        // package.json name) or a `paths` alias, so existence is unprovable
+        // either way and the refs hold instead of failing.
+        assert_eq!(sweep.failed, 0);
+        assert_eq!(sweep.resolved, 0);
+        let page = graph.list_pending_refs(10, 0).expect("pending page");
+        assert_eq!(page.refs.len(), 2);
+        assert!(
+            page.refs
+                .iter()
+                .all(|stored| stored.reference.reference_name.starts_with('@'))
+        );
     }
 
     #[test]
