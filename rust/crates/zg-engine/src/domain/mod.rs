@@ -40,6 +40,7 @@ pub(crate) use source::{
     TextRange,
 };
 pub use source::{ContentKind, FileCategory, FileFormat};
+pub(crate) use source::{formats_for_path, reference_compatible_with};
 
 // Workspaces.
 pub use workspace::ScanRules;

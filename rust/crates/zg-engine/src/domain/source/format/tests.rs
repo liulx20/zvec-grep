@@ -543,3 +543,38 @@ fn file_names_preserve_platform_encodings() {
         );
     }
 }
+
+#[test]
+fn language_gate_bridges_share_languages_and_known_pairs_only() {
+    // A language always hosts its own references.
+    for format in [TypeScript, JavaScript, Python, Rust, Go, Java, C, Cpp] {
+        assert!(reference_compatible_with(format, format));
+    }
+    // The two registered bridges: shared C/C++ headers, TS/JS interop.
+    assert!(reference_compatible_with(C, Cpp));
+    assert!(reference_compatible_with(Cpp, C));
+    assert!(reference_compatible_with(TypeScript, JavaScript));
+    assert!(reference_compatible_with(JavaScript, TypeScript));
+    // Everything else is coincidence, not resolution.
+    assert!(!reference_compatible_with(Python, TypeScript));
+    assert!(!reference_compatible_with(TypeScript, Python));
+    assert!(!reference_compatible_with(Rust, TypeScript));
+    assert!(!reference_compatible_with(Python, Rust));
+    assert!(!reference_compatible_with(Go, Rust));
+    assert!(!reference_compatible_with(C, Python));
+}
+
+#[test]
+fn formats_for_path_matches_longest_registered_extension() {
+    // "ts" registers under both MPEG-TS and TypeScript; both come back and
+    // consumers match on any compatible candidate.
+    let source = formats_for_path("src/kernel/decode.ts");
+    assert!(source.contains(&TypeScript));
+    // Double-barreled TypeScript declarations resolve to the same format.
+    assert_eq!(formats_for_path("types.d.ts"), [TypeScript]);
+    // Headers register under both C and C++.
+    let header = formats_for_path("include/parse.h");
+    assert!(header.contains(&C) && header.contains(&Cpp));
+    // Unregistered extensions have no opinion.
+    assert!(formats_for_path("vendor/blob.unregisteredext").is_empty());
+}

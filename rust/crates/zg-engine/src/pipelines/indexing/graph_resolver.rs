@@ -16,6 +16,7 @@
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 
+use crate::domain::{FileFormat, formats_for_path, reference_compatible_with};
 use crate::storage::graph::{
     EdgeKind, NameIndexEntry, PendingRef, Provenance, Resolution, SqliteGraphStorage,
     StoredPendingRef,
@@ -78,6 +79,7 @@ pub(super) fn resolve_pending(
     let mut failures: Vec<i64> = Vec::new();
     let mut candidate_sets: Vec<(i64, Vec<String>)> = Vec::new();
     let mut importing_paths: HashMap<u32, Option<String>> = HashMap::new();
+    let mut candidate_paths: HashMap<u32, Option<String>> = HashMap::new();
     let mut importing_files: HashMap<u32, Vec<u32>> = HashMap::new();
     let mut module_paths: HashMap<(String, String), bool> = HashMap::new();
     let mut cursor = 0;
@@ -111,7 +113,10 @@ pub(super) fn resolve_pending(
                 resolutions.push(resolution);
                 continue;
             }
-            let hits = graph.lookup_by_name(&stored.reference.name_tail)?;
+            let hits = {
+                let raw = graph.lookup_by_name(&stored.reference.name_tail)?;
+                filter_compatible_hits(graph, stored, raw, &mut candidate_paths)?
+            };
             if let Some(resolution) = resolve_receiver_local(stored, &hits) {
                 resolutions.push(resolution);
                 sweep.file_scoped += 1;
@@ -167,6 +172,45 @@ pub(super) fn resolve_pending(
         sweep.candidates_recorded = graph.record_candidates(&candidate_sets)?;
     }
     Ok(sweep)
+}
+
+/// Drops name-index candidates whose file language cannot host the
+/// reference. Every downstream rule — same-file, qualified, workspace
+/// uniqueness, import/export/arity bounds, and the recorded candidate
+/// sets — then reasons over same-language evidence only. The gate never
+/// discards on missing information: unknown reference languages, missing
+/// candidate paths, and unregistered extensions all keep their entries.
+///
+/// # Errors
+/// Propagates graph storage failures.
+fn filter_compatible_hits(
+    graph: &SqliteGraphStorage,
+    stored: &StoredPendingRef,
+    hits: Vec<NameIndexEntry>,
+    candidate_paths: &mut HashMap<u32, Option<String>>,
+) -> crate::storage::graph::Result<Vec<NameIndexEntry>> {
+    let mut filtered = Vec::with_capacity(hits.len());
+    for hit in hits {
+        let path = match candidate_paths.entry(hit.file_id) {
+            Entry::Occupied(entry) => entry.get().clone(),
+            Entry::Vacant(entry) => entry.insert(graph.file_path(hit.file_id)?).clone(),
+        };
+        let keep = match (
+            FileFormat::parse(&stored.reference.language),
+            path.as_deref(),
+        ) {
+            (Some(reference), Some(path)) if !formats_for_path(path).is_empty() => {
+                formats_for_path(path)
+                    .iter()
+                    .any(|candidate| reference_compatible_with(reference, *candidate))
+            }
+            _ => true,
+        };
+        if keep {
+            filtered.push(hit);
+        }
+    }
+    Ok(filtered)
 }
 
 /// Resolves a relative import specifier (`./x`, `../y`) onto the target
@@ -645,6 +689,171 @@ mod tests {
         assert_eq!(inbound.len(), 1);
         assert_eq!(inbound[0].source, "f9");
         assert_eq!(inbound[0].provenance, Provenance::WorkspaceUnique);
+    }
+
+    #[test]
+    fn cross_language_unique_names_stay_pending() {
+        let mut graph = open_memory();
+        graph
+            .write_file_graph(
+                1,
+                "kernel/decode.ts",
+                &empty_graph(vec![record("entity-str", "str")]),
+                &[],
+            )
+            .expect("definition write");
+        graph
+            .write_file_graph(
+                9,
+                "run.py",
+                &FileGraph {
+                    pending_refs: vec![pending_reference(
+                        "f9",
+                        "str",
+                        crate::storage::graph::EdgeKind::Calls,
+                        "python",
+                    )],
+                    ..empty_graph(Vec::new())
+                },
+                &[],
+            )
+            .expect("reference write");
+
+        let sweep = resolve_pending(&mut graph).expect("sweep");
+
+        // The python builtin `str` matches exactly one entity, but it lives
+        // in a TypeScript file: uniqueness across languages is coincidence,
+        // not resolution.
+        assert_eq!(sweep.resolved, 0);
+        let page = graph.list_pending_refs(10, 0).expect("pending page");
+        assert_eq!(page.refs.len(), 1);
+    }
+
+    #[test]
+    fn same_language_unique_names_still_bind() {
+        let mut graph = open_memory();
+        graph
+            .write_file_graph(
+                1,
+                "lib/config.py",
+                &empty_graph(vec![record("entity-parse", "parse_config")]),
+                &[],
+            )
+            .expect("definition write");
+        graph
+            .write_file_graph(
+                9,
+                "run.py",
+                &FileGraph {
+                    pending_refs: vec![pending_reference(
+                        "f9",
+                        "parse_config",
+                        crate::storage::graph::EdgeKind::Calls,
+                        "python",
+                    )],
+                    ..empty_graph(Vec::new())
+                },
+                &[],
+            )
+            .expect("reference write");
+
+        let sweep = resolve_pending(&mut graph).expect("sweep");
+
+        assert_eq!(sweep.resolved, 1);
+        let inbound = graph
+            .neighborhood(
+                "entity-parse",
+                crate::storage::graph::Direction::In,
+                Some(&[crate::storage::graph::EdgeKind::Calls]),
+            )
+            .expect("inbound");
+        assert_eq!(inbound[0].provenance, Provenance::WorkspaceUnique);
+    }
+
+    #[test]
+    fn cross_language_export_evidence_stays_pending() {
+        let mut graph = open_memory();
+        // Two same-named rust entities — exactly one exported — would hand
+        // the export-bound rule a unique target if the gate let them in.
+        let mut unexported = record("entity-set-inner", "set");
+        unexported.is_exported = false;
+        graph
+            .write_file_graph(
+                1,
+                "kernel/buffers.rs",
+                &empty_graph(vec![record("entity-set", "set"), unexported]),
+                &[],
+            )
+            .expect("definition write");
+        graph
+            .write_file_graph(9, "run.ts", &graph_with_pending(Vec::new(), "set"), &[])
+            .expect("reference write");
+
+        let sweep = resolve_pending(&mut graph).expect("sweep");
+
+        assert_eq!(sweep.export_bound, 0);
+        assert_eq!(sweep.resolved, 0);
+        let page = graph.list_pending_refs(10, 0).expect("pending page");
+        assert_eq!(page.refs.len(), 1);
+    }
+
+    #[test]
+    fn language_bridges_still_bind_across_c_headers_and_ts_js() {
+        let mut graph = open_memory();
+        graph
+            .write_file_graph(
+                1,
+                "lib/parse.cpp",
+                &empty_graph(vec![record("entity-token", "token")]),
+                &[],
+            )
+            .expect("cpp write");
+        graph
+            .write_file_graph(
+                9,
+                "scan.c",
+                &FileGraph {
+                    pending_refs: vec![pending_reference(
+                        "f9",
+                        "token",
+                        crate::storage::graph::EdgeKind::Calls,
+                        "c",
+                    )],
+                    ..empty_graph(Vec::new())
+                },
+                &[],
+            )
+            .expect("c write");
+        graph
+            .write_file_graph(
+                2,
+                "lib/legacy.js",
+                &empty_graph(vec![record("entity-legacy", "legacy")]),
+                &[],
+            )
+            .expect("js write");
+        graph
+            .write_file_graph(
+                10,
+                "app.ts",
+                &FileGraph {
+                    pending_refs: vec![pending_reference(
+                        "f10",
+                        "legacy",
+                        crate::storage::graph::EdgeKind::Calls,
+                        "typescript",
+                    )],
+                    ..empty_graph(Vec::new())
+                },
+                &[],
+            )
+            .expect("ts write");
+
+        let sweep = resolve_pending(&mut graph).expect("sweep");
+
+        // C references bind through C++ definitions and TypeScript through
+        // JavaScript sources: the registered bridges still resolve.
+        assert_eq!(sweep.resolved, 2);
     }
 
     #[test]
@@ -1237,7 +1446,7 @@ mod tests {
         graph
             .write_file_graph(
                 1,
-                "tables.rs",
+                "tables.ts",
                 &empty_graph(vec![qualified_record("tables-default", "Tables::default")]),
                 &[],
             )
@@ -1245,7 +1454,7 @@ mod tests {
         graph
             .write_file_graph(
                 2,
-                "gauges.rs",
+                "gauges.ts",
                 &empty_graph(vec![qualified_record("gauges-default", "Gauges::default")]),
                 &[],
             )
