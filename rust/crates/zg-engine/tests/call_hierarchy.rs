@@ -5,15 +5,14 @@
 #[allow(dead_code)] // Reuse the existing embedding stub; other storage helpers are unused here.
 mod support;
 
+use serde_json::{Value, json};
 use std::{fs, path::Path};
 use support::{EmbeddingServer, configure_remote_model, index_options};
 use zg_engine::{
     ZvecGrep,
     api::{
         index::{IndexResult, options::WorkspaceChange},
-        relationships::{
-            RelationshipEdge, RelationshipOptions, RelationshipSymbol, SymbolRelationships,
-        },
+        relationships::RelationshipOptions,
     },
 };
 
@@ -31,23 +30,37 @@ struct SourceFile {
 struct Query {
     direction: &'static str,
     symbol: &'static str,
-    expected: Vec<SymbolRelationships>,
+    // Key response fields only. startLine distinguishes overloads in the same file.
+    expected: Value,
 }
 
-fn sort_calls(groups: &mut [SymbolRelationships]) {
-    // Upstream implementations group/order calls differently. Ignore edge order,
-    // but retain duplicates and compare every endpoint, range, site and count.
-    for group in groups {
-        group.edges.sort_by_cached_key(|edge| {
-            let symbol = edge.symbol.as_ref().expect("known upstream endpoint");
-            (
-                symbol.file_path.clone(),
-                symbol.start_line,
-                symbol.name.clone(),
-                edge.line,
-                edge.column,
-            )
-        });
+fn retain_expected_fields(actual: &mut Value, expected: &Value) {
+    match (actual, expected) {
+        (Value::Object(actual), Value::Object(expected)) => {
+            actual.retain(|key, _| expected.contains_key(key));
+            for (key, expected) in expected {
+                if let Some(actual) = actual.get_mut(key) {
+                    retain_expected_fields(actual, expected);
+                }
+            }
+        }
+        (Value::Array(actual), Value::Array(expected)) => {
+            // Keep array lengths intact so extra/missing definitions and edges still fail.
+            for (actual, expected) in actual.iter_mut().zip(expected) {
+                retain_expected_fields(actual, expected);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn sort_calls(groups: &mut Value) {
+    // Ignore edge order, but preserve definition groups, duplicate sites and selected fields.
+    for group in groups.as_array_mut().expect("relationship matches array") {
+        group["edges"]
+            .as_array_mut()
+            .expect("relationship edges array")
+            .sort_by_cached_key(Value::to_string);
     }
 }
 
@@ -92,10 +105,12 @@ async fn check_queries(engine: &ZvecGrep, root: &Path, stage: &str, queries: &[Q
             "out" => engine.callees(options).await,
             _ => panic!("invalid query direction"),
         };
-        let mut actual = result.unwrap_or_else(|error| {
+        let actual = result.unwrap_or_else(|error| {
             panic!("{}: {} {}: {error}", stage, query.direction, query.symbol)
         });
+        let mut actual = serde_json::to_value(actual).expect("serialize relationship response");
         let mut expected = query.expected.clone();
+        retain_expected_fields(&mut actual, &expected);
         sort_calls(&mut actual);
         sort_calls(&mut expected);
         assert_eq!(
@@ -106,34 +121,6 @@ async fn check_queries(engine: &ZvecGrep, root: &Path, stage: &str, queries: &[Q
     }
 }
 
-// Expected descriptions and call sites come from the upstream examples, not index output.
-fn description(name: &str, path: &str, start_line: usize, end_line: usize) -> RelationshipSymbol {
-    RelationshipSymbol {
-        name: name.into(),
-        file_path: path.into(),
-        start_line,
-        end_line,
-    }
-}
-
-fn relationships(
-    symbol: &RelationshipSymbol,
-    sites: &[(&RelationshipSymbol, u32, u32)],
-) -> SymbolRelationships {
-    SymbolRelationships {
-        symbol: symbol.clone(),
-        total_edges: sites.len(),
-        edges: sites
-            .iter()
-            .map(|&(symbol, line, column)| RelationshipEdge {
-                symbol: Some(symbol.clone()),
-                line: Some(line),
-                column: Some(column),
-            })
-            .collect(),
-    }
-}
-
 // https://github.com/rust-lang/rust-analyzer/blob/3131751eaf1c3b5da6e618acdc2148ad7db65bc7/crates/ide/src/call_hierarchy.rs
 // Upstream case: test_call_hierarchy_in_same_fn.
 // https://github.com/rust-lang/rust-analyzer/blob/3131751eaf1c3b5da6e618acdc2148ad7db65bc7/crates/ide/src/call_hierarchy.rs
@@ -141,8 +128,6 @@ fn relationships(
 // upstream grouped call ranges into one edge per site; definition ranges cover full functions.
 #[tokio::test]
 async fn rust_repeated_calls() {
-    let target = description("callee", "lib.rs", 1, 1);
-    let caller = description("caller", "lib.rs", 2, 5);
     check_case(Case {
         name: "rust_repeated_calls",
         files: vec![SourceFile {
@@ -153,22 +138,40 @@ async fn rust_repeated_calls() {
             Query {
                 direction: "in",
                 symbol: "callee",
-                expected: vec![relationships(&target, &[(&caller, 3, 4), (&caller, 4, 4)])],
+                expected: json!([
+                    {"name": "callee", "filePath": "lib.rs", "startLine": 1,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "lib.rs", "startLine": 2}, "line": 3, "column": 4},
+                        {"symbol": {"name": "caller", "filePath": "lib.rs", "startLine": 2}, "line": 4, "column": 4},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "caller",
-                expected: vec![relationships(&caller, &[(&target, 3, 4), (&target, 4, 4)])],
+                expected: json!([
+                    {"name": "caller", "filePath": "lib.rs", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "callee", "filePath": "lib.rs", "startLine": 1}, "line": 3, "column": 4},
+                        {"symbol": {"name": "callee", "filePath": "lib.rs", "startLine": 1}, "line": 4, "column": 4},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "caller",
-                expected: vec![relationships(&caller, &[])],
+                expected: json!([
+                    {"name": "caller", "filePath": "lib.rs", "startLine": 2,
+                     "edges": []},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "callee",
-                expected: vec![relationships(&target, &[])],
+                expected: json!([
+                    {"name": "callee", "filePath": "lib.rs", "startLine": 1,
+                     "edges": []},
+                ]),
             },
         ],
     })
@@ -182,8 +185,6 @@ async fn rust_repeated_calls() {
 // definition and its foo scope; the import itself is not a calls edge.
 #[tokio::test]
 async fn rust_cross_file() {
-    let foo_callee = description("foo::callee", "foo/mod.rs", 1, 1);
-    let caller = description("caller", "lib.rs", 4, 6);
     check_case(Case {
         name: "rust_cross_file",
         files: vec![
@@ -200,17 +201,32 @@ async fn rust_cross_file() {
             Query {
                 direction: "in",
                 symbol: "callee",
-                expected: vec![relationships(&foo_callee, &[(&caller, 5, 4)])],
+                expected: json!([
+                    {"name": "foo::callee", "filePath": "foo/mod.rs", "startLine": 1,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "lib.rs", "startLine": 4}, "line": 5, "column": 4},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "caller",
-                expected: vec![relationships(&caller, &[(&foo_callee, 5, 4)])],
+                expected: json!([
+                    {"name": "caller", "filePath": "lib.rs", "startLine": 4,
+                     "edges": [
+                        {"symbol": {"name": "foo::callee", "filePath": "foo/mod.rs", "startLine": 1}, "line": 5, "column": 4},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "foo::callee",
-                expected: vec![relationships(&foo_callee, &[(&caller, 5, 4)])],
+                expected: json!([
+                    {"name": "foo::callee", "filePath": "foo/mod.rs", "startLine": 1,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "lib.rs", "startLine": 4}, "line": 5, "column": 4},
+                    ]},
+                ]),
             },
         ],
     })
@@ -224,11 +240,6 @@ async fn rust_cross_file() {
 // queries do not request outgoing calls from func.
 #[tokio::test]
 async fn python_import_alias() {
-    let call_by_alias = description("callByAlias", "consume.py", 4, 5);
-    let func = description("func", "declare.py", 1, 2);
-    let call_by_name = description("callByName", "consume.py", 7, 8);
-    let call_by_both1 = description("callByBoth1", "consume.py", 10, 12);
-    let call_by_both2 = description("callByBoth2", "consume.py", 14, 16);
     check_case(Case {
         name: "python_import_alias",
         files: vec![
@@ -245,37 +256,59 @@ async fn python_import_alias() {
             Query {
                 direction: "out",
                 symbol: "callByAlias",
-                expected: vec![
-                    relationships(&call_by_alias, &[(&func, 5, 4)]),
-                ],
+                expected: json!([
+                    {"name": "callByAlias", "filePath": "consume.py", "startLine": 4,
+                     "edges": [
+                        {"symbol": {"name": "func", "filePath": "declare.py", "startLine": 1}, "line": 5, "column": 4},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "callByName",
-                expected: vec![
-                    relationships(&call_by_name, &[(&func, 8, 4)]),
-                ],
+                expected: json!([
+                    {"name": "callByName", "filePath": "consume.py", "startLine": 7,
+                     "edges": [
+                        {"symbol": {"name": "func", "filePath": "declare.py", "startLine": 1}, "line": 8, "column": 4},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "callByBoth1",
-                expected: vec![
-                    relationships(&call_by_both1, &[(&func, 11, 4), (&func, 12, 4)]),
-                ],
+                expected: json!([
+                    {"name": "callByBoth1", "filePath": "consume.py", "startLine": 10,
+                     "edges": [
+                        {"symbol": {"name": "func", "filePath": "declare.py", "startLine": 1}, "line": 11, "column": 4},
+                        {"symbol": {"name": "func", "filePath": "declare.py", "startLine": 1}, "line": 12, "column": 4},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "callByBoth2",
-                expected: vec![
-                    relationships(&call_by_both2, &[(&func, 15, 4), (&func, 16, 4)]),
-                ],
+                expected: json!([
+                    {"name": "callByBoth2", "filePath": "consume.py", "startLine": 14,
+                     "edges": [
+                        {"symbol": {"name": "func", "filePath": "declare.py", "startLine": 1}, "line": 15, "column": 4},
+                        {"symbol": {"name": "func", "filePath": "declare.py", "startLine": 1}, "line": 16, "column": 4},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "func",
-                expected: vec![
-                    relationships(&func, &[(&call_by_alias, 5, 4), (&call_by_name, 8, 4), (&call_by_both1, 11, 4), (&call_by_both1, 12, 4), (&call_by_both2, 15, 4), (&call_by_both2, 16, 4)]),
-                ],
+                expected: json!([
+                    {"name": "func", "filePath": "declare.py", "startLine": 1,
+                     "edges": [
+                        {"symbol": {"name": "callByAlias", "filePath": "consume.py", "startLine": 4}, "line": 5, "column": 4},
+                        {"symbol": {"name": "callByName", "filePath": "consume.py", "startLine": 7}, "line": 8, "column": 4},
+                        {"symbol": {"name": "callByBoth1", "filePath": "consume.py", "startLine": 10}, "line": 11, "column": 4},
+                        {"symbol": {"name": "callByBoth1", "filePath": "consume.py", "startLine": 10}, "line": 12, "column": 4},
+                        {"symbol": {"name": "callByBoth2", "filePath": "consume.py", "startLine": 14}, "line": 15, "column": 4},
+                        {"symbol": {"name": "callByBoth2", "filePath": "consume.py", "startLine": 14}, "line": 16, "column": 4},
+                    ]},
+                ]),
             },
         ],
     }).await;
@@ -287,12 +320,6 @@ async fn python_import_alias() {
 // print has no outgoing item. The global underscore is a value entity.
 #[tokio::test]
 async fn go_enclosing_callers() {
-    let baz = description("baz", "a/a.go", 11, 13);
-    let bar = description("bar", "a/a.go", 7, 9);
-    let global = description("_", "a/a.go", 19, 22);
-    let init = description("init", "a/a.go", 24, 26);
-    let bluh = description("bluh", "a/a.go", 15, 17);
-    let foo = description("Foo", "a/a.go", 3, 5);
     check_case(Case {
         name: "go_enclosing_callers",
         files: vec![
@@ -305,44 +332,60 @@ async fn go_enclosing_callers() {
             Query {
                 direction: "in",
                 symbol: "baz",
-                expected: vec![
-                    relationships(&baz, &[(&bar, 8, 13), (&global, 20, 1), (&init, 25, 1)]),
-                ],
+                expected: json!([
+                    {"name": "baz", "filePath": "a/a.go", "startLine": 11,
+                     "edges": [
+                        {"symbol": {"name": "bar", "filePath": "a/a.go", "startLine": 7}, "line": 8, "column": 13},
+                        {"symbol": {"name": "_", "filePath": "a/a.go", "startLine": 19}, "line": 20, "column": 1},
+                        {"symbol": {"name": "init", "filePath": "a/a.go", "startLine": 24}, "line": 25, "column": 1},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "bar",
-                expected: vec![
-                    relationships(&bar, &[(&baz, 8, 13)]),
-                ],
+                expected: json!([
+                    {"name": "bar", "filePath": "a/a.go", "startLine": 7,
+                     "edges": [
+                        {"symbol": {"name": "baz", "filePath": "a/a.go", "startLine": 11}, "line": 8, "column": 13},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "init",
-                expected: vec![
-                    relationships(&init, &[(&baz, 25, 1)]),
-                ],
+                expected: json!([
+                    {"name": "init", "filePath": "a/a.go", "startLine": 24,
+                     "edges": [
+                        {"symbol": {"name": "baz", "filePath": "a/a.go", "startLine": 11}, "line": 25, "column": 1},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "bluh",
-                expected: vec![
-                    relationships(&bluh, &[(&baz, 12, 1)]),
-                ],
+                expected: json!([
+                    {"name": "bluh", "filePath": "a/a.go", "startLine": 15,
+                     "edges": [
+                        {"symbol": {"name": "baz", "filePath": "a/a.go", "startLine": 11}, "line": 12, "column": 1},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "bluh",
-                expected: vec![
-                    relationships(&bluh, &[]),
-                ],
+                expected: json!([
+                    {"name": "bluh", "filePath": "a/a.go", "startLine": 15,
+                     "edges": []},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "Foo",
-                expected: vec![
-                    relationships(&foo, &[]),
-                ],
+                expected: json!([
+                    {"name": "Foo", "filePath": "a/a.go", "startLine": 3,
+                     "edges": []},
+                ]),
             },
         ],
     }).await;
@@ -354,9 +397,6 @@ async fn go_enclosing_callers() {
 // calls and recursion. Outgoing checks are inverses of the upstream caller tree.
 #[tokio::test]
 async fn c_file_local_names() {
-    let sf = description("sf", "staticFunc1.c", 2, 5);
-    let gf = description("gf", "staticFunc1.c", 6, 9);
-    let sf2 = description("sf", "staticFunc2.c", 2, 5);
     check_case(Case {
         name: "c_file_local_names",
         files: vec![
@@ -373,32 +413,56 @@ async fn c_file_local_names() {
             Query {
                 direction: "in",
                 symbol: "sf",
-                expected: vec![
-                    relationships(&sf, &[(&sf, 4, 4), (&gf, 8, 4)]),
-                    relationships(&sf2, &[(&sf2, 4, 4)]),
-                ],
+                expected: json!([
+                    {"name": "sf", "filePath": "staticFunc1.c", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "sf", "filePath": "staticFunc1.c", "startLine": 2}, "line": 4, "column": 4},
+                        {"symbol": {"name": "gf", "filePath": "staticFunc1.c", "startLine": 6}, "line": 8, "column": 4},
+                    ]},
+                    {"name": "sf", "filePath": "staticFunc2.c", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "sf", "filePath": "staticFunc2.c", "startLine": 2}, "line": 4, "column": 4},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "sf",
-                expected: vec![
-                    relationships(&sf, &[(&gf, 3, 4), (&sf, 4, 4)]),
-                    relationships(&sf2, &[(&gf, 3, 4), (&sf2, 4, 4)]),
-                ],
+                expected: json!([
+                    {"name": "sf", "filePath": "staticFunc1.c", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "gf", "filePath": "staticFunc1.c", "startLine": 6}, "line": 3, "column": 4},
+                        {"symbol": {"name": "sf", "filePath": "staticFunc1.c", "startLine": 2}, "line": 4, "column": 4},
+                    ]},
+                    {"name": "sf", "filePath": "staticFunc2.c", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "gf", "filePath": "staticFunc1.c", "startLine": 6}, "line": 3, "column": 4},
+                        {"symbol": {"name": "sf", "filePath": "staticFunc2.c", "startLine": 2}, "line": 4, "column": 4},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "gf",
-                expected: vec![
-                    relationships(&gf, &[(&sf, 3, 4), (&gf, 7, 4), (&sf2, 3, 4)]),
-                ],
+                expected: json!([
+                    {"name": "gf", "filePath": "staticFunc1.c", "startLine": 6,
+                     "edges": [
+                        {"symbol": {"name": "sf", "filePath": "staticFunc1.c", "startLine": 2}, "line": 3, "column": 4},
+                        {"symbol": {"name": "gf", "filePath": "staticFunc1.c", "startLine": 6}, "line": 7, "column": 4},
+                        {"symbol": {"name": "sf", "filePath": "staticFunc2.c", "startLine": 2}, "line": 3, "column": 4},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "gf",
-                expected: vec![
-                    relationships(&gf, &[(&gf, 7, 4), (&sf, 8, 4)]),
-                ],
+                expected: json!([
+                    {"name": "gf", "filePath": "staticFunc1.c", "startLine": 6,
+                     "edges": [
+                        {"symbol": {"name": "gf", "filePath": "staticFunc1.c", "startLine": 6}, "line": 7, "column": 4},
+                        {"symbol": {"name": "sf", "filePath": "staticFunc1.c", "startLine": 2}, "line": 8, "column": 4},
+                    ]},
+                ]),
             },
         ],
     }).await;
@@ -413,10 +477,6 @@ async fn c_file_local_names() {
 // Adapt scopes to canonical scope::name and expand grouped callsites.
 #[tokio::test]
 async fn typescript_methods_and_constructors() {
-    let two_call_three_twice = description("Two::callThreeTwice", "two.ts", 4, 7);
-    let three = description("Three", "three.ts", 2, 6);
-    let three_tada = description("Three::tada", "three.ts", 3, 5);
-    let print = description("print", "three.ts", 7, 9);
     check_case(Case {
         name: "typescript_methods_and_constructors",
         files: vec![
@@ -433,30 +493,47 @@ async fn typescript_methods_and_constructors() {
             Query {
                 direction: "out",
                 symbol: "Two::callThreeTwice",
-                expected: vec![
-                    relationships(&two_call_three_twice, &[(&three, 5, 12), (&three_tada, 5, 20), (&three, 6, 12), (&three_tada, 6, 20)]),
-                ],
+                expected: json!([
+                    {"name": "Two::callThreeTwice", "filePath": "two.ts", "startLine": 4,
+                     "edges": [
+                        {"symbol": {"name": "Three", "filePath": "three.ts", "startLine": 2}, "line": 5, "column": 12},
+                        {"symbol": {"name": "Three::tada", "filePath": "three.ts", "startLine": 3}, "line": 5, "column": 20},
+                        {"symbol": {"name": "Three", "filePath": "three.ts", "startLine": 2}, "line": 6, "column": 12},
+                        {"symbol": {"name": "Three::tada", "filePath": "three.ts", "startLine": 3}, "line": 6, "column": 20},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "Three::tada",
-                expected: vec![
-                    relationships(&three_tada, &[(&two_call_three_twice, 5, 20), (&two_call_three_twice, 6, 20)]),
-                ],
+                expected: json!([
+                    {"name": "Three::tada", "filePath": "three.ts", "startLine": 3,
+                     "edges": [
+                        {"symbol": {"name": "Two::callThreeTwice", "filePath": "two.ts", "startLine": 4}, "line": 5, "column": 20},
+                        {"symbol": {"name": "Two::callThreeTwice", "filePath": "two.ts", "startLine": 4}, "line": 6, "column": 20},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "Three",
-                expected: vec![
-                    relationships(&three, &[(&two_call_three_twice, 5, 12), (&two_call_three_twice, 6, 12)]),
-                ],
+                expected: json!([
+                    {"name": "Three", "filePath": "three.ts", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "Two::callThreeTwice", "filePath": "two.ts", "startLine": 4}, "line": 5, "column": 12},
+                        {"symbol": {"name": "Two::callThreeTwice", "filePath": "two.ts", "startLine": 4}, "line": 6, "column": 12},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "Three::tada",
-                expected: vec![
-                    relationships(&three_tada, &[(&print, 4, 8)]),
-                ],
+                expected: json!([
+                    {"name": "Three::tada", "filePath": "three.ts", "startLine": 3,
+                     "edges": [
+                        {"symbol": {"name": "print", "filePath": "three.ts", "startLine": 7}, "line": 4, "column": 8},
+                    ]},
+                ]),
             },
         ],
     }).await;
@@ -473,12 +550,7 @@ async fn typescript_methods_and_constructors() {
 #[tokio::test]
 async fn java_methods_and_constructors() {
     const FILE: &str = "org/sample/CallHierarchy.java";
-    let main = description("CallHierarchy::main", FILE, 6, 10);
-    let base = description("CallHierarchy.Base::Base", FILE, 19, 21);
-    let foo = description("CallHierarchy.Base::foo", FILE, 23, 25);
-    let bar = description("CallHierarchy.Base::bar", FILE, 27, 32);
-    let method_one = description("CallHierarchy.Base::method_1", FILE, 34, 37);
-    let child = description("CallHierarchy.Child::Child", FILE, 43, 50);
+
     check_case(Case {
         name: "java_methods_and_constructors",
         files: vec![
@@ -491,32 +563,72 @@ async fn java_methods_and_constructors() {
             Query {
                 direction: "in",
                 symbol: "CallHierarchy.Base::bar",
-                expected: vec![relationships(&bar, &[(&main, 8, 16), (&method_one, 36, 6), (&child, 46, 6)])],
+                expected: json!([
+                    {"name": "CallHierarchy.Base::bar", "filePath": "org/sample/CallHierarchy.java", "startLine": 27,
+                     "edges": [
+                        {"symbol": {"name": "CallHierarchy::main", "filePath": "org/sample/CallHierarchy.java", "startLine": 6}, "line": 8, "column": 16},
+                        {"symbol": {"name": "CallHierarchy.Base::method_1", "filePath": "org/sample/CallHierarchy.java", "startLine": 34}, "line": 36, "column": 6},
+                        {"symbol": {"name": "CallHierarchy.Child::Child", "filePath": "org/sample/CallHierarchy.java", "startLine": 43}, "line": 46, "column": 6},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "CallHierarchy.Base::method_1",
-                expected: vec![relationships(&method_one, &[(&foo, 35, 6), (&bar, 36, 6)])],
+                expected: json!([
+                    {"name": "CallHierarchy.Base::method_1", "filePath": "org/sample/CallHierarchy.java", "startLine": 34,
+                     "edges": [
+                        {"symbol": {"name": "CallHierarchy.Base::foo", "filePath": "org/sample/CallHierarchy.java", "startLine": 23}, "line": 35, "column": 6},
+                        {"symbol": {"name": "CallHierarchy.Base::bar", "filePath": "org/sample/CallHierarchy.java", "startLine": 27}, "line": 36, "column": 6},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "CallHierarchy.Base::bar",
-                expected: vec![relationships(&bar, &[(&child, 28, 10), (&child, 29, 10)])],
+                expected: json!([
+                    {"name": "CallHierarchy.Base::bar", "filePath": "org/sample/CallHierarchy.java", "startLine": 27,
+                     "edges": [
+                        {"symbol": {"name": "CallHierarchy.Child::Child", "filePath": "org/sample/CallHierarchy.java", "startLine": 43}, "line": 28, "column": 10},
+                        {"symbol": {"name": "CallHierarchy.Child::Child", "filePath": "org/sample/CallHierarchy.java", "startLine": 43}, "line": 29, "column": 10},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "CallHierarchy.Child::Child",
-                expected: vec![relationships(&child, &[(&main, 8, 8), (&bar, 28, 10), (&bar, 29, 10)])],
+                expected: json!([
+                    {"name": "CallHierarchy.Child::Child", "filePath": "org/sample/CallHierarchy.java", "startLine": 43,
+                     "edges": [
+                        {"symbol": {"name": "CallHierarchy::main", "filePath": "org/sample/CallHierarchy.java", "startLine": 6}, "line": 8, "column": 8},
+                        {"symbol": {"name": "CallHierarchy.Base::bar", "filePath": "org/sample/CallHierarchy.java", "startLine": 27}, "line": 28, "column": 10},
+                        {"symbol": {"name": "CallHierarchy.Base::bar", "filePath": "org/sample/CallHierarchy.java", "startLine": 27}, "line": 29, "column": 10},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "CallHierarchy.Child::Child",
-                expected: vec![relationships(&child, &[(&base, 44, 6), (&foo, 45, 6), (&bar, 46, 6), (&method_one, 47, 6)])],
+                expected: json!([
+                    {"name": "CallHierarchy.Child::Child", "filePath": "org/sample/CallHierarchy.java", "startLine": 43,
+                     "edges": [
+                        {"symbol": {"name": "CallHierarchy.Base::Base", "filePath": "org/sample/CallHierarchy.java", "startLine": 19}, "line": 44, "column": 6},
+                        {"symbol": {"name": "CallHierarchy.Base::foo", "filePath": "org/sample/CallHierarchy.java", "startLine": 23}, "line": 45, "column": 6},
+                        {"symbol": {"name": "CallHierarchy.Base::bar", "filePath": "org/sample/CallHierarchy.java", "startLine": 27}, "line": 46, "column": 6},
+                        {"symbol": {"name": "CallHierarchy.Base::method_1", "filePath": "org/sample/CallHierarchy.java", "startLine": 34}, "line": 47, "column": 6},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "CallHierarchy.Base::foo",
-                expected: vec![relationships(&foo, &[(&method_one, 35, 6), (&child, 45, 6)])],
+                expected: json!([
+                    {"name": "CallHierarchy.Base::foo", "filePath": "org/sample/CallHierarchy.java", "startLine": 23,
+                     "edges": [
+                        {"symbol": {"name": "CallHierarchy.Base::method_1", "filePath": "org/sample/CallHierarchy.java", "startLine": 34}, "line": 35, "column": 6},
+                        {"symbol": {"name": "CallHierarchy.Child::Child", "filePath": "org/sample/CallHierarchy.java", "startLine": 43}, "line": 45, "column": 6},
+                    ]},
+                ]),
             },
         ],
     }).await;
@@ -532,8 +644,6 @@ async fn java_methods_and_constructors() {
 // Both qualified and unqualified symbol queries must find the same method.
 #[tokio::test]
 async fn java_cross_file_repeated_calls() {
-    let entry = description("Call::main", "org/sample/Call.java", 4, 12);
-    let method = description("Foo::someMethod", "org/sample/Foo.java", 9, 9);
     check_case(Case {
         name: "java_cross_file_repeated_calls",
         files: vec![
@@ -550,12 +660,24 @@ async fn java_cross_file_repeated_calls() {
             Query {
                 direction: "in",
                 symbol: "Foo::someMethod",
-                expected: vec![relationships(&method, &[(&entry, 8, 18), (&entry, 11, 18)])],
+                expected: json!([
+                    {"name": "Foo::someMethod", "filePath": "org/sample/Foo.java", "startLine": 9,
+                     "edges": [
+                        {"symbol": {"name": "Call::main", "filePath": "org/sample/Call.java", "startLine": 4}, "line": 8, "column": 18},
+                        {"symbol": {"name": "Call::main", "filePath": "org/sample/Call.java", "startLine": 4}, "line": 11, "column": 18},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "someMethod",
-                expected: vec![relationships(&method, &[(&entry, 8, 18), (&entry, 11, 18)])],
+                expected: json!([
+                    {"name": "Foo::someMethod", "filePath": "org/sample/Foo.java", "startLine": 9,
+                     "edges": [
+                        {"symbol": {"name": "Call::main", "filePath": "org/sample/Call.java", "startLine": 4}, "line": 8, "column": 18},
+                        {"symbol": {"name": "Call::main", "filePath": "org/sample/Call.java", "startLine": 4}, "line": 11, "column": 18},
+                    ]},
+                ]),
             },
         ],
     }).await;
@@ -568,9 +690,6 @@ async fn java_cross_file_repeated_calls() {
 // duplicate method result.
 #[tokio::test]
 async fn cpp_qualified_method() {
-    let method = description("ns::Waldo::find", "main.cc", 6, 6);
-    let first = description("ns::caller1", "main.cc", 7, 9);
-    let second = description("ns::caller2", "main.cc", 10, 12);
     check_case(Case {
         name: "cpp_qualified_method",
         files: vec![
@@ -583,17 +702,33 @@ async fn cpp_qualified_method() {
             Query {
                 direction: "in",
                 symbol: "ns::Waldo::find",
-                expected: vec![relationships(&method, &[(&first, 8, 8), (&second, 11, 8)])],
+                expected: json!([
+                    {"name": "ns::Waldo::find", "filePath": "main.cc", "startLine": 6,
+                     "edges": [
+                        {"symbol": {"name": "ns::caller1", "filePath": "main.cc", "startLine": 7}, "line": 8, "column": 8},
+                        {"symbol": {"name": "ns::caller2", "filePath": "main.cc", "startLine": 10}, "line": 11, "column": 8},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "ns::caller1",
-                expected: vec![relationships(&first, &[(&method, 8, 8)])],
+                expected: json!([
+                    {"name": "ns::caller1", "filePath": "main.cc", "startLine": 7,
+                     "edges": [
+                        {"symbol": {"name": "ns::Waldo::find", "filePath": "main.cc", "startLine": 6}, "line": 8, "column": 8},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "ns::caller2",
-                expected: vec![relationships(&second, &[(&method, 11, 8)])],
+                expected: json!([
+                    {"name": "ns::caller2", "filePath": "main.cc", "startLine": 10,
+                     "edges": [
+                        {"symbol": {"name": "ns::Waldo::find", "filePath": "main.cc", "startLine": 6}, "line": 11, "column": 8},
+                    ]},
+                ]),
             },
         ],
     }).await;
@@ -606,11 +741,8 @@ async fn cpp_qualified_method() {
 // name query contract. Qualified calls retain separate sites, and leaf/root queries return empty
 // edges.
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // Keep the cross-file fixture and its expectations together.
 async fn cpp_cross_file_call_chain() {
-    let target = description("callee", "callee.cc", 3, 3);
-    let first = description("nsa::caller1", "caller1.cc", 5, 7);
-    let second = description("nsb::caller2", "caller2.cc", 5, 8);
-    let third = description("nsa::caller3", "caller3.cc", 5, 8);
     check_case(Case {
         name: "cpp_cross_file_call_chain",
         files: vec![
@@ -640,42 +772,82 @@ async fn cpp_cross_file_call_chain() {
             Query {
                 direction: "in",
                 symbol: "callee",
-                expected: vec![relationships(&target, &[(&first, 6, 8)])],
+                expected: json!([
+                    {"name": "callee", "filePath": "callee.cc", "startLine": 3,
+                     "edges": [
+                        {"symbol": {"name": "nsa::caller1", "filePath": "caller1.cc", "startLine": 5}, "line": 6, "column": 8},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "nsa::caller1",
-                expected: vec![relationships(&first, &[(&second, 6, 13), (&second, 7, 13), (&third, 6, 8)])],
+                expected: json!([
+                    {"name": "nsa::caller1", "filePath": "caller1.cc", "startLine": 5,
+                     "edges": [
+                        {"symbol": {"name": "nsb::caller2", "filePath": "caller2.cc", "startLine": 5}, "line": 6, "column": 13},
+                        {"symbol": {"name": "nsb::caller2", "filePath": "caller2.cc", "startLine": 5}, "line": 7, "column": 13},
+                        {"symbol": {"name": "nsa::caller3", "filePath": "caller3.cc", "startLine": 5}, "line": 6, "column": 8},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "nsb::caller2",
-                expected: vec![relationships(&second, &[(&third, 7, 13)])],
+                expected: json!([
+                    {"name": "nsb::caller2", "filePath": "caller2.cc", "startLine": 5,
+                     "edges": [
+                        {"symbol": {"name": "nsa::caller3", "filePath": "caller3.cc", "startLine": 5}, "line": 7, "column": 13},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "nsa::caller3",
-                expected: vec![relationships(&third, &[])],
+                expected: json!([
+                    {"name": "nsa::caller3", "filePath": "caller3.cc", "startLine": 5,
+                     "edges": []},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "nsa::caller3",
-                expected: vec![relationships(&third, &[(&first, 6, 8), (&second, 7, 13)])],
+                expected: json!([
+                    {"name": "nsa::caller3", "filePath": "caller3.cc", "startLine": 5,
+                     "edges": [
+                        {"symbol": {"name": "nsa::caller1", "filePath": "caller1.cc", "startLine": 5}, "line": 6, "column": 8},
+                        {"symbol": {"name": "nsb::caller2", "filePath": "caller2.cc", "startLine": 5}, "line": 7, "column": 13},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "nsb::caller2",
-                expected: vec![relationships(&second, &[(&first, 6, 13), (&first, 7, 13)])],
+                expected: json!([
+                    {"name": "nsb::caller2", "filePath": "caller2.cc", "startLine": 5,
+                     "edges": [
+                        {"symbol": {"name": "nsa::caller1", "filePath": "caller1.cc", "startLine": 5}, "line": 6, "column": 13},
+                        {"symbol": {"name": "nsa::caller1", "filePath": "caller1.cc", "startLine": 5}, "line": 7, "column": 13},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "nsa::caller1",
-                expected: vec![relationships(&first, &[(&target, 6, 8)])],
+                expected: json!([
+                    {"name": "nsa::caller1", "filePath": "caller1.cc", "startLine": 5,
+                     "edges": [
+                        {"symbol": {"name": "callee", "filePath": "callee.cc", "startLine": 3}, "line": 6, "column": 8},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "callee",
-                expected: vec![relationships(&target, &[])],
+                expected: json!([
+                    {"name": "callee", "filePath": "callee.cc", "startLine": 3,
+                     "edges": []},
+                ]),
             },
         ],
     }).await;
@@ -688,24 +860,30 @@ async fn cpp_cross_file_call_chain() {
 // to-callee check is the inverse of the first upstream incoming level.
 #[tokio::test]
 async fn cpp_virtual_override_callers() {
-    let target = description("callee", "virtual.cc", 2, 2);
-    let implementation = description("Implementation::Func", "virtual.cc", 7, 9);
-    let entry = description("Test", "virtual.cc", 11, 13);
     check_case(Case {
         name: "cpp_virtual_override_callers",
         files: vec![
             SourceFile { path: "virtual.cc", source: "\n    void callee() {}\n    struct Interface {\n      virtual void Func() = 0;\n    };\n    struct Implementation : public Interface {\n      void Func() override {\n          callee();\n      }\n    };\n    void Test(Interface& cls){\n      cls.Func();\n    }\n  " },
         ],
         queries: vec![
-            Query { direction: "in", symbol: "Implementation::Func", expected: vec![
-                relationships(&implementation, &[(&entry, 12, 10)]),
-            ] },
-            Query { direction: "in", symbol: "callee", expected: vec![
-                relationships(&target, &[(&implementation, 8, 10)]),
-            ] },
-            Query { direction: "out", symbol: "Implementation::Func", expected: vec![
-                relationships(&implementation, &[(&target, 8, 10)]),
-            ] },
+            Query { direction: "in", symbol: "Implementation::Func", expected: json!([
+                {"name": "Implementation::Func", "filePath": "virtual.cc", "startLine": 7,
+                 "edges": [
+                    {"symbol": {"name": "Test", "filePath": "virtual.cc", "startLine": 11}, "line": 12, "column": 10},
+                ]},
+            ]) },
+            Query { direction: "in", symbol: "callee", expected: json!([
+                {"name": "callee", "filePath": "virtual.cc", "startLine": 2,
+                 "edges": [
+                    {"symbol": {"name": "Implementation::Func", "filePath": "virtual.cc", "startLine": 7}, "line": 8, "column": 10},
+                ]},
+            ]) },
+            Query { direction: "out", symbol: "Implementation::Func", expected: json!([
+                {"name": "Implementation::Func", "filePath": "virtual.cc", "startLine": 7,
+                 "edges": [
+                    {"symbol": {"name": "callee", "filePath": "virtual.cc", "startLine": 2}, "line": 8, "column": 10},
+                ]},
+            ]) },
         ],
     }).await;
 }
@@ -716,25 +894,32 @@ async fn cpp_virtual_override_callers() {
 // separate caller. Outgoing checks invert these upstream incoming expectations.
 #[tokio::test]
 async fn cpp_initializer_caller_ownership() {
-    let target = description("callee", "initializers.cc", 2, 2);
-    let direct = description("caller1", "initializers.cc", 3, 5);
-    let local = description("caller2", "initializers.cc", 6, 8);
-    let global = description("caller3", "initializers.cc", 9, 9);
     check_case(Case {
         name: "cpp_initializer_caller_ownership",
         files: vec![
             SourceFile { path: "initializers.cc", source: "\n    int callee();\n    void caller1() {\n      callee();\n    }\n    void caller2() {\n      int localVar = callee();\n    }\n    int caller3 = callee();\n  " },
         ],
         queries: vec![
-            Query { direction: "in", symbol: "callee", expected: vec![
-                relationships(&target, &[(&direct, 4, 6), (&local, 7, 21), (&global, 9, 18)]),
-            ] },
-            Query { direction: "out", symbol: "caller2", expected: vec![
-                relationships(&local, &[(&target, 7, 21)]),
-            ] },
-            Query { direction: "out", symbol: "caller3", expected: vec![
-                relationships(&global, &[(&target, 9, 18)]),
-            ] },
+            Query { direction: "in", symbol: "callee", expected: json!([
+                {"name": "callee", "filePath": "initializers.cc", "startLine": 2,
+                 "edges": [
+                    {"symbol": {"name": "caller1", "filePath": "initializers.cc", "startLine": 3}, "line": 4, "column": 6},
+                    {"symbol": {"name": "caller2", "filePath": "initializers.cc", "startLine": 6}, "line": 7, "column": 21},
+                    {"symbol": {"name": "caller3", "filePath": "initializers.cc", "startLine": 9}, "line": 9, "column": 18},
+                ]},
+            ]) },
+            Query { direction: "out", symbol: "caller2", expected: json!([
+                {"name": "caller2", "filePath": "initializers.cc", "startLine": 6,
+                 "edges": [
+                    {"symbol": {"name": "callee", "filePath": "initializers.cc", "startLine": 2}, "line": 7, "column": 21},
+                ]},
+            ]) },
+            Query { direction: "out", symbol: "caller3", expected: json!([
+                {"name": "caller3", "filePath": "initializers.cc", "startLine": 9,
+                 "edges": [
+                    {"symbol": {"name": "callee", "filePath": "initializers.cc", "startLine": 2}, "line": 9, "column": 18},
+                ]},
+            ]) },
         ],
     }).await;
 }
@@ -749,9 +934,6 @@ async fn cpp_initializer_caller_ownership() {
 // name scopes.
 #[tokio::test]
 async fn typescript_ambiguous_overload_declarations() {
-    let number = description("foo", "a.d.ts", 1, 1);
-    let string = description("foo", "b.d.ts", 1, 1);
-    let entry = description("bar", "main.ts", 1, 3);
     check_case(Case {
         name: "typescript_ambiguous_overload_declarations",
         files: vec![
@@ -760,13 +942,23 @@ async fn typescript_ambiguous_overload_declarations() {
             SourceFile { path: "main.ts", source: "function bar() {\n    foo();\n}\n" },
         ],
         queries: vec![
-            Query { direction: "in", symbol: "foo", expected: vec![
-                relationships(&number, &[(&entry, 2, 4)]),
-                relationships(&string, &[(&entry, 2, 4)]),
-            ] },
-            Query { direction: "out", symbol: "bar", expected: vec![
-                relationships(&entry, &[(&number, 2, 4), (&string, 2, 4)]),
-            ] },
+            Query { direction: "in", symbol: "foo", expected: json!([
+                {"name": "foo", "filePath": "a.d.ts", "startLine": 1,
+                 "edges": [
+                    {"symbol": {"name": "bar", "filePath": "main.ts", "startLine": 1}, "line": 2, "column": 4},
+                ]},
+                {"name": "foo", "filePath": "b.d.ts", "startLine": 1,
+                 "edges": [
+                    {"symbol": {"name": "bar", "filePath": "main.ts", "startLine": 1}, "line": 2, "column": 4},
+                ]},
+            ]) },
+            Query { direction: "out", symbol: "bar", expected: json!([
+                {"name": "bar", "filePath": "main.ts", "startLine": 1,
+                 "edges": [
+                    {"symbol": {"name": "foo", "filePath": "a.d.ts", "startLine": 1}, "line": 2, "column": 4},
+                    {"symbol": {"name": "foo", "filePath": "b.d.ts", "startLine": 1}, "line": 2, "column": 4},
+                ]},
+            ]) },
         ],
     }).await;
 }
@@ -776,36 +968,56 @@ async fn typescript_ambiguous_overload_declarations() {
 // lookup must never attach calls from the other scope.
 #[tokio::test]
 async fn typescript_same_name_scopes() {
-    let left_target = description("Left::work", "scopes.ts", 2, 2);
-    let left_entry = description("Left::caller", "scopes.ts", 3, 5);
-    let right_target = description("Right::work", "scopes.ts", 8, 8);
-    let right_entry = description("Right::caller", "scopes.ts", 9, 11);
     check_case(Case {
         name: "typescript_same_name_scopes",
         files: vec![
             SourceFile { path: "scopes.ts", source: "namespace Left {\n    export function work() {}\n    export function caller() {\n        work();\n    }\n}\nnamespace Right {\n    export function work() {}\n    export function caller() {\n        work();\n    }\n}\n" },
         ],
         queries: vec![
-            Query { direction: "out", symbol: "caller", expected: vec![
-                relationships(&left_entry, &[(&left_target, 4, 8)]),
-                relationships(&right_entry, &[(&right_target, 10, 8)]),
-            ] },
-            Query { direction: "in", symbol: "Right::work", expected: vec![
-                relationships(&right_target, &[(&right_entry, 10, 8)]),
-            ] },
-            Query { direction: "in", symbol: "work", expected: vec![
-                relationships(&left_target, &[(&left_entry, 4, 8)]),
-                relationships(&right_target, &[(&right_entry, 10, 8)]),
-            ] },
-            Query { direction: "in", symbol: "Left::work", expected: vec![
-                relationships(&left_target, &[(&left_entry, 4, 8)]),
-            ] },
-            Query { direction: "out", symbol: "Left::caller", expected: vec![
-                relationships(&left_entry, &[(&left_target, 4, 8)]),
-            ] },
-            Query { direction: "out", symbol: "Right::caller", expected: vec![
-                relationships(&right_entry, &[(&right_target, 10, 8)]),
-            ] },
+            Query { direction: "out", symbol: "caller", expected: json!([
+                {"name": "Left::caller", "filePath": "scopes.ts", "startLine": 3,
+                 "edges": [
+                    {"symbol": {"name": "Left::work", "filePath": "scopes.ts", "startLine": 2}, "line": 4, "column": 8},
+                ]},
+                {"name": "Right::caller", "filePath": "scopes.ts", "startLine": 9,
+                 "edges": [
+                    {"symbol": {"name": "Right::work", "filePath": "scopes.ts", "startLine": 8}, "line": 10, "column": 8},
+                ]},
+            ]) },
+            Query { direction: "in", symbol: "Right::work", expected: json!([
+                {"name": "Right::work", "filePath": "scopes.ts", "startLine": 8,
+                 "edges": [
+                    {"symbol": {"name": "Right::caller", "filePath": "scopes.ts", "startLine": 9}, "line": 10, "column": 8},
+                ]},
+            ]) },
+            Query { direction: "in", symbol: "work", expected: json!([
+                {"name": "Left::work", "filePath": "scopes.ts", "startLine": 2,
+                 "edges": [
+                    {"symbol": {"name": "Left::caller", "filePath": "scopes.ts", "startLine": 3}, "line": 4, "column": 8},
+                ]},
+                {"name": "Right::work", "filePath": "scopes.ts", "startLine": 8,
+                 "edges": [
+                    {"symbol": {"name": "Right::caller", "filePath": "scopes.ts", "startLine": 9}, "line": 10, "column": 8},
+                ]},
+            ]) },
+            Query { direction: "in", symbol: "Left::work", expected: json!([
+                {"name": "Left::work", "filePath": "scopes.ts", "startLine": 2,
+                 "edges": [
+                    {"symbol": {"name": "Left::caller", "filePath": "scopes.ts", "startLine": 3}, "line": 4, "column": 8},
+                ]},
+            ]) },
+            Query { direction: "out", symbol: "Left::caller", expected: json!([
+                {"name": "Left::caller", "filePath": "scopes.ts", "startLine": 3,
+                 "edges": [
+                    {"symbol": {"name": "Left::work", "filePath": "scopes.ts", "startLine": 2}, "line": 4, "column": 8},
+                ]},
+            ]) },
+            Query { direction: "out", symbol: "Right::caller", expected: json!([
+                {"name": "Right::caller", "filePath": "scopes.ts", "startLine": 9,
+                 "edges": [
+                    {"symbol": {"name": "Right::work", "filePath": "scopes.ts", "startLine": 8}, "line": 10, "column": 8},
+                ]},
+            ]) },
         ],
     }).await;
 }
@@ -817,27 +1029,36 @@ async fn typescript_same_name_scopes() {
 // not a no-crash-only regression. Additional inverse queries preserve the upstream edges.
 #[tokio::test]
 async fn typescript_anonymous_function_binding() {
-    let entry = description("foo", "anonymous.ts", 1, 3);
-    let binding = description("bar", "anonymous.ts", 5, 7);
-    let target = description("baz", "anonymous.ts", 9, 10);
     check_case(Case {
         name: "typescript_anonymous_function_binding",
         files: vec![
             SourceFile { path: "anonymous.ts", source: "function foo() {\n    bar();\n}\n\nconst bar = function () {\n    baz();\n}\n\nfunction baz() {\n}\n" },
         ],
         queries: vec![
-            Query { direction: "in", symbol: "bar", expected: vec![
-                relationships(&binding, &[(&entry, 2, 4)]),
-            ] },
-            Query { direction: "out", symbol: "bar", expected: vec![
-                relationships(&binding, &[(&target, 6, 4)]),
-            ] },
-            Query { direction: "in", symbol: "baz", expected: vec![
-                relationships(&target, &[(&binding, 6, 4)]),
-            ] },
-            Query { direction: "out", symbol: "foo", expected: vec![
-                relationships(&entry, &[(&binding, 2, 4)]),
-            ] },
+            Query { direction: "in", symbol: "bar", expected: json!([
+                {"name": "bar", "filePath": "anonymous.ts", "startLine": 5,
+                 "edges": [
+                    {"symbol": {"name": "foo", "filePath": "anonymous.ts", "startLine": 1}, "line": 2, "column": 4},
+                ]},
+            ]) },
+            Query { direction: "out", symbol: "bar", expected: json!([
+                {"name": "bar", "filePath": "anonymous.ts", "startLine": 5,
+                 "edges": [
+                    {"symbol": {"name": "baz", "filePath": "anonymous.ts", "startLine": 9}, "line": 6, "column": 4},
+                ]},
+            ]) },
+            Query { direction: "in", symbol: "baz", expected: json!([
+                {"name": "baz", "filePath": "anonymous.ts", "startLine": 9,
+                 "edges": [
+                    {"symbol": {"name": "bar", "filePath": "anonymous.ts", "startLine": 5}, "line": 6, "column": 4},
+                ]},
+            ]) },
+            Query { direction: "out", symbol: "foo", expected: json!([
+                {"name": "foo", "filePath": "anonymous.ts", "startLine": 1,
+                 "edges": [
+                    {"symbol": {"name": "bar", "filePath": "anonymous.ts", "startLine": 5}, "line": 2, "column": 4},
+                ]},
+            ]) },
         ],
     }).await;
 }
@@ -849,23 +1070,28 @@ async fn typescript_anonymous_function_binding() {
 // the upstream arrow functions. Outgoing is the inverse of the upstream incoming edge.
 #[tokio::test]
 async fn typescript_class_arrow_function() {
-    let entry = description("C::caller", "arrows.ts", 2, 4);
-    let target = description("C::callee", "arrows.ts", 6, 7);
     check_case(Case {
         name: "typescript_class_arrow_function",
         files: vec![
             SourceFile { path: "arrows.ts", source: "class C {\n    caller = () => {\n        this.callee();\n    }\n\n    callee = () => {\n    }\n}\n" },
         ],
         queries: vec![
-            Query { direction: "in", symbol: "C::callee", expected: vec![
-                relationships(&target, &[(&entry, 3, 13)]),
-            ] },
-            Query { direction: "out", symbol: "C::caller", expected: vec![
-                relationships(&entry, &[(&target, 3, 13)]),
-            ] },
-            Query { direction: "out", symbol: "C::callee", expected: vec![
-                relationships(&target, &[]),
-            ] },
+            Query { direction: "in", symbol: "C::callee", expected: json!([
+                {"name": "C::callee", "filePath": "arrows.ts", "startLine": 6,
+                 "edges": [
+                    {"symbol": {"name": "C::caller", "filePath": "arrows.ts", "startLine": 2}, "line": 3, "column": 13},
+                ]},
+            ]) },
+            Query { direction: "out", symbol: "C::caller", expected: json!([
+                {"name": "C::caller", "filePath": "arrows.ts", "startLine": 2,
+                 "edges": [
+                    {"symbol": {"name": "C::callee", "filePath": "arrows.ts", "startLine": 6}, "line": 3, "column": 13},
+                ]},
+            ]) },
+            Query { direction: "out", symbol: "C::callee", expected: json!([
+                {"name": "C::callee", "filePath": "arrows.ts", "startLine": 6,
+                 "edges": []},
+            ]) },
         ],
     }).await;
 }
@@ -877,24 +1103,20 @@ async fn typescript_class_arrow_function() {
 // upstream incoming expectation to guard against misclassifying type references.
 #[tokio::test]
 async fn java_interface_without_callers() {
-    let method = description(
-        "CallHierarchyGH2771::name",
-        "org/sample/CallHierarchyGH2771.java",
-        4,
-        4,
-    );
     check_case(Case {
         name: "java_interface_without_callers",
         files: vec![
             SourceFile { path: "org/sample/CallHierarchyGH2771.java", source: "package org.sample;\n\npublic interface CallHierarchyGH2771 {\n    Opt<String> name();\n\n    public static class Opt<T> {\n        public static <T> Opt<T> of(T t) {\n            return new Opt();\n        }\n    }\n}\n" },
         ],
         queries: vec![
-            Query { direction: "in", symbol: "CallHierarchyGH2771::name", expected: vec![
-                relationships(&method, &[]),
-            ] },
-            Query { direction: "out", symbol: "CallHierarchyGH2771::name", expected: vec![
-                relationships(&method, &[]),
-            ] },
+            Query { direction: "in", symbol: "CallHierarchyGH2771::name", expected: json!([
+                {"name": "CallHierarchyGH2771::name", "filePath": "org/sample/CallHierarchyGH2771.java", "startLine": 4,
+                 "edges": []},
+            ]) },
+            Query { direction: "out", symbol: "CallHierarchyGH2771::name", expected: json!([
+                {"name": "CallHierarchyGH2771::name", "filePath": "org/sample/CallHierarchyGH2771.java", "startLine": 4,
+                 "edges": []},
+            ]) },
         ],
     }).await;
 }
@@ -972,26 +1194,36 @@ impl IncrementalWorkspace {
     }
 
     async fn check_initial_calls(&self, stage: &str) {
-        let entry = description("caller", "caller.py", 2, 3);
-        let first = description("first", "targets.py", 1, 2);
-        let second = description("second", "targets.py", 4, 5);
         self.check(
             stage,
             &[
                 Query {
                     direction: "out",
                     symbol: "caller",
-                    expected: vec![relationships(&entry, &[(&first, 3, 4)])],
+                    expected: json!([
+                        {"name": "caller", "filePath": "caller.py", "startLine": 2,
+                         "edges": [
+                            {"symbol": {"name": "first", "filePath": "targets.py", "startLine": 1}, "line": 3, "column": 4},
+                        ]},
+                    ]),
                 },
                 Query {
                     direction: "in",
                     symbol: "first",
-                    expected: vec![relationships(&first, &[(&entry, 3, 4)])],
+                    expected: json!([
+                        {"name": "first", "filePath": "targets.py", "startLine": 1,
+                         "edges": [
+                            {"symbol": {"name": "caller", "filePath": "caller.py", "startLine": 2}, "line": 3, "column": 4},
+                        ]},
+                    ]),
                 },
                 Query {
                     direction: "in",
                     symbol: "second",
-                    expected: vec![relationships(&second, &[])],
+                    expected: json!([
+                        {"name": "second", "filePath": "targets.py", "startLine": 4,
+                         "edges": []},
+                    ]),
                 },
             ],
         )
@@ -1018,9 +1250,7 @@ async fn incremental_call_target_change_removes_old_edge() {
         .index(vec![WorkspaceChange::Upsert("caller.py".into())])
         .await;
     assert_eq!(indexed.files_modified, 1);
-    let entry = description("caller", "caller.py", 2, 3);
-    let first = description("first", "targets.py", 1, 2);
-    let second = description("second", "targets.py", 4, 5);
+
     workspace
         .check(
             "after call edit",
@@ -1028,17 +1258,30 @@ async fn incremental_call_target_change_removes_old_edge() {
                 Query {
                     direction: "out",
                     symbol: "caller",
-                    expected: vec![relationships(&entry, &[(&second, 3, 4)])],
+                    expected: json!([
+                        {"name": "caller", "filePath": "caller.py", "startLine": 2,
+                         "edges": [
+                            {"symbol": {"name": "second", "filePath": "targets.py", "startLine": 4}, "line": 3, "column": 4},
+                        ]},
+                    ]),
                 },
                 Query {
                     direction: "in",
                     symbol: "first",
-                    expected: vec![relationships(&first, &[])],
+                    expected: json!([
+                        {"name": "first", "filePath": "targets.py", "startLine": 1,
+                         "edges": []},
+                    ]),
                 },
                 Query {
                     direction: "in",
                     symbol: "second",
-                    expected: vec![relationships(&second, &[(&entry, 3, 4)])],
+                    expected: json!([
+                        {"name": "second", "filePath": "targets.py", "startLine": 4,
+                         "edges": [
+                            {"symbol": {"name": "caller", "filePath": "caller.py", "startLine": 2}, "line": 3, "column": 4},
+                        ]},
+                    ]),
                 },
             ],
         )
@@ -1056,14 +1299,17 @@ async fn incremental_target_deletion_invalidates_incoming_edges() {
         .index(vec![WorkspaceChange::Delete("targets.py".into())])
         .await;
     assert_eq!(indexed.files_deleted, 1);
-    let entry = description("caller", "caller.py", 2, 3);
+
     workspace
         .check(
             "deleted target must not leave a dangling resolved edge",
             &[Query {
                 direction: "out",
                 symbol: "caller",
-                expected: vec![relationships(&entry, &[])],
+                expected: json!([
+                    {"name": "caller", "filePath": "caller.py", "startLine": 2,
+                     "edges": []},
+                ]),
             }],
         )
         .await;
@@ -1081,14 +1327,17 @@ async fn incremental_target_recreation_resolves_unchanged_caller() {
         .index(vec![WorkspaceChange::Delete("targets.py".into())])
         .await;
     assert_eq!(deleted.files_deleted, 1);
-    let entry = description("caller", "caller.py", 2, 3);
+
     workspace
         .check(
             "between deletion and recreation",
             &[Query {
                 direction: "out",
                 symbol: "caller",
-                expected: vec![relationships(&entry, &[])],
+                expected: json!([
+                    {"name": "caller", "filePath": "caller.py", "startLine": 2,
+                     "edges": []},
+                ]),
             }],
         )
         .await;
@@ -1106,7 +1355,7 @@ async fn incremental_target_recreation_resolves_unchanged_caller() {
         recreated.files_modified, 0,
         "caller source was not reindexed"
     );
-    let first = description("first", "targets.py", 3, 4);
+
     workspace
         .check(
             "recreated target rebinds the unchanged caller",
@@ -1114,12 +1363,22 @@ async fn incremental_target_recreation_resolves_unchanged_caller() {
                 Query {
                     direction: "out",
                     symbol: "caller",
-                    expected: vec![relationships(&entry, &[(&first, 3, 4)])],
+                    expected: json!([
+                        {"name": "caller", "filePath": "caller.py", "startLine": 2,
+                         "edges": [
+                            {"symbol": {"name": "first", "filePath": "targets.py", "startLine": 3}, "line": 3, "column": 4},
+                        ]},
+                    ]),
                 },
                 Query {
                     direction: "in",
                     symbol: "first",
-                    expected: vec![relationships(&first, &[(&entry, 3, 4)])],
+                    expected: json!([
+                        {"name": "first", "filePath": "targets.py", "startLine": 3,
+                         "edges": [
+                            {"symbol": {"name": "caller", "filePath": "caller.py", "startLine": 2}, "line": 3, "column": 4},
+                        ]},
+                    ]),
                 },
             ],
         )
@@ -1137,8 +1396,7 @@ async fn incremental_caller_deletion_removes_outgoing_edges() {
         .index(vec![WorkspaceChange::Delete("caller.py".into())])
         .await;
     assert_eq!(indexed.files_deleted, 1);
-    let first = description("first", "targets.py", 1, 2);
-    let second = description("second", "targets.py", 4, 5);
+
     workspace
         .check(
             "after caller deletion",
@@ -1146,12 +1404,18 @@ async fn incremental_caller_deletion_removes_outgoing_edges() {
                 Query {
                     direction: "in",
                     symbol: "first",
-                    expected: vec![relationships(&first, &[])],
+                    expected: json!([
+                        {"name": "first", "filePath": "targets.py", "startLine": 1,
+                         "edges": []},
+                    ]),
                 },
                 Query {
                     direction: "in",
                     symbol: "second",
-                    expected: vec![relationships(&second, &[])],
+                    expected: json!([
+                        {"name": "second", "filePath": "targets.py", "startLine": 4,
+                         "edges": []},
+                    ]),
                 },
             ],
         )
@@ -1195,7 +1459,6 @@ async fn repeated_index_does_not_accumulate_call_edges() {
 // Rust upstream fixture.
 #[tokio::test]
 async fn rust_self_recursion() {
-    let function = description("countdown", "recursive.rs", 1, 3);
     check_case(Case {
         name: "rust_self_recursion",
         files: vec![SourceFile {
@@ -1206,12 +1469,22 @@ async fn rust_self_recursion() {
             Query {
                 direction: "in",
                 symbol: "countdown",
-                expected: vec![relationships(&function, &[(&function, 2, 15)])],
+                expected: json!([
+                    {"name": "countdown", "filePath": "recursive.rs", "startLine": 1,
+                     "edges": [
+                        {"symbol": {"name": "countdown", "filePath": "recursive.rs", "startLine": 1}, "line": 2, "column": 15},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "countdown",
-                expected: vec![relationships(&function, &[(&function, 2, 15)])],
+                expected: json!([
+                    {"name": "countdown", "filePath": "recursive.rs", "startLine": 1,
+                     "edges": [
+                        {"symbol": {"name": "countdown", "filePath": "recursive.rs", "startLine": 1}, "line": 2, "column": 15},
+                    ]},
+                ]),
             },
         ],
     })
@@ -1226,20 +1499,24 @@ async fn rust_self_recursion() {
 // acknowledged FIXME with an empty result, not the oracle.
 #[tokio::test]
 async fn rust_macro_generated_definition() {
-    let target = description("callee", "macros.rs", 11, 11);
-    let entry = description("caller", "macros.rs", 12, 14);
     check_case(Case {
         name: "rust_macro_generated_definition",
         files: vec![
             SourceFile { path: "macros.rs", source: "macro_rules! define {\n    ($ident:ident) => {\n        fn $ident() {}\n    }\n}\nmacro_rules! call {\n    ($ident:ident) => {\n        $ident()\n    }\n}\ndefine!(callee);\nfn caller() {\n    call!(callee);\n}\n" },
         ],
         queries: vec![
-            Query { direction: "in", symbol: "callee", expected: vec![
-                relationships(&target, &[(&entry, 13, 10)]),
-            ] },
-            Query { direction: "out", symbol: "caller", expected: vec![
-                relationships(&entry, &[(&target, 13, 10)]),
-            ] },
+            Query { direction: "in", symbol: "callee", expected: json!([
+                {"name": "callee", "filePath": "macros.rs", "startLine": 11,
+                 "edges": [
+                    {"symbol": {"name": "caller", "filePath": "macros.rs", "startLine": 12}, "line": 13, "column": 10},
+                ]},
+            ]) },
+            Query { direction: "out", symbol: "caller", expected: json!([
+                {"name": "caller", "filePath": "macros.rs", "startLine": 12,
+                 "edges": [
+                    {"symbol": {"name": "callee", "filePath": "macros.rs", "startLine": 11}, "line": 13, "column": 10},
+                ]},
+            ]) },
         ],
     }).await;
 }
@@ -1251,8 +1528,6 @@ async fn rust_macro_generated_definition() {
 // not the upstream FIXME expectation.
 #[tokio::test]
 async fn rust_cross_file_macro_call() {
-    let target = description("callee", "lib.rs", 3, 3);
-    let entry = description("caller", "lib.rs", 4, 6);
     check_case(Case {
         name: "rust_cross_file_macro_call",
         files: vec![
@@ -1260,12 +1535,18 @@ async fn rust_cross_file_macro_call() {
             SourceFile { path: "definitions.rs", source: "macro_rules! define {\n    ($ident:ident) => {\n        fn $ident() {}\n    }\n}\nmacro_rules! call {\n    ($ident:ident) => {\n        $ident()\n    }\n}\n" },
         ],
         queries: vec![
-            Query { direction: "in", symbol: "callee", expected: vec![
-                relationships(&target, &[(&entry, 5, 10)]),
-            ] },
-            Query { direction: "out", symbol: "caller", expected: vec![
-                relationships(&entry, &[(&target, 5, 10)]),
-            ] },
+            Query { direction: "in", symbol: "callee", expected: json!([
+                {"name": "callee", "filePath": "lib.rs", "startLine": 3,
+                 "edges": [
+                    {"symbol": {"name": "caller", "filePath": "lib.rs", "startLine": 4}, "line": 5, "column": 10},
+                ]},
+            ]) },
+            Query { direction: "out", symbol: "caller", expected: json!([
+                {"name": "caller", "filePath": "lib.rs", "startLine": 4,
+                 "edges": [
+                    {"symbol": {"name": "callee", "filePath": "lib.rs", "startLine": 3}, "line": 5, "column": 10},
+                ]},
+            ]) },
         ],
     }).await;
 }
@@ -1282,11 +1563,6 @@ async fn rust_cross_file_macro_call() {
 // existing TypeScript constructor case.
 #[tokio::test]
 async fn javascript_cross_file_method_calls() {
-    let class = description("Bar", "test.js", 1, 3);
-    let method = description("Bar::testMethod", "test.js", 2, 2);
-    let local = description("localCaller", "test.js", 4, 7);
-    let expression = description("expressionCaller", "file2.js", 1, 3);
-    let remote = description("remoteCaller", "file3.js", 1, 4);
     check_case(Case {
         name: "javascript_cross_file_method_calls",
         files: vec![
@@ -1295,18 +1571,35 @@ async fn javascript_cross_file_method_calls() {
             SourceFile { path: "file3.js", source: "function remoteCaller() {\n  var bar = new Bar();\n  bar.testMethod();\n}\n" },
         ],
         queries: vec![
-            Query { direction: "in", symbol: "Bar::testMethod", expected: vec![
-                relationships(&method, &[(&local, 6, 6), (&expression, 2, 12), (&remote, 3, 6)]),
-            ] },
-            Query { direction: "out", symbol: "localCaller", expected: vec![
-                relationships(&local, &[(&class, 5, 16), (&method, 6, 6)]),
-            ] },
-            Query { direction: "out", symbol: "expressionCaller", expected: vec![
-                relationships(&expression, &[(&class, 2, 6), (&method, 2, 12)]),
-            ] },
-            Query { direction: "out", symbol: "remoteCaller", expected: vec![
-                relationships(&remote, &[(&class, 2, 16), (&method, 3, 6)]),
-            ] },
+            Query { direction: "in", symbol: "Bar::testMethod", expected: json!([
+                {"name": "Bar::testMethod", "filePath": "test.js", "startLine": 2,
+                 "edges": [
+                    {"symbol": {"name": "localCaller", "filePath": "test.js", "startLine": 4}, "line": 6, "column": 6},
+                    {"symbol": {"name": "expressionCaller", "filePath": "file2.js", "startLine": 1}, "line": 2, "column": 12},
+                    {"symbol": {"name": "remoteCaller", "filePath": "file3.js", "startLine": 1}, "line": 3, "column": 6},
+                ]},
+            ]) },
+            Query { direction: "out", symbol: "localCaller", expected: json!([
+                {"name": "localCaller", "filePath": "test.js", "startLine": 4,
+                 "edges": [
+                    {"symbol": {"name": "Bar", "filePath": "test.js", "startLine": 1}, "line": 5, "column": 16},
+                    {"symbol": {"name": "Bar::testMethod", "filePath": "test.js", "startLine": 2}, "line": 6, "column": 6},
+                ]},
+            ]) },
+            Query { direction: "out", symbol: "expressionCaller", expected: json!([
+                {"name": "expressionCaller", "filePath": "file2.js", "startLine": 1,
+                 "edges": [
+                    {"symbol": {"name": "Bar", "filePath": "test.js", "startLine": 1}, "line": 2, "column": 6},
+                    {"symbol": {"name": "Bar::testMethod", "filePath": "test.js", "startLine": 2}, "line": 2, "column": 12},
+                ]},
+            ]) },
+            Query { direction: "out", symbol: "remoteCaller", expected: json!([
+                {"name": "remoteCaller", "filePath": "file3.js", "startLine": 1,
+                 "edges": [
+                    {"symbol": {"name": "Bar", "filePath": "test.js", "startLine": 1}, "line": 2, "column": 16},
+                    {"symbol": {"name": "Bar::testMethod", "filePath": "test.js", "startLine": 2}, "line": 3, "column": 6},
+                ]},
+            ]) },
         ],
     }).await;
 }
@@ -1320,29 +1613,38 @@ async fn javascript_cross_file_method_calls() {
 // those functions; only the direct foo() belongs to the static block. Preserve repeated baz sites.
 #[tokio::test]
 async fn javascript_static_block_call_ownership() {
-    let block = description("C::static {}", "static.js", 2, 14);
-    let first = description("C::foo", "static.js", 3, 5);
-    let second = description("C::bar", "static.js", 7, 11);
-    let target = description("baz", "static.js", 17, 18);
-    let other = description("quxx", "static.js", 20, 21);
     check_case(Case {
         name: "javascript_static_block_call_ownership",
         files: vec![
             SourceFile { path: "static.js", source: "class C {\n    static {\n        function foo() {\n            bar();\n        }\n\n        function bar() {\n            baz();\n            quxx();\n            baz();\n        }\n\n        foo();\n    }\n}\n\nfunction baz() {\n}\n\nfunction quxx() {\n}\n" },
         ],
         queries: vec![
-            Query { direction: "out", symbol: "C::static {}", expected: vec![
-                relationships(&block, &[(&first, 13, 8)]),
-            ] },
-            Query { direction: "in", symbol: "C::foo", expected: vec![
-                relationships(&first, &[(&block, 13, 8)]),
-            ] },
-            Query { direction: "in", symbol: "C::bar", expected: vec![
-                relationships(&second, &[(&first, 4, 12)]),
-            ] },
-            Query { direction: "out", symbol: "C::bar", expected: vec![
-                relationships(&second, &[(&target, 8, 12), (&other, 9, 12), (&target, 10, 12)]),
-            ] },
+            Query { direction: "out", symbol: "C::static {}", expected: json!([
+                {"name": "C::static {}", "filePath": "static.js", "startLine": 2,
+                 "edges": [
+                    {"symbol": {"name": "C::foo", "filePath": "static.js", "startLine": 3}, "line": 13, "column": 8},
+                ]},
+            ]) },
+            Query { direction: "in", symbol: "C::foo", expected: json!([
+                {"name": "C::foo", "filePath": "static.js", "startLine": 3,
+                 "edges": [
+                    {"symbol": {"name": "C::static {}", "filePath": "static.js", "startLine": 2}, "line": 13, "column": 8},
+                ]},
+            ]) },
+            Query { direction: "in", symbol: "C::bar", expected: json!([
+                {"name": "C::bar", "filePath": "static.js", "startLine": 7,
+                 "edges": [
+                    {"symbol": {"name": "C::foo", "filePath": "static.js", "startLine": 3}, "line": 4, "column": 12},
+                ]},
+            ]) },
+            Query { direction: "out", symbol: "C::bar", expected: json!([
+                {"name": "C::bar", "filePath": "static.js", "startLine": 7,
+                 "edges": [
+                    {"symbol": {"name": "baz", "filePath": "static.js", "startLine": 17}, "line": 8, "column": 12},
+                    {"symbol": {"name": "quxx", "filePath": "static.js", "startLine": 20}, "line": 9, "column": 12},
+                    {"symbol": {"name": "baz", "filePath": "static.js", "startLine": 17}, "line": 10, "column": 12},
+                ]},
+            ]) },
         ],
     }).await;
 }
@@ -1353,7 +1655,6 @@ async fn javascript_static_block_call_ownership() {
 // workspace match or a crash.
 #[tokio::test]
 async fn go_builtin_method_without_indexed_target() {
-    let function = description("A", "a/a.go", 3, 5);
     check_case(Case {
         name: "go_builtin_method_without_indexed_target",
         files: vec![SourceFile {
@@ -1364,12 +1665,18 @@ async fn go_builtin_method_without_indexed_target() {
             Query {
                 direction: "out",
                 symbol: "A",
-                expected: vec![relationships(&function, &[])],
+                expected: json!([
+                    {"name": "A", "filePath": "a/a.go", "startLine": 3,
+                     "edges": []},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "A",
-                expected: vec![relationships(&function, &[])],
+                expected: json!([
+                    {"name": "A", "filePath": "a/a.go", "startLine": 3,
+                     "edges": []},
+                ]),
             },
         ],
     })
@@ -1383,9 +1690,6 @@ async fn go_builtin_method_without_indexed_target() {
 // packages are represented by their source paths in this API.
 #[tokio::test]
 async fn go_cross_package_call_chain() {
-    let entry = description("A", "incoming/incoming.go", 5, 7);
-    let middle = description("D", "hierarchy.go", 5, 7);
-    let target = description("B", "outgoing/outgoing.go", 3, 3);
     check_case(Case {
         name: "go_cross_package_call_chain",
         files: vec![
@@ -1395,18 +1699,30 @@ async fn go_cross_package_call_chain() {
             SourceFile { path: "outgoing/outgoing.go", source: "package outgoing\n\nfunc B() {}\n" },
         ],
         queries: vec![
-            Query { direction: "in", symbol: "D", expected: vec![
-                relationships(&middle, &[(&entry, 6, 15)]),
-            ] },
-            Query { direction: "out", symbol: "D", expected: vec![
-                relationships(&middle, &[(&target, 6, 10)]),
-            ] },
-            Query { direction: "in", symbol: "B", expected: vec![
-                relationships(&target, &[(&middle, 6, 10)]),
-            ] },
-            Query { direction: "out", symbol: "A", expected: vec![
-                relationships(&entry, &[(&middle, 6, 15)]),
-            ] },
+            Query { direction: "in", symbol: "D", expected: json!([
+                {"name": "D", "filePath": "hierarchy.go", "startLine": 5,
+                 "edges": [
+                    {"symbol": {"name": "A", "filePath": "incoming/incoming.go", "startLine": 5}, "line": 6, "column": 15},
+                ]},
+            ]) },
+            Query { direction: "out", symbol: "D", expected: json!([
+                {"name": "D", "filePath": "hierarchy.go", "startLine": 5,
+                 "edges": [
+                    {"symbol": {"name": "B", "filePath": "outgoing/outgoing.go", "startLine": 3}, "line": 6, "column": 10},
+                ]},
+            ]) },
+            Query { direction: "in", symbol: "B", expected: json!([
+                {"name": "B", "filePath": "outgoing/outgoing.go", "startLine": 3,
+                 "edges": [
+                    {"symbol": {"name": "D", "filePath": "hierarchy.go", "startLine": 5}, "line": 6, "column": 10},
+                ]},
+            ]) },
+            Query { direction: "out", symbol: "A", expected: json!([
+                {"name": "A", "filePath": "incoming/incoming.go", "startLine": 5,
+                 "edges": [
+                    {"symbol": {"name": "D", "filePath": "hierarchy.go", "startLine": 5}, "line": 6, "column": 15},
+                ]},
+            ]) },
         ],
     }).await;
 }
@@ -1418,24 +1734,30 @@ async fn go_cross_package_call_chain() {
 // constructor call from foo.
 #[tokio::test]
 async fn typescript_getter_calls() {
-    let entry = description("foo", "accessor.ts", 1, 3);
-    let getter = description("C::bar", "accessor.ts", 6, 8);
-    let target = description("baz", "accessor.ts", 11, 12);
     check_case(Case {
         name: "typescript_getter_calls",
         files: vec![
             SourceFile { path: "accessor.ts", source: "function foo() {\n    new C().bar;\n}\n\nclass C {\n    get bar() {\n        return baz();\n    }\n}\n\nfunction baz() {\n}\n" },
         ],
         queries: vec![
-            Query { direction: "in", symbol: "C::bar", expected: vec![
-                relationships(&getter, &[(&entry, 2, 12)]),
-            ] },
-            Query { direction: "out", symbol: "C::bar", expected: vec![
-                relationships(&getter, &[(&target, 7, 15)]),
-            ] },
-            Query { direction: "in", symbol: "baz", expected: vec![
-                relationships(&target, &[(&getter, 7, 15)]),
-            ] },
+            Query { direction: "in", symbol: "C::bar", expected: json!([
+                {"name": "C::bar", "filePath": "accessor.ts", "startLine": 6,
+                 "edges": [
+                    {"symbol": {"name": "foo", "filePath": "accessor.ts", "startLine": 1}, "line": 2, "column": 12},
+                ]},
+            ]) },
+            Query { direction: "out", symbol: "C::bar", expected: json!([
+                {"name": "C::bar", "filePath": "accessor.ts", "startLine": 6,
+                 "edges": [
+                    {"symbol": {"name": "baz", "filePath": "accessor.ts", "startLine": 11}, "line": 7, "column": 15},
+                ]},
+            ]) },
+            Query { direction: "in", symbol: "baz", expected: json!([
+                {"name": "baz", "filePath": "accessor.ts", "startLine": 11,
+                 "edges": [
+                    {"symbol": {"name": "C::bar", "filePath": "accessor.ts", "startLine": 6}, "line": 7, "column": 15},
+                ]},
+            ]) },
         ],
     }).await;
 }
@@ -1447,20 +1769,24 @@ async fn typescript_getter_calls() {
 // calls from the broken template.
 #[tokio::test]
 async fn typescript_malformed_template_preserves_valid_calls() {
-    let target = description("target", "broken.ts", 1, 1);
-    let entry = description("caller", "broken.ts", 2, 2);
     check_case(Case {
         name: "typescript_malformed_template_preserves_valid_calls",
         files: vec![
             SourceFile { path: "broken.ts", source: "function target() {}\nfunction caller() { target(); }\nfunction updateBadge() {\n    const header = `<div class=\"sub\">${format`;\n    const badge = `<div class=\"badge\">`;\n}\n" },
         ],
         queries: vec![
-            Query { direction: "in", symbol: "target", expected: vec![
-                relationships(&target, &[(&entry, 2, 20)]),
-            ] },
-            Query { direction: "out", symbol: "caller", expected: vec![
-                relationships(&entry, &[(&target, 2, 20)]),
-            ] },
+            Query { direction: "in", symbol: "target", expected: json!([
+                {"name": "target", "filePath": "broken.ts", "startLine": 1,
+                 "edges": [
+                    {"symbol": {"name": "caller", "filePath": "broken.ts", "startLine": 2}, "line": 2, "column": 20},
+                ]},
+            ]) },
+            Query { direction: "out", symbol: "caller", expected: json!([
+                {"name": "caller", "filePath": "broken.ts", "startLine": 2,
+                 "edges": [
+                    {"symbol": {"name": "target", "filePath": "broken.ts", "startLine": 1}, "line": 2, "column": 20},
+                ]},
+            ]) },
         ],
     }).await;
 }
@@ -1471,24 +1797,28 @@ async fn typescript_malformed_template_preserves_valid_calls() {
 // count bare references as calls.
 #[tokio::test]
 async fn python_function_reference_and_alias_call() {
-    let target = description("target", "references.py", 1, 2);
-    let holder = description("holder", "references.py", 4, 6);
-    let entry = description("caller", "references.py", 8, 10);
     check_case(Case {
         name: "python_function_reference_and_alias_call",
         files: vec![
             SourceFile { path: "references.py", source: "def target():\n    pass\n\ndef holder():\n    alias = target\n    return alias\n\ndef caller():\n    alias = target\n    alias()\n" },
         ],
         queries: vec![
-            Query { direction: "in", symbol: "target", expected: vec![
-                relationships(&target, &[(&entry, 10, 4)]),
-            ] },
-            Query { direction: "out", symbol: "holder", expected: vec![
-                relationships(&holder, &[]),
-            ] },
-            Query { direction: "out", symbol: "caller", expected: vec![
-                relationships(&entry, &[(&target, 10, 4)]),
-            ] },
+            Query { direction: "in", symbol: "target", expected: json!([
+                {"name": "target", "filePath": "references.py", "startLine": 1,
+                 "edges": [
+                    {"symbol": {"name": "caller", "filePath": "references.py", "startLine": 8}, "line": 10, "column": 4},
+                ]},
+            ]) },
+            Query { direction: "out", symbol: "holder", expected: json!([
+                {"name": "holder", "filePath": "references.py", "startLine": 4,
+                 "edges": []},
+            ]) },
+            Query { direction: "out", symbol: "caller", expected: json!([
+                {"name": "caller", "filePath": "references.py", "startLine": 8,
+                 "edges": [
+                    {"symbol": {"name": "target", "filePath": "references.py", "startLine": 1}, "line": 10, "column": 4},
+                ]},
+            ]) },
         ],
     }).await;
 }
@@ -1500,24 +1830,31 @@ async fn python_function_reference_and_alias_call() {
 // their inverse.
 #[tokio::test]
 async fn c_prototype_and_definition_calls() {
-    let prototype = description("proto", "functions.c", 1, 1);
-    let defined = description("func", "functions.c", 2, 3);
-    let entry = description("main", "functions.c", 4, 8);
     check_case(Case {
         name: "c_prototype_and_definition_calls",
         files: vec![
             SourceFile { path: "functions.c", source: "void proto(void);\nvoid func(void) {\n}\nint main(void) {\n   proto();\n   func();\n   return 0;\n}\n" },
         ],
         queries: vec![
-            Query { direction: "in", symbol: "proto", expected: vec![
-                relationships(&prototype, &[(&entry, 5, 3)]),
-            ] },
-            Query { direction: "in", symbol: "func", expected: vec![
-                relationships(&defined, &[(&entry, 6, 3)]),
-            ] },
-            Query { direction: "out", symbol: "main", expected: vec![
-                relationships(&entry, &[(&prototype, 5, 3), (&defined, 6, 3)]),
-            ] },
+            Query { direction: "in", symbol: "proto", expected: json!([
+                {"name": "proto", "filePath": "functions.c", "startLine": 1,
+                 "edges": [
+                    {"symbol": {"name": "main", "filePath": "functions.c", "startLine": 4}, "line": 5, "column": 3},
+                ]},
+            ]) },
+            Query { direction: "in", symbol: "func", expected: json!([
+                {"name": "func", "filePath": "functions.c", "startLine": 2,
+                 "edges": [
+                    {"symbol": {"name": "main", "filePath": "functions.c", "startLine": 4}, "line": 6, "column": 3},
+                ]},
+            ]) },
+            Query { direction: "out", symbol: "main", expected: json!([
+                {"name": "main", "filePath": "functions.c", "startLine": 4,
+                 "edges": [
+                    {"symbol": {"name": "proto", "filePath": "functions.c", "startLine": 1}, "line": 5, "column": 3},
+                    {"symbol": {"name": "func", "filePath": "functions.c", "startLine": 2}, "line": 6, "column": 3},
+                ]},
+            ]) },
         ],
     }).await;
 }
@@ -1530,26 +1867,36 @@ async fn c_prototype_and_definition_calls() {
 // which targets Base.
 #[tokio::test]
 async fn java_explicit_constructor_chain() {
-    let base = description("Base::Base", "Constructors.java", 2, 2);
-    let default_ctor = description("Derived::Derived", "Constructors.java", 5, 7);
-    let sized_ctor = description("Derived::Derived", "Constructors.java", 8, 10);
     check_case(Case {
         name: "java_explicit_constructor_chain",
         files: vec![
             SourceFile { path: "Constructors.java", source: "class Base {\n    Base(int size) {}\n}\nclass Derived extends Base {\n    Derived() {\n        this(5);\n    }\n    Derived(int size) {\n        super(size);\n    }\n}\n" },
         ],
         queries: vec![
-            Query { direction: "out", symbol: "Derived::Derived", expected: vec![
-                relationships(&default_ctor, &[(&sized_ctor, 6, 8)]),
-                relationships(&sized_ctor, &[(&base, 9, 8)]),
-            ] },
-            Query { direction: "in", symbol: "Derived::Derived", expected: vec![
-                relationships(&default_ctor, &[]),
-                relationships(&sized_ctor, &[(&default_ctor, 6, 8)]),
-            ] },
-            Query { direction: "in", symbol: "Base::Base", expected: vec![
-                relationships(&base, &[(&sized_ctor, 9, 8)]),
-            ] },
+            Query { direction: "out", symbol: "Derived::Derived", expected: json!([
+                {"name": "Derived::Derived", "filePath": "Constructors.java", "startLine": 5,
+                 "edges": [
+                    {"symbol": {"name": "Derived::Derived", "filePath": "Constructors.java", "startLine": 8}, "line": 6, "column": 8},
+                ]},
+                {"name": "Derived::Derived", "filePath": "Constructors.java", "startLine": 8,
+                 "edges": [
+                    {"symbol": {"name": "Base::Base", "filePath": "Constructors.java", "startLine": 2}, "line": 9, "column": 8},
+                ]},
+            ]) },
+            Query { direction: "in", symbol: "Derived::Derived", expected: json!([
+                {"name": "Derived::Derived", "filePath": "Constructors.java", "startLine": 5,
+                 "edges": []},
+                {"name": "Derived::Derived", "filePath": "Constructors.java", "startLine": 8,
+                 "edges": [
+                    {"symbol": {"name": "Derived::Derived", "filePath": "Constructors.java", "startLine": 5}, "line": 6, "column": 8},
+                ]},
+            ]) },
+            Query { direction: "in", symbol: "Base::Base", expected: json!([
+                {"name": "Base::Base", "filePath": "Constructors.java", "startLine": 2,
+                 "edges": [
+                    {"symbol": {"name": "Derived::Derived", "filePath": "Constructors.java", "startLine": 8}, "line": 9, "column": 8},
+                ]},
+            ]) },
         ],
     }).await;
 }
@@ -1559,24 +1906,34 @@ async fn java_explicit_constructor_chain() {
 // named functions. Unqualified callers lookup preserves three definition groups.
 #[tokio::test]
 async fn cpp_overload_arity_and_type() {
-    let empty = description("run", "overloads.cc", 1, 1);
-    let integer = description("run", "overloads.cc", 2, 2);
-    let string = description("run", "overloads.cc", 3, 3);
-    let entry = description("caller", "overloads.cc", 4, 8);
     check_case(Case {
         name: "cpp_overload_arity_and_type",
         files: vec![
             SourceFile { path: "overloads.cc", source: "void run() {}\nvoid run(int value) {}\nvoid run(const char *value) {}\nvoid caller() {\n    run();\n    run(1);\n    run(\"text\");\n}\n" },
         ],
         queries: vec![
-            Query { direction: "in", symbol: "run", expected: vec![
-                relationships(&empty, &[(&entry, 5, 4)]),
-                relationships(&integer, &[(&entry, 6, 4)]),
-                relationships(&string, &[(&entry, 7, 4)]),
-            ] },
-            Query { direction: "out", symbol: "caller", expected: vec![
-                relationships(&entry, &[(&empty, 5, 4), (&integer, 6, 4), (&string, 7, 4)]),
-            ] },
+            Query { direction: "in", symbol: "run", expected: json!([
+                {"name": "run", "filePath": "overloads.cc", "startLine": 1,
+                 "edges": [
+                    {"symbol": {"name": "caller", "filePath": "overloads.cc", "startLine": 4}, "line": 5, "column": 4},
+                ]},
+                {"name": "run", "filePath": "overloads.cc", "startLine": 2,
+                 "edges": [
+                    {"symbol": {"name": "caller", "filePath": "overloads.cc", "startLine": 4}, "line": 6, "column": 4},
+                ]},
+                {"name": "run", "filePath": "overloads.cc", "startLine": 3,
+                 "edges": [
+                    {"symbol": {"name": "caller", "filePath": "overloads.cc", "startLine": 4}, "line": 7, "column": 4},
+                ]},
+            ]) },
+            Query { direction: "out", symbol: "caller", expected: json!([
+                {"name": "caller", "filePath": "overloads.cc", "startLine": 4,
+                 "edges": [
+                    {"symbol": {"name": "run", "filePath": "overloads.cc", "startLine": 1}, "line": 5, "column": 4},
+                    {"symbol": {"name": "run", "filePath": "overloads.cc", "startLine": 2}, "line": 6, "column": 4},
+                    {"symbol": {"name": "run", "filePath": "overloads.cc", "startLine": 3}, "line": 7, "column": 4},
+                ]},
+            ]) },
         ],
     }).await;
 }
@@ -1586,10 +1943,6 @@ async fn cpp_overload_arity_and_type() {
 // Bare-name queries preserve both groups; each group must contain only its own callsite.
 #[tokio::test]
 async fn rust_same_name_scopes() {
-    let left_target = description("left::work", "scopes.rs", 2, 2);
-    let left_entry = description("left::caller", "scopes.rs", 3, 5);
-    let right_target = description("right::work", "scopes.rs", 8, 8);
-    let right_entry = description("right::caller", "scopes.rs", 9, 11);
     check_case(Case {
         name: "rust_same_name_scopes",
         files: vec![SourceFile {
@@ -1612,38 +1965,70 @@ mod right {
             Query {
                 direction: "in",
                 symbol: "work",
-                expected: vec![
-                    relationships(&left_target, &[(&left_entry, 4, 8)]),
-                    relationships(&right_target, &[(&right_entry, 10, 8)]),
-                ],
+                expected: json!([
+                    {"name": "left::work", "filePath": "scopes.rs", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "left::caller", "filePath": "scopes.rs", "startLine": 3}, "line": 4, "column": 8},
+                    ]},
+                    {"name": "right::work", "filePath": "scopes.rs", "startLine": 8,
+                     "edges": [
+                        {"symbol": {"name": "right::caller", "filePath": "scopes.rs", "startLine": 9}, "line": 10, "column": 8},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "caller",
-                expected: vec![
-                    relationships(&left_entry, &[(&left_target, 4, 8)]),
-                    relationships(&right_entry, &[(&right_target, 10, 8)]),
-                ],
+                expected: json!([
+                    {"name": "left::caller", "filePath": "scopes.rs", "startLine": 3,
+                     "edges": [
+                        {"symbol": {"name": "left::work", "filePath": "scopes.rs", "startLine": 2}, "line": 4, "column": 8},
+                    ]},
+                    {"name": "right::caller", "filePath": "scopes.rs", "startLine": 9,
+                     "edges": [
+                        {"symbol": {"name": "right::work", "filePath": "scopes.rs", "startLine": 8}, "line": 10, "column": 8},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "left::work",
-                expected: vec![relationships(&left_target, &[(&left_entry, 4, 8)])],
+                expected: json!([
+                    {"name": "left::work", "filePath": "scopes.rs", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "left::caller", "filePath": "scopes.rs", "startLine": 3}, "line": 4, "column": 8},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "left::caller",
-                expected: vec![relationships(&left_entry, &[(&left_target, 4, 8)])],
+                expected: json!([
+                    {"name": "left::caller", "filePath": "scopes.rs", "startLine": 3,
+                     "edges": [
+                        {"symbol": {"name": "left::work", "filePath": "scopes.rs", "startLine": 2}, "line": 4, "column": 8},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "right::work",
-                expected: vec![relationships(&right_target, &[(&right_entry, 10, 8)])],
+                expected: json!([
+                    {"name": "right::work", "filePath": "scopes.rs", "startLine": 8,
+                     "edges": [
+                        {"symbol": {"name": "right::caller", "filePath": "scopes.rs", "startLine": 9}, "line": 10, "column": 8},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "right::caller",
-                expected: vec![relationships(&right_entry, &[(&right_target, 10, 8)])],
+                expected: json!([
+                    {"name": "right::caller", "filePath": "scopes.rs", "startLine": 9,
+                     "edges": [
+                        {"symbol": {"name": "right::work", "filePath": "scopes.rs", "startLine": 8}, "line": 10, "column": 8},
+                    ]},
+                ]),
             },
         ],
     })
@@ -1655,10 +2040,6 @@ mod right {
 // Bare-name queries preserve both groups; each group must contain only its own callsite.
 #[tokio::test]
 async fn cpp_same_name_scopes() {
-    let left_target = description("Left::work", "scopes.cc", 2, 2);
-    let left_entry = description("Left::caller", "scopes.cc", 3, 5);
-    let right_target = description("Right::work", "scopes.cc", 8, 8);
-    let right_entry = description("Right::caller", "scopes.cc", 9, 11);
     check_case(Case {
         name: "cpp_same_name_scopes",
         files: vec![SourceFile {
@@ -1681,38 +2062,70 @@ namespace Right {
             Query {
                 direction: "in",
                 symbol: "work",
-                expected: vec![
-                    relationships(&left_target, &[(&left_entry, 4, 8)]),
-                    relationships(&right_target, &[(&right_entry, 10, 8)]),
-                ],
+                expected: json!([
+                    {"name": "Left::work", "filePath": "scopes.cc", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "Left::caller", "filePath": "scopes.cc", "startLine": 3}, "line": 4, "column": 8},
+                    ]},
+                    {"name": "Right::work", "filePath": "scopes.cc", "startLine": 8,
+                     "edges": [
+                        {"symbol": {"name": "Right::caller", "filePath": "scopes.cc", "startLine": 9}, "line": 10, "column": 8},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "caller",
-                expected: vec![
-                    relationships(&left_entry, &[(&left_target, 4, 8)]),
-                    relationships(&right_entry, &[(&right_target, 10, 8)]),
-                ],
+                expected: json!([
+                    {"name": "Left::caller", "filePath": "scopes.cc", "startLine": 3,
+                     "edges": [
+                        {"symbol": {"name": "Left::work", "filePath": "scopes.cc", "startLine": 2}, "line": 4, "column": 8},
+                    ]},
+                    {"name": "Right::caller", "filePath": "scopes.cc", "startLine": 9,
+                     "edges": [
+                        {"symbol": {"name": "Right::work", "filePath": "scopes.cc", "startLine": 8}, "line": 10, "column": 8},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "Left::work",
-                expected: vec![relationships(&left_target, &[(&left_entry, 4, 8)])],
+                expected: json!([
+                    {"name": "Left::work", "filePath": "scopes.cc", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "Left::caller", "filePath": "scopes.cc", "startLine": 3}, "line": 4, "column": 8},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "Left::caller",
-                expected: vec![relationships(&left_entry, &[(&left_target, 4, 8)])],
+                expected: json!([
+                    {"name": "Left::caller", "filePath": "scopes.cc", "startLine": 3,
+                     "edges": [
+                        {"symbol": {"name": "Left::work", "filePath": "scopes.cc", "startLine": 2}, "line": 4, "column": 8},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "Right::work",
-                expected: vec![relationships(&right_target, &[(&right_entry, 10, 8)])],
+                expected: json!([
+                    {"name": "Right::work", "filePath": "scopes.cc", "startLine": 8,
+                     "edges": [
+                        {"symbol": {"name": "Right::caller", "filePath": "scopes.cc", "startLine": 9}, "line": 10, "column": 8},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "Right::caller",
-                expected: vec![relationships(&right_entry, &[(&right_target, 10, 8)])],
+                expected: json!([
+                    {"name": "Right::caller", "filePath": "scopes.cc", "startLine": 9,
+                     "edges": [
+                        {"symbol": {"name": "Right::work", "filePath": "scopes.cc", "startLine": 8}, "line": 10, "column": 8},
+                    ]},
+                ]),
             },
         ],
     })
@@ -1724,10 +2137,6 @@ namespace Right {
 // Bare-name queries preserve both groups; each group must contain only its own callsite.
 #[tokio::test]
 async fn java_same_name_scopes() {
-    let left_target = description("Left::work", "Scopes.java", 2, 2);
-    let left_entry = description("Left::caller", "Scopes.java", 3, 5);
-    let right_target = description("Right::work", "Scopes.java", 8, 8);
-    let right_entry = description("Right::caller", "Scopes.java", 9, 11);
     check_case(Case {
         name: "java_same_name_scopes",
         files: vec![SourceFile {
@@ -1750,38 +2159,70 @@ class Right {
             Query {
                 direction: "in",
                 symbol: "work",
-                expected: vec![
-                    relationships(&left_target, &[(&left_entry, 4, 8)]),
-                    relationships(&right_target, &[(&right_entry, 10, 8)]),
-                ],
+                expected: json!([
+                    {"name": "Left::work", "filePath": "Scopes.java", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "Left::caller", "filePath": "Scopes.java", "startLine": 3}, "line": 4, "column": 8},
+                    ]},
+                    {"name": "Right::work", "filePath": "Scopes.java", "startLine": 8,
+                     "edges": [
+                        {"symbol": {"name": "Right::caller", "filePath": "Scopes.java", "startLine": 9}, "line": 10, "column": 8},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "caller",
-                expected: vec![
-                    relationships(&left_entry, &[(&left_target, 4, 8)]),
-                    relationships(&right_entry, &[(&right_target, 10, 8)]),
-                ],
+                expected: json!([
+                    {"name": "Left::caller", "filePath": "Scopes.java", "startLine": 3,
+                     "edges": [
+                        {"symbol": {"name": "Left::work", "filePath": "Scopes.java", "startLine": 2}, "line": 4, "column": 8},
+                    ]},
+                    {"name": "Right::caller", "filePath": "Scopes.java", "startLine": 9,
+                     "edges": [
+                        {"symbol": {"name": "Right::work", "filePath": "Scopes.java", "startLine": 8}, "line": 10, "column": 8},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "Left::work",
-                expected: vec![relationships(&left_target, &[(&left_entry, 4, 8)])],
+                expected: json!([
+                    {"name": "Left::work", "filePath": "Scopes.java", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "Left::caller", "filePath": "Scopes.java", "startLine": 3}, "line": 4, "column": 8},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "Left::caller",
-                expected: vec![relationships(&left_entry, &[(&left_target, 4, 8)])],
+                expected: json!([
+                    {"name": "Left::caller", "filePath": "Scopes.java", "startLine": 3,
+                     "edges": [
+                        {"symbol": {"name": "Left::work", "filePath": "Scopes.java", "startLine": 2}, "line": 4, "column": 8},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "Right::work",
-                expected: vec![relationships(&right_target, &[(&right_entry, 10, 8)])],
+                expected: json!([
+                    {"name": "Right::work", "filePath": "Scopes.java", "startLine": 8,
+                     "edges": [
+                        {"symbol": {"name": "Right::caller", "filePath": "Scopes.java", "startLine": 9}, "line": 10, "column": 8},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "Right::caller",
-                expected: vec![relationships(&right_entry, &[(&right_target, 10, 8)])],
+                expected: json!([
+                    {"name": "Right::caller", "filePath": "Scopes.java", "startLine": 9,
+                     "edges": [
+                        {"symbol": {"name": "Right::work", "filePath": "Scopes.java", "startLine": 8}, "line": 10, "column": 8},
+                    ]},
+                ]),
             },
         ],
     })
@@ -1793,10 +2234,6 @@ class Right {
 // Bare-name queries preserve both groups; each group must contain only its own callsite.
 #[tokio::test]
 async fn javascript_same_name_scopes() {
-    let left_target = description("Left::work", "scopes.js", 2, 2);
-    let left_entry = description("Left::caller", "scopes.js", 3, 5);
-    let right_target = description("Right::work", "scopes.js", 8, 8);
-    let right_entry = description("Right::caller", "scopes.js", 9, 11);
     check_case(Case {
         name: "javascript_same_name_scopes",
         files: vec![SourceFile {
@@ -1819,38 +2256,70 @@ class Right {
             Query {
                 direction: "in",
                 symbol: "work",
-                expected: vec![
-                    relationships(&left_target, &[(&left_entry, 4, 13)]),
-                    relationships(&right_target, &[(&right_entry, 10, 13)]),
-                ],
+                expected: json!([
+                    {"name": "Left::work", "filePath": "scopes.js", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "Left::caller", "filePath": "scopes.js", "startLine": 3}, "line": 4, "column": 13},
+                    ]},
+                    {"name": "Right::work", "filePath": "scopes.js", "startLine": 8,
+                     "edges": [
+                        {"symbol": {"name": "Right::caller", "filePath": "scopes.js", "startLine": 9}, "line": 10, "column": 13},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "caller",
-                expected: vec![
-                    relationships(&left_entry, &[(&left_target, 4, 13)]),
-                    relationships(&right_entry, &[(&right_target, 10, 13)]),
-                ],
+                expected: json!([
+                    {"name": "Left::caller", "filePath": "scopes.js", "startLine": 3,
+                     "edges": [
+                        {"symbol": {"name": "Left::work", "filePath": "scopes.js", "startLine": 2}, "line": 4, "column": 13},
+                    ]},
+                    {"name": "Right::caller", "filePath": "scopes.js", "startLine": 9,
+                     "edges": [
+                        {"symbol": {"name": "Right::work", "filePath": "scopes.js", "startLine": 8}, "line": 10, "column": 13},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "Left::work",
-                expected: vec![relationships(&left_target, &[(&left_entry, 4, 13)])],
+                expected: json!([
+                    {"name": "Left::work", "filePath": "scopes.js", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "Left::caller", "filePath": "scopes.js", "startLine": 3}, "line": 4, "column": 13},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "Left::caller",
-                expected: vec![relationships(&left_entry, &[(&left_target, 4, 13)])],
+                expected: json!([
+                    {"name": "Left::caller", "filePath": "scopes.js", "startLine": 3,
+                     "edges": [
+                        {"symbol": {"name": "Left::work", "filePath": "scopes.js", "startLine": 2}, "line": 4, "column": 13},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "Right::work",
-                expected: vec![relationships(&right_target, &[(&right_entry, 10, 13)])],
+                expected: json!([
+                    {"name": "Right::work", "filePath": "scopes.js", "startLine": 8,
+                     "edges": [
+                        {"symbol": {"name": "Right::caller", "filePath": "scopes.js", "startLine": 9}, "line": 10, "column": 13},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "Right::caller",
-                expected: vec![relationships(&right_entry, &[(&right_target, 10, 13)])],
+                expected: json!([
+                    {"name": "Right::caller", "filePath": "scopes.js", "startLine": 9,
+                     "edges": [
+                        {"symbol": {"name": "Right::work", "filePath": "scopes.js", "startLine": 8}, "line": 10, "column": 13},
+                    ]},
+                ]),
             },
         ],
     })
@@ -1862,10 +2331,6 @@ class Right {
 // Bare-name queries preserve both groups; each group must contain only its own callsite.
 #[tokio::test]
 async fn python_same_name_scopes() {
-    let left_target = description("Left::work", "scopes.py", 2, 3);
-    let left_entry = description("Left::caller", "scopes.py", 4, 5);
-    let right_target = description("Right::work", "scopes.py", 8, 9);
-    let right_entry = description("Right::caller", "scopes.py", 10, 11);
     check_case(Case {
         name: "python_same_name_scopes",
         files: vec![SourceFile {
@@ -1887,38 +2352,70 @@ class Right:
             Query {
                 direction: "in",
                 symbol: "work",
-                expected: vec![
-                    relationships(&left_target, &[(&left_entry, 5, 13)]),
-                    relationships(&right_target, &[(&right_entry, 11, 13)]),
-                ],
+                expected: json!([
+                    {"name": "Left::work", "filePath": "scopes.py", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "Left::caller", "filePath": "scopes.py", "startLine": 4}, "line": 5, "column": 13},
+                    ]},
+                    {"name": "Right::work", "filePath": "scopes.py", "startLine": 8,
+                     "edges": [
+                        {"symbol": {"name": "Right::caller", "filePath": "scopes.py", "startLine": 10}, "line": 11, "column": 13},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "caller",
-                expected: vec![
-                    relationships(&left_entry, &[(&left_target, 5, 13)]),
-                    relationships(&right_entry, &[(&right_target, 11, 13)]),
-                ],
+                expected: json!([
+                    {"name": "Left::caller", "filePath": "scopes.py", "startLine": 4,
+                     "edges": [
+                        {"symbol": {"name": "Left::work", "filePath": "scopes.py", "startLine": 2}, "line": 5, "column": 13},
+                    ]},
+                    {"name": "Right::caller", "filePath": "scopes.py", "startLine": 10,
+                     "edges": [
+                        {"symbol": {"name": "Right::work", "filePath": "scopes.py", "startLine": 8}, "line": 11, "column": 13},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "Left::work",
-                expected: vec![relationships(&left_target, &[(&left_entry, 5, 13)])],
+                expected: json!([
+                    {"name": "Left::work", "filePath": "scopes.py", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "Left::caller", "filePath": "scopes.py", "startLine": 4}, "line": 5, "column": 13},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "Left::caller",
-                expected: vec![relationships(&left_entry, &[(&left_target, 5, 13)])],
+                expected: json!([
+                    {"name": "Left::caller", "filePath": "scopes.py", "startLine": 4,
+                     "edges": [
+                        {"symbol": {"name": "Left::work", "filePath": "scopes.py", "startLine": 2}, "line": 5, "column": 13},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "Right::work",
-                expected: vec![relationships(&right_target, &[(&right_entry, 11, 13)])],
+                expected: json!([
+                    {"name": "Right::work", "filePath": "scopes.py", "startLine": 8,
+                     "edges": [
+                        {"symbol": {"name": "Right::caller", "filePath": "scopes.py", "startLine": 10}, "line": 11, "column": 13},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "Right::caller",
-                expected: vec![relationships(&right_entry, &[(&right_target, 11, 13)])],
+                expected: json!([
+                    {"name": "Right::caller", "filePath": "scopes.py", "startLine": 10,
+                     "edges": [
+                        {"symbol": {"name": "Right::work", "filePath": "scopes.py", "startLine": 8}, "line": 11, "column": 13},
+                    ]},
+                ]),
             },
         ],
     })
@@ -1930,10 +2427,6 @@ class Right:
 // Bare-name queries preserve both groups; each group must contain only its own callsite.
 #[tokio::test]
 async fn go_same_name_scopes() {
-    let left_target = description("Left::work", "scopes.go", 4, 4);
-    let left_entry = description("Left::caller", "scopes.go", 5, 7);
-    let right_target = description("Right::work", "scopes.go", 10, 10);
-    let right_entry = description("Right::caller", "scopes.go", 11, 13);
     check_case(Case {
         name: "go_same_name_scopes",
         files: vec![SourceFile {
@@ -1957,38 +2450,70 @@ func (self *Right) caller() {
             Query {
                 direction: "in",
                 symbol: "work",
-                expected: vec![
-                    relationships(&left_target, &[(&left_entry, 6, 9)]),
-                    relationships(&right_target, &[(&right_entry, 12, 9)]),
-                ],
+                expected: json!([
+                    {"name": "Left::work", "filePath": "scopes.go", "startLine": 4,
+                     "edges": [
+                        {"symbol": {"name": "Left::caller", "filePath": "scopes.go", "startLine": 5}, "line": 6, "column": 9},
+                    ]},
+                    {"name": "Right::work", "filePath": "scopes.go", "startLine": 10,
+                     "edges": [
+                        {"symbol": {"name": "Right::caller", "filePath": "scopes.go", "startLine": 11}, "line": 12, "column": 9},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "caller",
-                expected: vec![
-                    relationships(&left_entry, &[(&left_target, 6, 9)]),
-                    relationships(&right_entry, &[(&right_target, 12, 9)]),
-                ],
+                expected: json!([
+                    {"name": "Left::caller", "filePath": "scopes.go", "startLine": 5,
+                     "edges": [
+                        {"symbol": {"name": "Left::work", "filePath": "scopes.go", "startLine": 4}, "line": 6, "column": 9},
+                    ]},
+                    {"name": "Right::caller", "filePath": "scopes.go", "startLine": 11,
+                     "edges": [
+                        {"symbol": {"name": "Right::work", "filePath": "scopes.go", "startLine": 10}, "line": 12, "column": 9},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "Left::work",
-                expected: vec![relationships(&left_target, &[(&left_entry, 6, 9)])],
+                expected: json!([
+                    {"name": "Left::work", "filePath": "scopes.go", "startLine": 4,
+                     "edges": [
+                        {"symbol": {"name": "Left::caller", "filePath": "scopes.go", "startLine": 5}, "line": 6, "column": 9},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "Left::caller",
-                expected: vec![relationships(&left_entry, &[(&left_target, 6, 9)])],
+                expected: json!([
+                    {"name": "Left::caller", "filePath": "scopes.go", "startLine": 5,
+                     "edges": [
+                        {"symbol": {"name": "Left::work", "filePath": "scopes.go", "startLine": 4}, "line": 6, "column": 9},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "Right::work",
-                expected: vec![relationships(&right_target, &[(&right_entry, 12, 9)])],
+                expected: json!([
+                    {"name": "Right::work", "filePath": "scopes.go", "startLine": 10,
+                     "edges": [
+                        {"symbol": {"name": "Right::caller", "filePath": "scopes.go", "startLine": 11}, "line": 12, "column": 9},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "Right::caller",
-                expected: vec![relationships(&right_entry, &[(&right_target, 12, 9)])],
+                expected: json!([
+                    {"name": "Right::caller", "filePath": "scopes.go", "startLine": 11,
+                     "edges": [
+                        {"symbol": {"name": "Right::work", "filePath": "scopes.go", "startLine": 10}, "line": 12, "column": 9},
+                    ]},
+                ]),
             },
         ],
     })
@@ -2001,10 +2526,6 @@ func (self *Right) caller() {
 // Bare-name queries preserve both groups; each group must contain only its own callsite.
 #[tokio::test]
 async fn c_same_name_scopes() {
-    let left_target = description("work", "left.c", 1, 1);
-    let left_entry = description("caller", "left.c", 2, 4);
-    let right_target = description("work", "right.c", 1, 1);
-    let right_entry = description("caller", "right.c", 2, 4);
     check_case(Case {
         name: "c_same_name_scopes",
         files: vec![
@@ -2029,18 +2550,30 @@ static void caller(void) {
             Query {
                 direction: "in",
                 symbol: "work",
-                expected: vec![
-                    relationships(&left_target, &[(&left_entry, 3, 4)]),
-                    relationships(&right_target, &[(&right_entry, 3, 4)]),
-                ],
+                expected: json!([
+                    {"name": "work", "filePath": "left.c", "startLine": 1,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "left.c", "startLine": 2}, "line": 3, "column": 4},
+                    ]},
+                    {"name": "work", "filePath": "right.c", "startLine": 1,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "right.c", "startLine": 2}, "line": 3, "column": 4},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "caller",
-                expected: vec![
-                    relationships(&left_entry, &[(&left_target, 3, 4)]),
-                    relationships(&right_entry, &[(&right_target, 3, 4)]),
-                ],
+                expected: json!([
+                    {"name": "caller", "filePath": "left.c", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "work", "filePath": "left.c", "startLine": 1}, "line": 3, "column": 4},
+                    ]},
+                    {"name": "caller", "filePath": "right.c", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "work", "filePath": "right.c", "startLine": 1}, "line": 3, "column": 4},
+                    ]},
+                ]),
             },
         ],
     })
@@ -2053,10 +2586,6 @@ static void caller(void) {
 // scope.
 #[tokio::test]
 async fn rust_shadowed_nested_function() {
-    let global = description("work", "shadow.rs", 1, 1);
-    let target = description("target", "shadow.rs", 2, 2);
-    let outer = description("outer", "shadow.rs", 3, 8);
-    let inner = description("outer::work", "shadow.rs", 4, 6);
     check_case(Case {
         name: "rust_shadowed_nested_function",
         files: vec![SourceFile {
@@ -2075,25 +2604,44 @@ fn outer() {
             Query {
                 direction: "in",
                 symbol: "work",
-                expected: vec![
-                    relationships(&global, &[]),
-                    relationships(&inner, &[(&outer, 7, 4)]),
-                ],
+                expected: json!([
+                    {"name": "work", "filePath": "shadow.rs", "startLine": 1,
+                     "edges": []},
+                    {"name": "outer::work", "filePath": "shadow.rs", "startLine": 4,
+                     "edges": [
+                        {"symbol": {"name": "outer", "filePath": "shadow.rs", "startLine": 3}, "line": 7, "column": 4},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "target",
-                expected: vec![relationships(&target, &[(&inner, 5, 8)])],
+                expected: json!([
+                    {"name": "target", "filePath": "shadow.rs", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "outer::work", "filePath": "shadow.rs", "startLine": 4}, "line": 5, "column": 8},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "outer",
-                expected: vec![relationships(&outer, &[(&inner, 7, 4)])],
+                expected: json!([
+                    {"name": "outer", "filePath": "shadow.rs", "startLine": 3,
+                     "edges": [
+                        {"symbol": {"name": "outer::work", "filePath": "shadow.rs", "startLine": 4}, "line": 7, "column": 4},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "outer::work",
-                expected: vec![relationships(&inner, &[(&target, 5, 8)])],
+                expected: json!([
+                    {"name": "outer::work", "filePath": "shadow.rs", "startLine": 4,
+                     "edges": [
+                        {"symbol": {"name": "target", "filePath": "shadow.rs", "startLine": 2}, "line": 5, "column": 8},
+                    ]},
+                ]),
             },
         ],
     })
@@ -2106,10 +2654,6 @@ fn outer() {
 // scope.
 #[tokio::test]
 async fn javascript_shadowed_nested_function() {
-    let global = description("work", "shadow.js", 1, 1);
-    let target = description("target", "shadow.js", 2, 2);
-    let outer = description("outer", "shadow.js", 3, 8);
-    let inner = description("outer::work", "shadow.js", 4, 6);
     check_case(Case {
         name: "javascript_shadowed_nested_function",
         files: vec![SourceFile {
@@ -2128,25 +2672,44 @@ function outer() {
             Query {
                 direction: "in",
                 symbol: "work",
-                expected: vec![
-                    relationships(&global, &[]),
-                    relationships(&inner, &[(&outer, 7, 4)]),
-                ],
+                expected: json!([
+                    {"name": "work", "filePath": "shadow.js", "startLine": 1,
+                     "edges": []},
+                    {"name": "outer::work", "filePath": "shadow.js", "startLine": 4,
+                     "edges": [
+                        {"symbol": {"name": "outer", "filePath": "shadow.js", "startLine": 3}, "line": 7, "column": 4},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "target",
-                expected: vec![relationships(&target, &[(&inner, 5, 8)])],
+                expected: json!([
+                    {"name": "target", "filePath": "shadow.js", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "outer::work", "filePath": "shadow.js", "startLine": 4}, "line": 5, "column": 8},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "outer",
-                expected: vec![relationships(&outer, &[(&inner, 7, 4)])],
+                expected: json!([
+                    {"name": "outer", "filePath": "shadow.js", "startLine": 3,
+                     "edges": [
+                        {"symbol": {"name": "outer::work", "filePath": "shadow.js", "startLine": 4}, "line": 7, "column": 4},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "outer::work",
-                expected: vec![relationships(&inner, &[(&target, 5, 8)])],
+                expected: json!([
+                    {"name": "outer::work", "filePath": "shadow.js", "startLine": 4,
+                     "edges": [
+                        {"symbol": {"name": "target", "filePath": "shadow.js", "startLine": 2}, "line": 5, "column": 8},
+                    ]},
+                ]),
             },
         ],
     })
@@ -2159,10 +2722,6 @@ function outer() {
 // scope.
 #[tokio::test]
 async fn python_shadowed_nested_function() {
-    let global = description("work", "shadow.py", 1, 2);
-    let target = description("target", "shadow.py", 3, 4);
-    let outer = description("outer", "shadow.py", 5, 8);
-    let inner = description("outer::work", "shadow.py", 6, 7);
     check_case(Case {
         name: "python_shadowed_nested_function",
         files: vec![SourceFile {
@@ -2181,25 +2740,44 @@ def outer():
             Query {
                 direction: "in",
                 symbol: "work",
-                expected: vec![
-                    relationships(&global, &[]),
-                    relationships(&inner, &[(&outer, 8, 4)]),
-                ],
+                expected: json!([
+                    {"name": "work", "filePath": "shadow.py", "startLine": 1,
+                     "edges": []},
+                    {"name": "outer::work", "filePath": "shadow.py", "startLine": 6,
+                     "edges": [
+                        {"symbol": {"name": "outer", "filePath": "shadow.py", "startLine": 5}, "line": 8, "column": 4},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "target",
-                expected: vec![relationships(&target, &[(&inner, 7, 8)])],
+                expected: json!([
+                    {"name": "target", "filePath": "shadow.py", "startLine": 3,
+                     "edges": [
+                        {"symbol": {"name": "outer::work", "filePath": "shadow.py", "startLine": 6}, "line": 7, "column": 8},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "outer",
-                expected: vec![relationships(&outer, &[(&inner, 8, 4)])],
+                expected: json!([
+                    {"name": "outer", "filePath": "shadow.py", "startLine": 5,
+                     "edges": [
+                        {"symbol": {"name": "outer::work", "filePath": "shadow.py", "startLine": 6}, "line": 8, "column": 4},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "outer::work",
-                expected: vec![relationships(&inner, &[(&target, 7, 8)])],
+                expected: json!([
+                    {"name": "outer::work", "filePath": "shadow.py", "startLine": 6,
+                     "edges": [
+                        {"symbol": {"name": "target", "filePath": "shadow.py", "startLine": 3}, "line": 7, "column": 8},
+                    ]},
+                ]),
             },
         ],
     })
@@ -2211,9 +2789,6 @@ def outer():
 // target, not the global same-named function.
 #[tokio::test]
 async fn c_local_function_pointer_shadows_global() {
-    let global = description("work", "shadow.c", 1, 1);
-    let target = description("target", "shadow.c", 2, 2);
-    let entry = description("caller", "shadow.c", 3, 6);
     check_case(Case {
         name: "c_local_function_pointer_shadows_global",
         files: vec![SourceFile {
@@ -2230,17 +2805,30 @@ void caller(void) {
             Query {
                 direction: "in",
                 symbol: "work",
-                expected: vec![relationships(&global, &[])],
+                expected: json!([
+                    {"name": "work", "filePath": "shadow.c", "startLine": 1,
+                     "edges": []},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "target",
-                expected: vec![relationships(&target, &[(&entry, 5, 4)])],
+                expected: json!([
+                    {"name": "target", "filePath": "shadow.c", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "shadow.c", "startLine": 3}, "line": 5, "column": 4},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "caller",
-                expected: vec![relationships(&entry, &[(&target, 5, 4)])],
+                expected: json!([
+                    {"name": "caller", "filePath": "shadow.c", "startLine": 3,
+                     "edges": [
+                        {"symbol": {"name": "target", "filePath": "shadow.c", "startLine": 2}, "line": 5, "column": 4},
+                    ]},
+                ]),
             },
         ],
     })
@@ -2253,9 +2841,6 @@ void caller(void) {
 // methods.
 #[tokio::test]
 async fn typescript_different_parameter_receivers() {
-    let left = description("Left::run", "receivers.ts", 2, 2);
-    let right = description("Right::run", "receivers.ts", 5, 5);
-    let entry = description("caller", "receivers.ts", 7, 10);
     check_case(Case {
         name: "typescript_different_parameter_receivers",
         files: vec![SourceFile {
@@ -2276,17 +2861,33 @@ function caller(a: Left, b: Right) {
             Query {
                 direction: "out",
                 symbol: "caller",
-                expected: vec![relationships(&entry, &[(&left, 8, 6), (&right, 9, 6)])],
+                expected: json!([
+                    {"name": "caller", "filePath": "receivers.ts", "startLine": 7,
+                     "edges": [
+                        {"symbol": {"name": "Left::run", "filePath": "receivers.ts", "startLine": 2}, "line": 8, "column": 6},
+                        {"symbol": {"name": "Right::run", "filePath": "receivers.ts", "startLine": 5}, "line": 9, "column": 6},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "Left::run",
-                expected: vec![relationships(&left, &[(&entry, 8, 6)])],
+                expected: json!([
+                    {"name": "Left::run", "filePath": "receivers.ts", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "receivers.ts", "startLine": 7}, "line": 8, "column": 6},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "Right::run",
-                expected: vec![relationships(&right, &[(&entry, 9, 6)])],
+                expected: json!([
+                    {"name": "Right::run", "filePath": "receivers.ts", "startLine": 5,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "receivers.ts", "startLine": 7}, "line": 9, "column": 6},
+                    ]},
+                ]),
             },
         ],
     })
@@ -2299,9 +2900,6 @@ function caller(a: Left, b: Right) {
 // methods.
 #[tokio::test]
 async fn java_different_parameter_receivers() {
-    let left = description("Left::run", "Receivers.java", 2, 2);
-    let right = description("Right::run", "Receivers.java", 5, 5);
-    let entry = description("Use::caller", "Receivers.java", 8, 11);
     check_case(Case {
         name: "java_different_parameter_receivers",
         files: vec![SourceFile {
@@ -2324,17 +2922,33 @@ class Use {
             Query {
                 direction: "out",
                 symbol: "Use::caller",
-                expected: vec![relationships(&entry, &[(&left, 9, 10), (&right, 10, 10)])],
+                expected: json!([
+                    {"name": "Use::caller", "filePath": "Receivers.java", "startLine": 8,
+                     "edges": [
+                        {"symbol": {"name": "Left::run", "filePath": "Receivers.java", "startLine": 2}, "line": 9, "column": 10},
+                        {"symbol": {"name": "Right::run", "filePath": "Receivers.java", "startLine": 5}, "line": 10, "column": 10},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "Left::run",
-                expected: vec![relationships(&left, &[(&entry, 9, 10)])],
+                expected: json!([
+                    {"name": "Left::run", "filePath": "Receivers.java", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "Use::caller", "filePath": "Receivers.java", "startLine": 8}, "line": 9, "column": 10},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "Right::run",
-                expected: vec![relationships(&right, &[(&entry, 10, 10)])],
+                expected: json!([
+                    {"name": "Right::run", "filePath": "Receivers.java", "startLine": 5,
+                     "edges": [
+                        {"symbol": {"name": "Use::caller", "filePath": "Receivers.java", "startLine": 8}, "line": 10, "column": 10},
+                    ]},
+                ]),
             },
         ],
     })
@@ -2347,9 +2961,6 @@ class Use {
 // methods.
 #[tokio::test]
 async fn cpp_different_parameter_receivers() {
-    let left = description("Left::run", "receivers.cc", 2, 2);
-    let right = description("Right::run", "receivers.cc", 5, 5);
-    let entry = description("caller", "receivers.cc", 7, 10);
     check_case(Case {
         name: "cpp_different_parameter_receivers",
         files: vec![SourceFile {
@@ -2370,17 +2981,33 @@ void caller(Left &a, Right &b) {
             Query {
                 direction: "out",
                 symbol: "caller",
-                expected: vec![relationships(&entry, &[(&left, 8, 6), (&right, 9, 6)])],
+                expected: json!([
+                    {"name": "caller", "filePath": "receivers.cc", "startLine": 7,
+                     "edges": [
+                        {"symbol": {"name": "Left::run", "filePath": "receivers.cc", "startLine": 2}, "line": 8, "column": 6},
+                        {"symbol": {"name": "Right::run", "filePath": "receivers.cc", "startLine": 5}, "line": 9, "column": 6},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "Left::run",
-                expected: vec![relationships(&left, &[(&entry, 8, 6)])],
+                expected: json!([
+                    {"name": "Left::run", "filePath": "receivers.cc", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "receivers.cc", "startLine": 7}, "line": 8, "column": 6},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "Right::run",
-                expected: vec![relationships(&right, &[(&entry, 9, 6)])],
+                expected: json!([
+                    {"name": "Right::run", "filePath": "receivers.cc", "startLine": 5,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "receivers.cc", "startLine": 7}, "line": 9, "column": 6},
+                    ]},
+                ]),
             },
         ],
     })
@@ -2393,9 +3020,6 @@ void caller(Left &a, Right &b) {
 // methods.
 #[tokio::test]
 async fn go_different_parameter_receivers() {
-    let left = description("Left::run", "receivers.go", 4, 4);
-    let right = description("Right::run", "receivers.go", 6, 6);
-    let entry = description("caller", "receivers.go", 7, 10);
     check_case(Case {
         name: "go_different_parameter_receivers",
         files: vec![SourceFile {
@@ -2416,17 +3040,33 @@ func caller(a Left, b *Right) {
             Query {
                 direction: "out",
                 symbol: "caller",
-                expected: vec![relationships(&entry, &[(&left, 8, 6), (&right, 9, 6)])],
+                expected: json!([
+                    {"name": "caller", "filePath": "receivers.go", "startLine": 7,
+                     "edges": [
+                        {"symbol": {"name": "Left::run", "filePath": "receivers.go", "startLine": 4}, "line": 8, "column": 6},
+                        {"symbol": {"name": "Right::run", "filePath": "receivers.go", "startLine": 6}, "line": 9, "column": 6},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "Left::run",
-                expected: vec![relationships(&left, &[(&entry, 8, 6)])],
+                expected: json!([
+                    {"name": "Left::run", "filePath": "receivers.go", "startLine": 4,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "receivers.go", "startLine": 7}, "line": 8, "column": 6},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "Right::run",
-                expected: vec![relationships(&right, &[(&entry, 9, 6)])],
+                expected: json!([
+                    {"name": "Right::run", "filePath": "receivers.go", "startLine": 6,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "receivers.go", "startLine": 7}, "line": 9, "column": 6},
+                    ]},
+                ]),
             },
         ],
     })
@@ -2439,9 +3079,6 @@ func caller(a Left, b *Right) {
 // callsites.
 #[tokio::test]
 async fn python_aliased_imports_of_same_name() {
-    let left = description("work", "left.py", 1, 2);
-    let right = description("work", "right.py", 1, 2);
-    let entry = description("caller", "caller.py", 3, 5);
     check_case(Case {
         name: "python_aliased_imports_of_same_name",
         files: vec![
@@ -2471,15 +3108,27 @@ def caller():
             Query {
                 direction: "out",
                 symbol: "caller",
-                expected: vec![relationships(&entry, &[(&left, 4, 4), (&right, 5, 4)])],
+                expected: json!([
+                    {"name": "caller", "filePath": "caller.py", "startLine": 3,
+                     "edges": [
+                        {"symbol": {"name": "work", "filePath": "left.py", "startLine": 1}, "line": 4, "column": 4},
+                        {"symbol": {"name": "work", "filePath": "right.py", "startLine": 1}, "line": 5, "column": 4},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "work",
-                expected: vec![
-                    relationships(&left, &[(&entry, 4, 4)]),
-                    relationships(&right, &[(&entry, 5, 4)]),
-                ],
+                expected: json!([
+                    {"name": "work", "filePath": "left.py", "startLine": 1,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "caller.py", "startLine": 3}, "line": 4, "column": 4},
+                    ]},
+                    {"name": "work", "filePath": "right.py", "startLine": 1,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "caller.py", "startLine": 3}, "line": 5, "column": 4},
+                    ]},
+                ]),
             },
         ],
     })
@@ -2492,9 +3141,6 @@ def caller():
 // callsites.
 #[tokio::test]
 async fn typescript_aliased_imports_of_same_name() {
-    let left = description("work", "left.ts", 1, 1);
-    let right = description("work", "right.ts", 1, 1);
-    let entry = description("caller", "caller.ts", 3, 6);
     check_case(Case {
         name: "typescript_aliased_imports_of_same_name",
         files: vec![
@@ -2523,15 +3169,27 @@ function caller() {
             Query {
                 direction: "out",
                 symbol: "caller",
-                expected: vec![relationships(&entry, &[(&left, 4, 4), (&right, 5, 4)])],
+                expected: json!([
+                    {"name": "caller", "filePath": "caller.ts", "startLine": 3,
+                     "edges": [
+                        {"symbol": {"name": "work", "filePath": "left.ts", "startLine": 1}, "line": 4, "column": 4},
+                        {"symbol": {"name": "work", "filePath": "right.ts", "startLine": 1}, "line": 5, "column": 4},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "work",
-                expected: vec![
-                    relationships(&left, &[(&entry, 4, 4)]),
-                    relationships(&right, &[(&entry, 5, 4)]),
-                ],
+                expected: json!([
+                    {"name": "work", "filePath": "left.ts", "startLine": 1,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "caller.ts", "startLine": 3}, "line": 4, "column": 4},
+                    ]},
+                    {"name": "work", "filePath": "right.ts", "startLine": 1,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "caller.ts", "startLine": 3}, "line": 5, "column": 4},
+                    ]},
+                ]),
             },
         ],
     })
@@ -2544,9 +3202,6 @@ function caller() {
 // callsites.
 #[tokio::test]
 async fn rust_aliased_imports_of_same_name() {
-    let left = description("left::work", "left.rs", 1, 1);
-    let right = description("right::work", "right.rs", 1, 1);
-    let entry = description("caller", "lib.rs", 5, 8);
     check_case(Case {
         name: "rust_aliased_imports_of_same_name",
         files: vec![
@@ -2577,15 +3232,27 @@ fn caller() {
             Query {
                 direction: "out",
                 symbol: "caller",
-                expected: vec![relationships(&entry, &[(&left, 6, 4), (&right, 7, 4)])],
+                expected: json!([
+                    {"name": "caller", "filePath": "lib.rs", "startLine": 5,
+                     "edges": [
+                        {"symbol": {"name": "left::work", "filePath": "left.rs", "startLine": 1}, "line": 6, "column": 4},
+                        {"symbol": {"name": "right::work", "filePath": "right.rs", "startLine": 1}, "line": 7, "column": 4},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "work",
-                expected: vec![
-                    relationships(&left, &[(&entry, 6, 4)]),
-                    relationships(&right, &[(&entry, 7, 4)]),
-                ],
+                expected: json!([
+                    {"name": "left::work", "filePath": "left.rs", "startLine": 1,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "lib.rs", "startLine": 5}, "line": 6, "column": 4},
+                    ]},
+                    {"name": "right::work", "filePath": "right.rs", "startLine": 1,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "lib.rs", "startLine": 5}, "line": 7, "column": 4},
+                    ]},
+                ]),
             },
         ],
     })
@@ -2598,9 +3265,6 @@ fn caller() {
 // callsites.
 #[tokio::test]
 async fn go_aliased_imports_of_same_name() {
-    let left = description("Work", "left/left.go", 3, 3);
-    let right = description("Work", "right/right.go", 3, 3);
-    let entry = description("caller", "caller.go", 8, 11);
     check_case(Case {
         name: "go_aliased_imports_of_same_name",
         files: vec![
@@ -2644,15 +3308,27 @@ func caller() {
             Query {
                 direction: "out",
                 symbol: "caller",
-                expected: vec![relationships(&entry, &[(&left, 9, 6), (&right, 10, 6)])],
+                expected: json!([
+                    {"name": "caller", "filePath": "caller.go", "startLine": 8,
+                     "edges": [
+                        {"symbol": {"name": "Work", "filePath": "left/left.go", "startLine": 3}, "line": 9, "column": 6},
+                        {"symbol": {"name": "Work", "filePath": "right/right.go", "startLine": 3}, "line": 10, "column": 6},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "Work",
-                expected: vec![
-                    relationships(&left, &[(&entry, 9, 6)]),
-                    relationships(&right, &[(&entry, 10, 6)]),
-                ],
+                expected: json!([
+                    {"name": "Work", "filePath": "left/left.go", "startLine": 3,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "caller.go", "startLine": 8}, "line": 9, "column": 6},
+                    ]},
+                    {"name": "Work", "filePath": "right/right.go", "startLine": 3,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "caller.go", "startLine": 8}, "line": 10, "column": 6},
+                    ]},
+                ]),
             },
         ],
     })
@@ -2664,8 +3340,6 @@ func caller() {
 // import aliases must not create intermediate calls edges.
 #[tokio::test]
 async fn typescript_reexport_alias_reaches_original_definition() {
-    let target = description("work", "leaf.ts", 1, 1);
-    let entry = description("caller", "caller.ts", 2, 4);
     check_case(Case {
         name: "typescript_reexport_alias_reaches_original_definition",
         files: vec![
@@ -2692,12 +3366,22 @@ function caller() {
             Query {
                 direction: "in",
                 symbol: "work",
-                expected: vec![relationships(&target, &[(&entry, 3, 4)])],
+                expected: json!([
+                    {"name": "work", "filePath": "leaf.ts", "startLine": 1,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "caller.ts", "startLine": 2}, "line": 3, "column": 4},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "caller",
-                expected: vec![relationships(&entry, &[(&target, 3, 4)])],
+                expected: json!([
+                    {"name": "caller", "filePath": "caller.ts", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "work", "filePath": "leaf.ts", "startLine": 1}, "line": 3, "column": 4},
+                    ]},
+                ]),
             },
         ],
     })
@@ -2709,8 +3393,6 @@ function caller() {
 // Retain both edges even though source, target and line are equal.
 #[tokio::test]
 async fn javascript_unicode_prefix_and_repeated_same_line_calls() {
-    let target = description("target", "positions.js", 1, 1);
-    let entry = description("caller", "positions.js", 2, 4);
     check_case(Case {
         name: "javascript_unicode_prefix_and_repeated_same_line_calls",
         files: vec![SourceFile {
@@ -2725,12 +3407,24 @@ function caller() {
             Query {
                 direction: "in",
                 symbol: "target",
-                expected: vec![relationships(&target, &[(&entry, 3, 31), (&entry, 3, 41)])],
+                expected: json!([
+                    {"name": "target", "filePath": "positions.js", "startLine": 1,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "positions.js", "startLine": 2}, "line": 3, "column": 31},
+                        {"symbol": {"name": "caller", "filePath": "positions.js", "startLine": 2}, "line": 3, "column": 41},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "caller",
-                expected: vec![relationships(&entry, &[(&target, 3, 31), (&target, 3, 41)])],
+                expected: json!([
+                    {"name": "caller", "filePath": "positions.js", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "target", "filePath": "positions.js", "startLine": 1}, "line": 3, "column": 31},
+                        {"symbol": {"name": "target", "filePath": "positions.js", "startLine": 1}, "line": 3, "column": 41},
+                    ]},
+                ]),
             },
         ],
     })
@@ -2742,8 +3436,6 @@ function caller() {
 // Retain both edges even though source, target and line are equal.
 #[tokio::test]
 async fn c_unicode_prefix_and_repeated_same_line_calls() {
-    let target = description("target", "positions.c", 1, 1);
-    let entry = description("caller", "positions.c", 2, 4);
     check_case(Case {
         name: "c_unicode_prefix_and_repeated_same_line_calls",
         files: vec![SourceFile {
@@ -2758,12 +3450,24 @@ void caller(void) {
             Query {
                 direction: "in",
                 symbol: "target",
-                expected: vec![relationships(&target, &[(&entry, 3, 21), (&entry, 3, 31)])],
+                expected: json!([
+                    {"name": "target", "filePath": "positions.c", "startLine": 1,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "positions.c", "startLine": 2}, "line": 3, "column": 21},
+                        {"symbol": {"name": "caller", "filePath": "positions.c", "startLine": 2}, "line": 3, "column": 31},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "caller",
-                expected: vec![relationships(&entry, &[(&target, 3, 21), (&target, 3, 31)])],
+                expected: json!([
+                    {"name": "caller", "filePath": "positions.c", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "target", "filePath": "positions.c", "startLine": 1}, "line": 3, "column": 21},
+                        {"symbol": {"name": "target", "filePath": "positions.c", "startLine": 1}, "line": 3, "column": 31},
+                    ]},
+                ]),
             },
         ],
     })
@@ -2786,8 +3490,7 @@ async fn incremental_target_edit_rebinds_unchanged_caller() {
         .await;
     assert_eq!(indexed.files_modified, 1);
     assert_eq!(indexed.files_added + indexed.files_deleted, 0);
-    let entry = description("caller", "caller.py", 2, 3);
-    let target = description("first", "targets.py", 3, 4);
+
     workspace
         .check(
             "unchanged caller must point to the new target identity",
@@ -2795,12 +3498,22 @@ async fn incremental_target_edit_rebinds_unchanged_caller() {
                 Query {
                     direction: "out",
                     symbol: "caller",
-                    expected: vec![relationships(&entry, &[(&target, 3, 4)])],
+                    expected: json!([
+                        {"name": "caller", "filePath": "caller.py", "startLine": 2,
+                         "edges": [
+                            {"symbol": {"name": "first", "filePath": "targets.py", "startLine": 3}, "line": 3, "column": 4},
+                        ]},
+                    ]),
                 },
                 Query {
                     direction: "in",
                     symbol: "first",
-                    expected: vec![relationships(&target, &[(&entry, 3, 4)])],
+                    expected: json!([
+                        {"name": "first", "filePath": "targets.py", "startLine": 3,
+                         "edges": [
+                            {"symbol": {"name": "caller", "filePath": "caller.py", "startLine": 2}, "line": 3, "column": 4},
+                        ]},
+                    ]),
                 },
             ],
         )
@@ -2824,8 +3537,7 @@ async fn incremental_target_move_then_import_edit_updates_path() {
         .await;
     assert_eq!((moved.files_added, moved.files_deleted), (1, 1));
     assert_eq!(moved.files_modified, 0);
-    let entry = description("caller", "caller.py", 2, 3);
-    let target = description("first", "moved.py", 1, 2);
+
     workspace
         .check(
             "old explicit import cannot resolve by unrelated workspace fallback",
@@ -2833,12 +3545,18 @@ async fn incremental_target_move_then_import_edit_updates_path() {
                 Query {
                     direction: "out",
                     symbol: "caller",
-                    expected: vec![relationships(&entry, &[])],
+                    expected: json!([
+                        {"name": "caller", "filePath": "caller.py", "startLine": 2,
+                         "edges": []},
+                    ]),
                 },
                 Query {
                     direction: "in",
                     symbol: "first",
-                    expected: vec![relationships(&target, &[])],
+                    expected: json!([
+                        {"name": "first", "filePath": "moved.py", "startLine": 1,
+                         "edges": []},
+                    ]),
                 },
             ],
         )
@@ -2859,12 +3577,22 @@ async fn incremental_target_move_then_import_edit_updates_path() {
                 Query {
                     direction: "out",
                     symbol: "caller",
-                    expected: vec![relationships(&entry, &[(&target, 3, 4)])],
+                    expected: json!([
+                        {"name": "caller", "filePath": "caller.py", "startLine": 2,
+                         "edges": [
+                            {"symbol": {"name": "first", "filePath": "moved.py", "startLine": 1}, "line": 3, "column": 4},
+                        ]},
+                    ]),
                 },
                 Query {
                     direction: "in",
                     symbol: "first",
-                    expected: vec![relationships(&target, &[(&entry, 3, 4)])],
+                    expected: json!([
+                        {"name": "first", "filePath": "moved.py", "startLine": 1,
+                         "edges": [
+                            {"symbol": {"name": "caller", "filePath": "caller.py", "startLine": 2}, "line": 3, "column": 4},
+                        ]},
+                    ]),
                 },
             ],
         )
@@ -2892,19 +3620,27 @@ async fn incremental_new_candidate_invalidates_unique_resolution() {
         "*.js",
     )
     .await;
-    let entry = description("caller", "caller.js", 1, 3);
-    let original = description("work", "one.js", 1, 1);
-    let candidate = description("work", "two.js", 1, 1);
+
     let unique = [
         Query {
             direction: "out",
             symbol: "caller",
-            expected: vec![relationships(&entry, &[(&original, 2, 4)])],
+            expected: json!([
+                {"name": "caller", "filePath": "caller.js", "startLine": 1,
+                 "edges": [
+                    {"symbol": {"name": "work", "filePath": "one.js", "startLine": 1}, "line": 2, "column": 4},
+                ]},
+            ]),
         },
         Query {
             direction: "in",
             symbol: "work",
-            expected: vec![relationships(&original, &[(&entry, 2, 4)])],
+            expected: json!([
+                {"name": "work", "filePath": "one.js", "startLine": 1,
+                 "edges": [
+                    {"symbol": {"name": "caller", "filePath": "caller.js", "startLine": 1}, "line": 2, "column": 4},
+                ]},
+            ]),
         },
     ];
     workspace
@@ -2927,15 +3663,20 @@ async fn incremental_new_candidate_invalidates_unique_resolution() {
                 Query {
                     direction: "out",
                     symbol: "caller",
-                    expected: vec![relationships(&entry, &[])],
+                    expected: json!([
+                        {"name": "caller", "filePath": "caller.js", "startLine": 1,
+                         "edges": []},
+                    ]),
                 },
                 Query {
                     direction: "in",
                     symbol: "work",
-                    expected: vec![
-                        relationships(&original, &[]),
-                        relationships(&candidate, &[]),
-                    ],
+                    expected: json!([
+                        {"name": "work", "filePath": "one.js", "startLine": 1,
+                         "edges": []},
+                        {"name": "work", "filePath": "two.js", "startLine": 1,
+                         "edges": []},
+                    ]),
                 },
             ],
         )
@@ -2956,10 +3697,6 @@ async fn incremental_new_candidate_invalidates_unique_resolution() {
 // foo name is insufficient.
 #[tokio::test]
 async fn cpp_auto_new_pointer_receiver() {
-    let constructor = description("X::X", "auto.cc", 2, 2);
-    let method = description("X::foo", "auto.cc", 3, 3);
-    let other = description("Y::foo", "auto.cc", 6, 6);
-    let entry = description("caller", "auto.cc", 8, 11);
     check_case(Case {
         name: "cpp_auto_new_pointer_receiver",
         files: vec![SourceFile {
@@ -2981,23 +3718,33 @@ void caller() {
             Query {
                 direction: "in",
                 symbol: "foo",
-                expected: vec![
-                    relationships(&method, &[(&entry, 10, 7)]),
-                    relationships(&other, &[]),
-                ],
+                expected: json!([
+                    {"name": "X::foo", "filePath": "auto.cc", "startLine": 3,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "auto.cc", "startLine": 8}, "line": 10, "column": 7},
+                    ]},
+                    {"name": "Y::foo", "filePath": "auto.cc", "startLine": 6,
+                     "edges": []},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "caller",
-                expected: vec![relationships(
-                    &entry,
-                    &[(&constructor, 9, 17), (&method, 10, 7)],
-                )],
+                expected: json!([
+                    {"name": "caller", "filePath": "auto.cc", "startLine": 8,
+                     "edges": [
+                        {"symbol": {"name": "X::X", "filePath": "auto.cc", "startLine": 2}, "line": 9, "column": 17},
+                        {"symbol": {"name": "X::foo", "filePath": "auto.cc", "startLine": 3}, "line": 10, "column": 7},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "Y::foo",
-                expected: vec![relationships(&other, &[])],
+                expected: json!([
+                    {"name": "Y::foo", "filePath": "auto.cc", "startLine": 6,
+                     "edges": []},
+                ]),
             },
         ],
     })
@@ -3009,10 +3756,6 @@ void caller() {
 // X{}, not at the variable name. Y::foo is an unrelated same-named method.
 #[tokio::test]
 async fn cpp_auto_value_receiver() {
-    let constructor = description("X::X", "auto.cc", 2, 2);
-    let method = description("X::foo", "auto.cc", 3, 3);
-    let other = description("Y::foo", "auto.cc", 6, 6);
-    let entry = description("caller", "auto.cc", 8, 11);
     check_case(Case {
         name: "cpp_auto_value_receiver",
         files: vec![SourceFile {
@@ -3034,23 +3777,33 @@ void caller() {
             Query {
                 direction: "in",
                 symbol: "foo",
-                expected: vec![
-                    relationships(&method, &[(&entry, 10, 6)]),
-                    relationships(&other, &[]),
-                ],
+                expected: json!([
+                    {"name": "X::foo", "filePath": "auto.cc", "startLine": 3,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "auto.cc", "startLine": 8}, "line": 10, "column": 6},
+                    ]},
+                    {"name": "Y::foo", "filePath": "auto.cc", "startLine": 6,
+                     "edges": []},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "caller",
-                expected: vec![relationships(
-                    &entry,
-                    &[(&constructor, 9, 13), (&method, 10, 6)],
-                )],
+                expected: json!([
+                    {"name": "caller", "filePath": "auto.cc", "startLine": 8,
+                     "edges": [
+                        {"symbol": {"name": "X::X", "filePath": "auto.cc", "startLine": 2}, "line": 9, "column": 13},
+                        {"symbol": {"name": "X::foo", "filePath": "auto.cc", "startLine": 3}, "line": 10, "column": 6},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "Y::foo",
-                expected: vec![relationships(&other, &[])],
+                expected: json!([
+                    {"name": "Y::foo", "filePath": "auto.cc", "startLine": 6,
+                     "edges": []},
+                ]),
             },
         ],
     })
@@ -3063,11 +3816,6 @@ void caller() {
 // group guards against name-only binding.
 #[tokio::test]
 async fn cpp_auto_factory_return_receiver() {
-    let constructor = description("X::X", "auto.cc", 2, 2);
-    let method = description("X::foo", "auto.cc", 3, 3);
-    let other = description("Y::foo", "auto.cc", 6, 6);
-    let factory = description("makeX", "auto.cc", 8, 10);
-    let entry = description("caller", "auto.cc", 12, 15);
     check_case(Case {
         name: "cpp_auto_factory_return_receiver",
         files: vec![SourceFile {
@@ -3093,28 +3841,43 @@ void caller() {
             Query {
                 direction: "in",
                 symbol: "foo",
-                expected: vec![
-                    relationships(&method, &[(&entry, 14, 6)]),
-                    relationships(&other, &[]),
-                ],
+                expected: json!([
+                    {"name": "X::foo", "filePath": "auto.cc", "startLine": 3,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "auto.cc", "startLine": 12}, "line": 14, "column": 6},
+                    ]},
+                    {"name": "Y::foo", "filePath": "auto.cc", "startLine": 6,
+                     "edges": []},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "caller",
-                expected: vec![relationships(
-                    &entry,
-                    &[(&factory, 13, 13), (&method, 14, 6)],
-                )],
+                expected: json!([
+                    {"name": "caller", "filePath": "auto.cc", "startLine": 12,
+                     "edges": [
+                        {"symbol": {"name": "makeX", "filePath": "auto.cc", "startLine": 8}, "line": 13, "column": 13},
+                        {"symbol": {"name": "X::foo", "filePath": "auto.cc", "startLine": 3}, "line": 14, "column": 6},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "makeX",
-                expected: vec![relationships(&factory, &[(&constructor, 9, 11)])],
+                expected: json!([
+                    {"name": "makeX", "filePath": "auto.cc", "startLine": 8,
+                     "edges": [
+                        {"symbol": {"name": "X::X", "filePath": "auto.cc", "startLine": 2}, "line": 9, "column": 11},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "Y::foo",
-                expected: vec![relationships(&other, &[])],
+                expected: json!([
+                    {"name": "Y::foo", "filePath": "auto.cc", "startLine": 6,
+                     "edges": []},
+                ]),
             },
         ],
     })
@@ -3126,9 +3889,6 @@ void caller() {
 // performs no construction. x.foo() must resolve to X::foo rather than Y::foo.
 #[tokio::test]
 async fn cpp_auto_reference_alias_receiver() {
-    let method = description("X::foo", "auto.cc", 3, 3);
-    let other = description("Y::foo", "auto.cc", 6, 6);
-    let entry = description("caller", "auto.cc", 8, 11);
     check_case(Case {
         name: "cpp_auto_reference_alias_receiver",
         files: vec![SourceFile {
@@ -3150,20 +3910,32 @@ void caller(X& existing) {
             Query {
                 direction: "in",
                 symbol: "foo",
-                expected: vec![
-                    relationships(&method, &[(&entry, 10, 6)]),
-                    relationships(&other, &[]),
-                ],
+                expected: json!([
+                    {"name": "X::foo", "filePath": "auto.cc", "startLine": 3,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "auto.cc", "startLine": 8}, "line": 10, "column": 6},
+                    ]},
+                    {"name": "Y::foo", "filePath": "auto.cc", "startLine": 6,
+                     "edges": []},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "caller",
-                expected: vec![relationships(&entry, &[(&method, 10, 6)])],
+                expected: json!([
+                    {"name": "caller", "filePath": "auto.cc", "startLine": 8,
+                     "edges": [
+                        {"symbol": {"name": "X::foo", "filePath": "auto.cc", "startLine": 3}, "line": 10, "column": 6},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "Y::foo",
-                expected: vec![relationships(&other, &[])],
+                expected: json!([
+                    {"name": "Y::foo", "filePath": "auto.cc", "startLine": 6,
+                     "edges": []},
+                ]),
             },
         ],
     })
@@ -3177,10 +3949,6 @@ void caller(X& existing) {
 // construction inside the factory must not leak into caller.
 #[tokio::test]
 async fn java_inferred_creation_receiver() {
-    let constructor = description("X::X", "Inferred.java", 2, 2);
-    let method = description("X::foo", "Inferred.java", 3, 3);
-    let other = description("Y::foo", "Inferred.java", 6, 6);
-    let entry = description("Use::caller", "Inferred.java", 12, 15);
     check_case(Case {
         name: "java_inferred_creation_receiver",
         files: vec![SourceFile {
@@ -3207,23 +3975,33 @@ class Use {
             Query {
                 direction: "in",
                 symbol: "foo",
-                expected: vec![
-                    relationships(&method, &[(&entry, 14, 10)]),
-                    relationships(&other, &[]),
-                ],
+                expected: json!([
+                    {"name": "X::foo", "filePath": "Inferred.java", "startLine": 3,
+                     "edges": [
+                        {"symbol": {"name": "Use::caller", "filePath": "Inferred.java", "startLine": 12}, "line": 14, "column": 10},
+                    ]},
+                    {"name": "Y::foo", "filePath": "Inferred.java", "startLine": 6,
+                     "edges": []},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "Use::caller",
-                expected: vec![relationships(
-                    &entry,
-                    &[(&constructor, 13, 20), (&method, 14, 10)],
-                )],
+                expected: json!([
+                    {"name": "Use::caller", "filePath": "Inferred.java", "startLine": 12,
+                     "edges": [
+                        {"symbol": {"name": "X::X", "filePath": "Inferred.java", "startLine": 2}, "line": 13, "column": 20},
+                        {"symbol": {"name": "X::foo", "filePath": "Inferred.java", "startLine": 3}, "line": 14, "column": 10},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "Y::foo",
-                expected: vec![relationships(&other, &[])],
+                expected: json!([
+                    {"name": "Y::foo", "filePath": "Inferred.java", "startLine": 6,
+                     "edges": []},
+                ]),
             },
         ],
     })
@@ -3237,11 +4015,6 @@ class Use {
 // construction inside the factory must not leak into caller.
 #[tokio::test]
 async fn java_inferred_factory_return_receiver() {
-    let constructor = description("X::X", "Inferred.java", 2, 2);
-    let method = description("X::foo", "Inferred.java", 3, 3);
-    let other = description("Y::foo", "Inferred.java", 6, 6);
-    let factory = description("Use::makeX", "Inferred.java", 9, 11);
-    let entry = description("Use::caller", "Inferred.java", 12, 15);
     check_case(Case {
         name: "java_inferred_factory_return_receiver",
         files: vec![SourceFile {
@@ -3268,28 +4041,43 @@ class Use {
             Query {
                 direction: "in",
                 symbol: "foo",
-                expected: vec![
-                    relationships(&method, &[(&entry, 14, 10)]),
-                    relationships(&other, &[]),
-                ],
+                expected: json!([
+                    {"name": "X::foo", "filePath": "Inferred.java", "startLine": 3,
+                     "edges": [
+                        {"symbol": {"name": "Use::caller", "filePath": "Inferred.java", "startLine": 12}, "line": 14, "column": 10},
+                    ]},
+                    {"name": "Y::foo", "filePath": "Inferred.java", "startLine": 6,
+                     "edges": []},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "Use::caller",
-                expected: vec![relationships(
-                    &entry,
-                    &[(&factory, 13, 16), (&method, 14, 10)],
-                )],
+                expected: json!([
+                    {"name": "Use::caller", "filePath": "Inferred.java", "startLine": 12,
+                     "edges": [
+                        {"symbol": {"name": "Use::makeX", "filePath": "Inferred.java", "startLine": 9}, "line": 13, "column": 16},
+                        {"symbol": {"name": "X::foo", "filePath": "Inferred.java", "startLine": 3}, "line": 14, "column": 10},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "Y::foo",
-                expected: vec![relationships(&other, &[])],
+                expected: json!([
+                    {"name": "Y::foo", "filePath": "Inferred.java", "startLine": 6,
+                     "edges": []},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "Use::makeX",
-                expected: vec![relationships(&factory, &[(&constructor, 10, 19)])],
+                expected: json!([
+                    {"name": "Use::makeX", "filePath": "Inferred.java", "startLine": 9,
+                     "edges": [
+                        {"symbol": {"name": "X::X", "filePath": "Inferred.java", "startLine": 2}, "line": 10, "column": 19},
+                    ]},
+                ]),
             },
         ],
     })
@@ -3303,11 +4091,6 @@ class Use {
 // construction inside the factory must not leak into caller.
 #[tokio::test]
 async fn java_inferred_variable_alias_receiver() {
-    let constructor = description("X::X", "Inferred.java", 2, 2);
-    let method = description("X::foo", "Inferred.java", 3, 3);
-    let other = description("Y::foo", "Inferred.java", 6, 6);
-    let factory = description("Use::makeX", "Inferred.java", 9, 11);
-    let entry = description("Use::caller", "Inferred.java", 12, 16);
     check_case(Case {
         name: "java_inferred_variable_alias_receiver",
         files: vec![SourceFile {
@@ -3335,28 +4118,43 @@ class Use {
             Query {
                 direction: "in",
                 symbol: "foo",
-                expected: vec![
-                    relationships(&method, &[(&entry, 15, 10)]),
-                    relationships(&other, &[]),
-                ],
+                expected: json!([
+                    {"name": "X::foo", "filePath": "Inferred.java", "startLine": 3,
+                     "edges": [
+                        {"symbol": {"name": "Use::caller", "filePath": "Inferred.java", "startLine": 12}, "line": 15, "column": 10},
+                    ]},
+                    {"name": "Y::foo", "filePath": "Inferred.java", "startLine": 6,
+                     "edges": []},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "Use::caller",
-                expected: vec![relationships(
-                    &entry,
-                    &[(&factory, 13, 16), (&method, 15, 10)],
-                )],
+                expected: json!([
+                    {"name": "Use::caller", "filePath": "Inferred.java", "startLine": 12,
+                     "edges": [
+                        {"symbol": {"name": "Use::makeX", "filePath": "Inferred.java", "startLine": 9}, "line": 13, "column": 16},
+                        {"symbol": {"name": "X::foo", "filePath": "Inferred.java", "startLine": 3}, "line": 15, "column": 10},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "Y::foo",
-                expected: vec![relationships(&other, &[])],
+                expected: json!([
+                    {"name": "Y::foo", "filePath": "Inferred.java", "startLine": 6,
+                     "edges": []},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "Use::makeX",
-                expected: vec![relationships(&factory, &[(&constructor, 10, 19)])],
+                expected: json!([
+                    {"name": "Use::makeX", "filePath": "Inferred.java", "startLine": 9,
+                     "edges": [
+                        {"symbol": {"name": "X::X", "filePath": "Inferred.java", "startLine": 2}, "line": 10, "column": 19},
+                    ]},
+                ]),
             },
         ],
     })
@@ -3370,10 +4168,6 @@ class Use {
 // direct calls: construction inside the factory must not leak into caller.
 #[tokio::test]
 async fn javascript_inferred_creation_receiver() {
-    let constructor = description("X", "inferred.js", 1, 3);
-    let method = description("X::foo", "inferred.js", 2, 2);
-    let other = description("Y::foo", "inferred.js", 5, 5);
-    let entry = description("caller", "inferred.js", 10, 13);
     check_case(Case {
         name: "javascript_inferred_creation_receiver",
         files: vec![SourceFile {
@@ -3397,23 +4191,33 @@ function caller() {
             Query {
                 direction: "in",
                 symbol: "foo",
-                expected: vec![
-                    relationships(&method, &[(&entry, 12, 6)]),
-                    relationships(&other, &[]),
-                ],
+                expected: json!([
+                    {"name": "X::foo", "filePath": "inferred.js", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "inferred.js", "startLine": 10}, "line": 12, "column": 6},
+                    ]},
+                    {"name": "Y::foo", "filePath": "inferred.js", "startLine": 5,
+                     "edges": []},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "caller",
-                expected: vec![relationships(
-                    &entry,
-                    &[(&constructor, 11, 18), (&method, 12, 6)],
-                )],
+                expected: json!([
+                    {"name": "caller", "filePath": "inferred.js", "startLine": 10,
+                     "edges": [
+                        {"symbol": {"name": "X", "filePath": "inferred.js", "startLine": 1}, "line": 11, "column": 18},
+                        {"symbol": {"name": "X::foo", "filePath": "inferred.js", "startLine": 2}, "line": 12, "column": 6},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "Y::foo",
-                expected: vec![relationships(&other, &[])],
+                expected: json!([
+                    {"name": "Y::foo", "filePath": "inferred.js", "startLine": 5,
+                     "edges": []},
+                ]),
             },
         ],
     })
@@ -3427,11 +4231,6 @@ function caller() {
 // direct calls: construction inside the factory must not leak into caller.
 #[tokio::test]
 async fn javascript_inferred_factory_return_receiver() {
-    let constructor = description("X", "inferred.js", 1, 3);
-    let method = description("X::foo", "inferred.js", 2, 2);
-    let other = description("Y::foo", "inferred.js", 5, 5);
-    let factory = description("makeX", "inferred.js", 7, 9);
-    let entry = description("caller", "inferred.js", 10, 13);
     check_case(Case {
         name: "javascript_inferred_factory_return_receiver",
         files: vec![SourceFile {
@@ -3455,28 +4254,43 @@ function caller() {
             Query {
                 direction: "in",
                 symbol: "foo",
-                expected: vec![
-                    relationships(&method, &[(&entry, 12, 6)]),
-                    relationships(&other, &[]),
-                ],
+                expected: json!([
+                    {"name": "X::foo", "filePath": "inferred.js", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "inferred.js", "startLine": 10}, "line": 12, "column": 6},
+                    ]},
+                    {"name": "Y::foo", "filePath": "inferred.js", "startLine": 5,
+                     "edges": []},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "caller",
-                expected: vec![relationships(
-                    &entry,
-                    &[(&factory, 11, 14), (&method, 12, 6)],
-                )],
+                expected: json!([
+                    {"name": "caller", "filePath": "inferred.js", "startLine": 10,
+                     "edges": [
+                        {"symbol": {"name": "makeX", "filePath": "inferred.js", "startLine": 7}, "line": 11, "column": 14},
+                        {"symbol": {"name": "X::foo", "filePath": "inferred.js", "startLine": 2}, "line": 12, "column": 6},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "Y::foo",
-                expected: vec![relationships(&other, &[])],
+                expected: json!([
+                    {"name": "Y::foo", "filePath": "inferred.js", "startLine": 5,
+                     "edges": []},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "makeX",
-                expected: vec![relationships(&factory, &[(&constructor, 8, 15)])],
+                expected: json!([
+                    {"name": "makeX", "filePath": "inferred.js", "startLine": 7,
+                     "edges": [
+                        {"symbol": {"name": "X", "filePath": "inferred.js", "startLine": 1}, "line": 8, "column": 15},
+                    ]},
+                ]),
             },
         ],
     })
@@ -3490,11 +4304,6 @@ function caller() {
 // direct calls: construction inside the factory must not leak into caller.
 #[tokio::test]
 async fn javascript_inferred_variable_alias_receiver() {
-    let constructor = description("X", "inferred.js", 1, 3);
-    let method = description("X::foo", "inferred.js", 2, 2);
-    let other = description("Y::foo", "inferred.js", 5, 5);
-    let factory = description("makeX", "inferred.js", 7, 9);
-    let entry = description("caller", "inferred.js", 10, 14);
     check_case(Case {
         name: "javascript_inferred_variable_alias_receiver",
         files: vec![SourceFile {
@@ -3519,28 +4328,43 @@ function caller() {
             Query {
                 direction: "in",
                 symbol: "foo",
-                expected: vec![
-                    relationships(&method, &[(&entry, 13, 6)]),
-                    relationships(&other, &[]),
-                ],
+                expected: json!([
+                    {"name": "X::foo", "filePath": "inferred.js", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "inferred.js", "startLine": 10}, "line": 13, "column": 6},
+                    ]},
+                    {"name": "Y::foo", "filePath": "inferred.js", "startLine": 5,
+                     "edges": []},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "caller",
-                expected: vec![relationships(
-                    &entry,
-                    &[(&factory, 11, 14), (&method, 13, 6)],
-                )],
+                expected: json!([
+                    {"name": "caller", "filePath": "inferred.js", "startLine": 10,
+                     "edges": [
+                        {"symbol": {"name": "makeX", "filePath": "inferred.js", "startLine": 7}, "line": 11, "column": 14},
+                        {"symbol": {"name": "X::foo", "filePath": "inferred.js", "startLine": 2}, "line": 13, "column": 6},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "Y::foo",
-                expected: vec![relationships(&other, &[])],
+                expected: json!([
+                    {"name": "Y::foo", "filePath": "inferred.js", "startLine": 5,
+                     "edges": []},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "makeX",
-                expected: vec![relationships(&factory, &[(&constructor, 8, 15)])],
+                expected: json!([
+                    {"name": "makeX", "filePath": "inferred.js", "startLine": 7,
+                     "edges": [
+                        {"symbol": {"name": "X", "filePath": "inferred.js", "startLine": 1}, "line": 8, "column": 15},
+                    ]},
+                ]),
             },
         ],
     })
@@ -3554,10 +4378,6 @@ function caller() {
 // decoy. Query only direct calls: construction inside the factory must not leak into caller.
 #[tokio::test]
 async fn typescript_inferred_creation_receiver() {
-    let constructor = description("X", "inferred.ts", 1, 3);
-    let method = description("X::foo", "inferred.ts", 2, 2);
-    let other = description("Y::foo", "inferred.ts", 5, 5);
-    let entry = description("caller", "inferred.ts", 10, 13);
     check_case(Case {
         name: "typescript_inferred_creation_receiver",
         files: vec![SourceFile {
@@ -3581,23 +4401,33 @@ function caller() {
             Query {
                 direction: "in",
                 symbol: "foo",
-                expected: vec![
-                    relationships(&method, &[(&entry, 12, 6)]),
-                    relationships(&other, &[]),
-                ],
+                expected: json!([
+                    {"name": "X::foo", "filePath": "inferred.ts", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "inferred.ts", "startLine": 10}, "line": 12, "column": 6},
+                    ]},
+                    {"name": "Y::foo", "filePath": "inferred.ts", "startLine": 5,
+                     "edges": []},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "caller",
-                expected: vec![relationships(
-                    &entry,
-                    &[(&constructor, 11, 18), (&method, 12, 6)],
-                )],
+                expected: json!([
+                    {"name": "caller", "filePath": "inferred.ts", "startLine": 10,
+                     "edges": [
+                        {"symbol": {"name": "X", "filePath": "inferred.ts", "startLine": 1}, "line": 11, "column": 18},
+                        {"symbol": {"name": "X::foo", "filePath": "inferred.ts", "startLine": 2}, "line": 12, "column": 6},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "Y::foo",
-                expected: vec![relationships(&other, &[])],
+                expected: json!([
+                    {"name": "Y::foo", "filePath": "inferred.ts", "startLine": 5,
+                     "edges": []},
+                ]),
             },
         ],
     })
@@ -3611,11 +4441,6 @@ function caller() {
 // decoy. Query only direct calls: construction inside the factory must not leak into caller.
 #[tokio::test]
 async fn typescript_inferred_factory_return_receiver() {
-    let constructor = description("X", "inferred.ts", 1, 3);
-    let method = description("X::foo", "inferred.ts", 2, 2);
-    let other = description("Y::foo", "inferred.ts", 5, 5);
-    let factory = description("makeX", "inferred.ts", 7, 9);
-    let entry = description("caller", "inferred.ts", 10, 13);
     check_case(Case {
         name: "typescript_inferred_factory_return_receiver",
         files: vec![SourceFile {
@@ -3639,28 +4464,43 @@ function caller() {
             Query {
                 direction: "in",
                 symbol: "foo",
-                expected: vec![
-                    relationships(&method, &[(&entry, 12, 6)]),
-                    relationships(&other, &[]),
-                ],
+                expected: json!([
+                    {"name": "X::foo", "filePath": "inferred.ts", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "inferred.ts", "startLine": 10}, "line": 12, "column": 6},
+                    ]},
+                    {"name": "Y::foo", "filePath": "inferred.ts", "startLine": 5,
+                     "edges": []},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "caller",
-                expected: vec![relationships(
-                    &entry,
-                    &[(&factory, 11, 14), (&method, 12, 6)],
-                )],
+                expected: json!([
+                    {"name": "caller", "filePath": "inferred.ts", "startLine": 10,
+                     "edges": [
+                        {"symbol": {"name": "makeX", "filePath": "inferred.ts", "startLine": 7}, "line": 11, "column": 14},
+                        {"symbol": {"name": "X::foo", "filePath": "inferred.ts", "startLine": 2}, "line": 12, "column": 6},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "Y::foo",
-                expected: vec![relationships(&other, &[])],
+                expected: json!([
+                    {"name": "Y::foo", "filePath": "inferred.ts", "startLine": 5,
+                     "edges": []},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "makeX",
-                expected: vec![relationships(&factory, &[(&constructor, 8, 15)])],
+                expected: json!([
+                    {"name": "makeX", "filePath": "inferred.ts", "startLine": 7,
+                     "edges": [
+                        {"symbol": {"name": "X", "filePath": "inferred.ts", "startLine": 1}, "line": 8, "column": 15},
+                    ]},
+                ]),
             },
         ],
     })
@@ -3674,11 +4514,6 @@ function caller() {
 // decoy. Query only direct calls: construction inside the factory must not leak into caller.
 #[tokio::test]
 async fn typescript_inferred_variable_alias_receiver() {
-    let constructor = description("X", "inferred.ts", 1, 3);
-    let method = description("X::foo", "inferred.ts", 2, 2);
-    let other = description("Y::foo", "inferred.ts", 5, 5);
-    let factory = description("makeX", "inferred.ts", 7, 9);
-    let entry = description("caller", "inferred.ts", 10, 14);
     check_case(Case {
         name: "typescript_inferred_variable_alias_receiver",
         files: vec![SourceFile {
@@ -3703,28 +4538,43 @@ function caller() {
             Query {
                 direction: "in",
                 symbol: "foo",
-                expected: vec![
-                    relationships(&method, &[(&entry, 13, 6)]),
-                    relationships(&other, &[]),
-                ],
+                expected: json!([
+                    {"name": "X::foo", "filePath": "inferred.ts", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "inferred.ts", "startLine": 10}, "line": 13, "column": 6},
+                    ]},
+                    {"name": "Y::foo", "filePath": "inferred.ts", "startLine": 5,
+                     "edges": []},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "caller",
-                expected: vec![relationships(
-                    &entry,
-                    &[(&factory, 11, 14), (&method, 13, 6)],
-                )],
+                expected: json!([
+                    {"name": "caller", "filePath": "inferred.ts", "startLine": 10,
+                     "edges": [
+                        {"symbol": {"name": "makeX", "filePath": "inferred.ts", "startLine": 7}, "line": 11, "column": 14},
+                        {"symbol": {"name": "X::foo", "filePath": "inferred.ts", "startLine": 2}, "line": 13, "column": 6},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "Y::foo",
-                expected: vec![relationships(&other, &[])],
+                expected: json!([
+                    {"name": "Y::foo", "filePath": "inferred.ts", "startLine": 5,
+                     "edges": []},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "makeX",
-                expected: vec![relationships(&factory, &[(&constructor, 8, 15)])],
+                expected: json!([
+                    {"name": "makeX", "filePath": "inferred.ts", "startLine": 7,
+                     "edges": [
+                        {"symbol": {"name": "X", "filePath": "inferred.ts", "startLine": 1}, "line": 8, "column": 15},
+                    ]},
+                ]),
             },
         ],
     })
@@ -3739,10 +4589,6 @@ function caller() {
 // leak into caller.
 #[tokio::test]
 async fn python_inferred_creation_receiver() {
-    let constructor = description("X", "inferred.py", 1, 3);
-    let method = description("X::foo", "inferred.py", 2, 3);
-    let other = description("Y::foo", "inferred.py", 5, 6);
-    let entry = description("caller", "inferred.py", 11, 13);
     check_case(Case {
         name: "python_inferred_creation_receiver",
         files: vec![SourceFile {
@@ -3766,23 +4612,33 @@ def caller():
             Query {
                 direction: "in",
                 symbol: "foo",
-                expected: vec![
-                    relationships(&method, &[(&entry, 13, 6)]),
-                    relationships(&other, &[]),
-                ],
+                expected: json!([
+                    {"name": "X::foo", "filePath": "inferred.py", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "inferred.py", "startLine": 11}, "line": 13, "column": 6},
+                    ]},
+                    {"name": "Y::foo", "filePath": "inferred.py", "startLine": 5,
+                     "edges": []},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "caller",
-                expected: vec![relationships(
-                    &entry,
-                    &[(&constructor, 12, 8), (&method, 13, 6)],
-                )],
+                expected: json!([
+                    {"name": "caller", "filePath": "inferred.py", "startLine": 11,
+                     "edges": [
+                        {"symbol": {"name": "X", "filePath": "inferred.py", "startLine": 1}, "line": 12, "column": 8},
+                        {"symbol": {"name": "X::foo", "filePath": "inferred.py", "startLine": 2}, "line": 13, "column": 6},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "Y::foo",
-                expected: vec![relationships(&other, &[])],
+                expected: json!([
+                    {"name": "Y::foo", "filePath": "inferred.py", "startLine": 5,
+                     "edges": []},
+                ]),
             },
         ],
     })
@@ -3797,11 +4653,6 @@ def caller():
 // leak into caller.
 #[tokio::test]
 async fn python_inferred_factory_return_receiver() {
-    let constructor = description("X", "inferred.py", 1, 3);
-    let method = description("X::foo", "inferred.py", 2, 3);
-    let other = description("Y::foo", "inferred.py", 5, 6);
-    let factory = description("make_x", "inferred.py", 8, 9);
-    let entry = description("caller", "inferred.py", 11, 13);
     check_case(Case {
         name: "python_inferred_factory_return_receiver",
         files: vec![SourceFile {
@@ -3825,28 +4676,43 @@ def caller():
             Query {
                 direction: "in",
                 symbol: "foo",
-                expected: vec![
-                    relationships(&method, &[(&entry, 13, 6)]),
-                    relationships(&other, &[]),
-                ],
+                expected: json!([
+                    {"name": "X::foo", "filePath": "inferred.py", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "inferred.py", "startLine": 11}, "line": 13, "column": 6},
+                    ]},
+                    {"name": "Y::foo", "filePath": "inferred.py", "startLine": 5,
+                     "edges": []},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "caller",
-                expected: vec![relationships(
-                    &entry,
-                    &[(&factory, 12, 8), (&method, 13, 6)],
-                )],
+                expected: json!([
+                    {"name": "caller", "filePath": "inferred.py", "startLine": 11,
+                     "edges": [
+                        {"symbol": {"name": "make_x", "filePath": "inferred.py", "startLine": 8}, "line": 12, "column": 8},
+                        {"symbol": {"name": "X::foo", "filePath": "inferred.py", "startLine": 2}, "line": 13, "column": 6},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "Y::foo",
-                expected: vec![relationships(&other, &[])],
+                expected: json!([
+                    {"name": "Y::foo", "filePath": "inferred.py", "startLine": 5,
+                     "edges": []},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "make_x",
-                expected: vec![relationships(&factory, &[(&constructor, 9, 11)])],
+                expected: json!([
+                    {"name": "make_x", "filePath": "inferred.py", "startLine": 8,
+                     "edges": [
+                        {"symbol": {"name": "X", "filePath": "inferred.py", "startLine": 1}, "line": 9, "column": 11},
+                    ]},
+                ]),
             },
         ],
     })
@@ -3861,11 +4727,6 @@ def caller():
 // leak into caller.
 #[tokio::test]
 async fn python_inferred_variable_alias_receiver() {
-    let constructor = description("X", "inferred.py", 1, 3);
-    let method = description("X::foo", "inferred.py", 2, 3);
-    let other = description("Y::foo", "inferred.py", 5, 6);
-    let factory = description("make_x", "inferred.py", 8, 9);
-    let entry = description("caller", "inferred.py", 11, 14);
     check_case(Case {
         name: "python_inferred_variable_alias_receiver",
         files: vec![SourceFile {
@@ -3890,28 +4751,43 @@ def caller():
             Query {
                 direction: "in",
                 symbol: "foo",
-                expected: vec![
-                    relationships(&method, &[(&entry, 14, 6)]),
-                    relationships(&other, &[]),
-                ],
+                expected: json!([
+                    {"name": "X::foo", "filePath": "inferred.py", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "inferred.py", "startLine": 11}, "line": 14, "column": 6},
+                    ]},
+                    {"name": "Y::foo", "filePath": "inferred.py", "startLine": 5,
+                     "edges": []},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "caller",
-                expected: vec![relationships(
-                    &entry,
-                    &[(&factory, 12, 8), (&method, 14, 6)],
-                )],
+                expected: json!([
+                    {"name": "caller", "filePath": "inferred.py", "startLine": 11,
+                     "edges": [
+                        {"symbol": {"name": "make_x", "filePath": "inferred.py", "startLine": 8}, "line": 12, "column": 8},
+                        {"symbol": {"name": "X::foo", "filePath": "inferred.py", "startLine": 2}, "line": 14, "column": 6},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "Y::foo",
-                expected: vec![relationships(&other, &[])],
+                expected: json!([
+                    {"name": "Y::foo", "filePath": "inferred.py", "startLine": 5,
+                     "edges": []},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "make_x",
-                expected: vec![relationships(&factory, &[(&constructor, 9, 11)])],
+                expected: json!([
+                    {"name": "make_x", "filePath": "inferred.py", "startLine": 8,
+                     "edges": [
+                        {"symbol": {"name": "X", "filePath": "inferred.py", "startLine": 1}, "line": 9, "column": 11},
+                    ]},
+                ]),
             },
         ],
     })
@@ -3925,9 +4801,6 @@ def caller():
 // only direct calls: construction inside the factory must not leak into caller.
 #[tokio::test]
 async fn go_inferred_creation_receiver() {
-    let method = description("X::foo", "inferred.go", 4, 4);
-    let other = description("Y::foo", "inferred.go", 6, 6);
-    let entry = description("caller", "inferred.go", 10, 13);
     check_case(Case {
         name: "go_inferred_creation_receiver",
         files: vec![SourceFile {
@@ -3951,20 +4824,32 @@ func caller() {
             Query {
                 direction: "in",
                 symbol: "foo",
-                expected: vec![
-                    relationships(&method, &[(&entry, 12, 6)]),
-                    relationships(&other, &[]),
-                ],
+                expected: json!([
+                    {"name": "X::foo", "filePath": "inferred.go", "startLine": 4,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "inferred.go", "startLine": 10}, "line": 12, "column": 6},
+                    ]},
+                    {"name": "Y::foo", "filePath": "inferred.go", "startLine": 6,
+                     "edges": []},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "caller",
-                expected: vec![relationships(&entry, &[(&method, 12, 6)])],
+                expected: json!([
+                    {"name": "caller", "filePath": "inferred.go", "startLine": 10,
+                     "edges": [
+                        {"symbol": {"name": "X::foo", "filePath": "inferred.go", "startLine": 4}, "line": 12, "column": 6},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "Y::foo",
-                expected: vec![relationships(&other, &[])],
+                expected: json!([
+                    {"name": "Y::foo", "filePath": "inferred.go", "startLine": 6,
+                     "edges": []},
+                ]),
             },
         ],
     })
@@ -3978,10 +4863,6 @@ func caller() {
 // only direct calls: construction inside the factory must not leak into caller.
 #[tokio::test]
 async fn go_inferred_factory_return_receiver() {
-    let method = description("X::foo", "inferred.go", 4, 4);
-    let other = description("Y::foo", "inferred.go", 6, 6);
-    let factory = description("makeX", "inferred.go", 7, 9);
-    let entry = description("caller", "inferred.go", 10, 13);
     check_case(Case {
         name: "go_inferred_factory_return_receiver",
         files: vec![SourceFile {
@@ -4005,28 +4886,41 @@ func caller() {
             Query {
                 direction: "in",
                 symbol: "foo",
-                expected: vec![
-                    relationships(&method, &[(&entry, 12, 6)]),
-                    relationships(&other, &[]),
-                ],
+                expected: json!([
+                    {"name": "X::foo", "filePath": "inferred.go", "startLine": 4,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "inferred.go", "startLine": 10}, "line": 12, "column": 6},
+                    ]},
+                    {"name": "Y::foo", "filePath": "inferred.go", "startLine": 6,
+                     "edges": []},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "caller",
-                expected: vec![relationships(
-                    &entry,
-                    &[(&factory, 11, 9), (&method, 12, 6)],
-                )],
+                expected: json!([
+                    {"name": "caller", "filePath": "inferred.go", "startLine": 10,
+                     "edges": [
+                        {"symbol": {"name": "makeX", "filePath": "inferred.go", "startLine": 7}, "line": 11, "column": 9},
+                        {"symbol": {"name": "X::foo", "filePath": "inferred.go", "startLine": 4}, "line": 12, "column": 6},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "Y::foo",
-                expected: vec![relationships(&other, &[])],
+                expected: json!([
+                    {"name": "Y::foo", "filePath": "inferred.go", "startLine": 6,
+                     "edges": []},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "makeX",
-                expected: vec![relationships(&factory, &[])],
+                expected: json!([
+                    {"name": "makeX", "filePath": "inferred.go", "startLine": 7,
+                     "edges": []},
+                ]),
             },
         ],
     })
@@ -4040,10 +4934,6 @@ func caller() {
 // only direct calls: construction inside the factory must not leak into caller.
 #[tokio::test]
 async fn go_inferred_variable_alias_receiver() {
-    let method = description("X::foo", "inferred.go", 4, 4);
-    let other = description("Y::foo", "inferred.go", 6, 6);
-    let factory = description("makeX", "inferred.go", 7, 9);
-    let entry = description("caller", "inferred.go", 10, 14);
     check_case(Case {
         name: "go_inferred_variable_alias_receiver",
         files: vec![SourceFile {
@@ -4068,28 +4958,41 @@ func caller() {
             Query {
                 direction: "in",
                 symbol: "foo",
-                expected: vec![
-                    relationships(&method, &[(&entry, 13, 6)]),
-                    relationships(&other, &[]),
-                ],
+                expected: json!([
+                    {"name": "X::foo", "filePath": "inferred.go", "startLine": 4,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "inferred.go", "startLine": 10}, "line": 13, "column": 6},
+                    ]},
+                    {"name": "Y::foo", "filePath": "inferred.go", "startLine": 6,
+                     "edges": []},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "caller",
-                expected: vec![relationships(
-                    &entry,
-                    &[(&factory, 11, 9), (&method, 13, 6)],
-                )],
+                expected: json!([
+                    {"name": "caller", "filePath": "inferred.go", "startLine": 10,
+                     "edges": [
+                        {"symbol": {"name": "makeX", "filePath": "inferred.go", "startLine": 7}, "line": 11, "column": 9},
+                        {"symbol": {"name": "X::foo", "filePath": "inferred.go", "startLine": 4}, "line": 13, "column": 6},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "Y::foo",
-                expected: vec![relationships(&other, &[])],
+                expected: json!([
+                    {"name": "Y::foo", "filePath": "inferred.go", "startLine": 6,
+                     "edges": []},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "makeX",
-                expected: vec![relationships(&factory, &[])],
+                expected: json!([
+                    {"name": "makeX", "filePath": "inferred.go", "startLine": 7,
+                     "edges": []},
+                ]),
             },
         ],
     })
@@ -4103,9 +5006,6 @@ func caller() {
 // direct calls: construction inside the factory must not leak into caller.
 #[tokio::test]
 async fn rust_inferred_creation_receiver() {
-    let method = description("X::foo", "inferred.rs", 3, 3);
-    let other = description("Y::foo", "inferred.rs", 7, 7);
-    let entry = description("caller", "inferred.rs", 12, 15);
     check_case(Case {
         name: "rust_inferred_creation_receiver",
         files: vec![SourceFile {
@@ -4131,20 +5031,32 @@ fn caller() {
             Query {
                 direction: "in",
                 symbol: "foo",
-                expected: vec![
-                    relationships(&method, &[(&entry, 14, 6)]),
-                    relationships(&other, &[]),
-                ],
+                expected: json!([
+                    {"name": "X::foo", "filePath": "inferred.rs", "startLine": 3,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "inferred.rs", "startLine": 12}, "line": 14, "column": 6},
+                    ]},
+                    {"name": "Y::foo", "filePath": "inferred.rs", "startLine": 7,
+                     "edges": []},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "caller",
-                expected: vec![relationships(&entry, &[(&method, 14, 6)])],
+                expected: json!([
+                    {"name": "caller", "filePath": "inferred.rs", "startLine": 12,
+                     "edges": [
+                        {"symbol": {"name": "X::foo", "filePath": "inferred.rs", "startLine": 3}, "line": 14, "column": 6},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "Y::foo",
-                expected: vec![relationships(&other, &[])],
+                expected: json!([
+                    {"name": "Y::foo", "filePath": "inferred.rs", "startLine": 7,
+                     "edges": []},
+                ]),
             },
         ],
     })
@@ -4158,10 +5070,6 @@ fn caller() {
 // direct calls: construction inside the factory must not leak into caller.
 #[tokio::test]
 async fn rust_inferred_factory_return_receiver() {
-    let method = description("X::foo", "inferred.rs", 3, 3);
-    let other = description("Y::foo", "inferred.rs", 7, 7);
-    let factory = description("make_x", "inferred.rs", 9, 11);
-    let entry = description("caller", "inferred.rs", 12, 15);
     check_case(Case {
         name: "rust_inferred_factory_return_receiver",
         files: vec![SourceFile {
@@ -4187,28 +5095,41 @@ fn caller() {
             Query {
                 direction: "in",
                 symbol: "foo",
-                expected: vec![
-                    relationships(&method, &[(&entry, 14, 6)]),
-                    relationships(&other, &[]),
-                ],
+                expected: json!([
+                    {"name": "X::foo", "filePath": "inferred.rs", "startLine": 3,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "inferred.rs", "startLine": 12}, "line": 14, "column": 6},
+                    ]},
+                    {"name": "Y::foo", "filePath": "inferred.rs", "startLine": 7,
+                     "edges": []},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "caller",
-                expected: vec![relationships(
-                    &entry,
-                    &[(&factory, 13, 12), (&method, 14, 6)],
-                )],
+                expected: json!([
+                    {"name": "caller", "filePath": "inferred.rs", "startLine": 12,
+                     "edges": [
+                        {"symbol": {"name": "make_x", "filePath": "inferred.rs", "startLine": 9}, "line": 13, "column": 12},
+                        {"symbol": {"name": "X::foo", "filePath": "inferred.rs", "startLine": 3}, "line": 14, "column": 6},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "Y::foo",
-                expected: vec![relationships(&other, &[])],
+                expected: json!([
+                    {"name": "Y::foo", "filePath": "inferred.rs", "startLine": 7,
+                     "edges": []},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "make_x",
-                expected: vec![relationships(&factory, &[])],
+                expected: json!([
+                    {"name": "make_x", "filePath": "inferred.rs", "startLine": 9,
+                     "edges": []},
+                ]),
             },
         ],
     })
@@ -4222,10 +5143,6 @@ fn caller() {
 // direct calls: construction inside the factory must not leak into caller.
 #[tokio::test]
 async fn rust_inferred_variable_alias_receiver() {
-    let method = description("X::foo", "inferred.rs", 3, 3);
-    let other = description("Y::foo", "inferred.rs", 7, 7);
-    let factory = description("make_x", "inferred.rs", 9, 11);
-    let entry = description("caller", "inferred.rs", 12, 16);
     check_case(Case {
         name: "rust_inferred_variable_alias_receiver",
         files: vec![SourceFile {
@@ -4252,28 +5169,41 @@ fn caller() {
             Query {
                 direction: "in",
                 symbol: "foo",
-                expected: vec![
-                    relationships(&method, &[(&entry, 15, 6)]),
-                    relationships(&other, &[]),
-                ],
+                expected: json!([
+                    {"name": "X::foo", "filePath": "inferred.rs", "startLine": 3,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "inferred.rs", "startLine": 12}, "line": 15, "column": 6},
+                    ]},
+                    {"name": "Y::foo", "filePath": "inferred.rs", "startLine": 7,
+                     "edges": []},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "caller",
-                expected: vec![relationships(
-                    &entry,
-                    &[(&factory, 13, 12), (&method, 15, 6)],
-                )],
+                expected: json!([
+                    {"name": "caller", "filePath": "inferred.rs", "startLine": 12,
+                     "edges": [
+                        {"symbol": {"name": "make_x", "filePath": "inferred.rs", "startLine": 9}, "line": 13, "column": 12},
+                        {"symbol": {"name": "X::foo", "filePath": "inferred.rs", "startLine": 3}, "line": 15, "column": 6},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "Y::foo",
-                expected: vec![relationships(&other, &[])],
+                expected: json!([
+                    {"name": "Y::foo", "filePath": "inferred.rs", "startLine": 7,
+                     "edges": []},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "make_x",
-                expected: vec![relationships(&factory, &[])],
+                expected: json!([
+                    {"name": "make_x", "filePath": "inferred.rs", "startLine": 9,
+                     "edges": []},
+                ]),
             },
         ],
     })
@@ -4286,10 +5216,6 @@ fn caller() {
 // name is not a call.
 #[tokio::test]
 async fn c_inferred_factory_function_pointer() {
-    let target = description("foo", "x.c", 2, 2);
-    let other = description("foo", "y.c", 2, 2);
-    let factory = description("makeX", "x.c", 3, 5);
-    let entry = description("caller", "caller.c", 2, 5);
     check_case(Case {
         name: "c_inferred_factory_function_pointer",
         files: vec![
@@ -4332,20 +5258,33 @@ void caller(void) {
             Query {
                 direction: "in",
                 symbol: "foo",
-                expected: vec![
-                    relationships(&target, &[(&entry, 4, 4)]),
-                    relationships(&other, &[]),
-                ],
+                expected: json!([
+                    {"name": "foo", "filePath": "x.c", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "caller.c", "startLine": 2}, "line": 4, "column": 4},
+                    ]},
+                    {"name": "foo", "filePath": "y.c", "startLine": 2,
+                     "edges": []},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "caller",
-                expected: vec![relationships(&entry, &[(&factory, 3, 17), (&target, 4, 4)])],
+                expected: json!([
+                    {"name": "caller", "filePath": "caller.c", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "makeX", "filePath": "x.c", "startLine": 3}, "line": 3, "column": 17},
+                        {"symbol": {"name": "foo", "filePath": "x.c", "startLine": 2}, "line": 4, "column": 4},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "makeX",
-                expected: vec![relationships(&factory, &[])],
+                expected: json!([
+                    {"name": "makeX", "filePath": "x.c", "startLine": 3,
+                     "edges": []},
+                ]),
             },
         ],
     })
@@ -4358,10 +5297,6 @@ void caller(void) {
 // call.
 #[tokio::test]
 async fn c_inferred_function_pointer_alias() {
-    let target = description("foo", "x.c", 2, 2);
-    let other = description("foo", "y.c", 2, 2);
-    let factory = description("makeX", "x.c", 3, 5);
-    let entry = description("caller", "caller.c", 2, 6);
     check_case(Case {
         name: "c_inferred_function_pointer_alias",
         files: vec![
@@ -4405,20 +5340,33 @@ void caller(void) {
             Query {
                 direction: "in",
                 symbol: "foo",
-                expected: vec![
-                    relationships(&target, &[(&entry, 5, 4)]),
-                    relationships(&other, &[]),
-                ],
+                expected: json!([
+                    {"name": "foo", "filePath": "x.c", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "caller.c", "startLine": 2}, "line": 5, "column": 4},
+                    ]},
+                    {"name": "foo", "filePath": "y.c", "startLine": 2,
+                     "edges": []},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "caller",
-                expected: vec![relationships(&entry, &[(&factory, 3, 17), (&target, 5, 4)])],
+                expected: json!([
+                    {"name": "caller", "filePath": "caller.c", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "makeX", "filePath": "x.c", "startLine": 3}, "line": 3, "column": 17},
+                        {"symbol": {"name": "foo", "filePath": "x.c", "startLine": 2}, "line": 5, "column": 4},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "makeX",
-                expected: vec![relationships(&factory, &[])],
+                expected: json!([
+                    {"name": "makeX", "filePath": "x.c", "startLine": 3,
+                     "edges": []},
+                ]),
             },
         ],
     })
@@ -4431,10 +5379,6 @@ void caller(void) {
 // the called function. Both X and Y have foo fields.
 #[tokio::test]
 async fn c_inferred_struct_callback_member() {
-    let target = description("run", "x.c", 2, 2);
-    let other = description("run", "y.c", 2, 2);
-    let factory = description("makeX", "x.c", 3, 5);
-    let entry = description("caller", "caller.c", 2, 5);
     check_case(Case {
         name: "c_inferred_struct_callback_member",
         files: vec![
@@ -4479,20 +5423,33 @@ void caller(void) {
             Query {
                 direction: "in",
                 symbol: "run",
-                expected: vec![
-                    relationships(&target, &[(&entry, 4, 6)]),
-                    relationships(&other, &[]),
-                ],
+                expected: json!([
+                    {"name": "run", "filePath": "x.c", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "caller.c", "startLine": 2}, "line": 4, "column": 6},
+                    ]},
+                    {"name": "run", "filePath": "y.c", "startLine": 2,
+                     "edges": []},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "caller",
-                expected: vec![relationships(&entry, &[(&factory, 3, 17), (&target, 4, 6)])],
+                expected: json!([
+                    {"name": "caller", "filePath": "caller.c", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "makeX", "filePath": "x.c", "startLine": 3}, "line": 3, "column": 17},
+                        {"symbol": {"name": "run", "filePath": "x.c", "startLine": 2}, "line": 4, "column": 6},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "makeX",
-                expected: vec![relationships(&factory, &[])],
+                expected: json!([
+                    {"name": "makeX", "filePath": "x.c", "startLine": 3,
+                     "edges": []},
+                ]),
             },
         ],
     })
@@ -4503,11 +5460,6 @@ void caller(void) {
 // Reassignment changes only subsequent x.foo() targets; earlier sites retain X.
 #[tokio::test]
 async fn javascript_receiver_reassignment() {
-    let constructor_x = description("X", "reassigned.js", 1, 3);
-    let method_x = description("X::foo", "reassigned.js", 2, 2);
-    let constructor_y = description("Y", "reassigned.js", 4, 6);
-    let method_y = description("Y::foo", "reassigned.js", 5, 5);
-    let entry = description("caller", "reassigned.js", 7, 12);
     check_case(Case {
         name: "javascript_receiver_reassignment",
         files: vec![SourceFile {
@@ -4530,33 +5482,49 @@ function caller() {
             Query {
                 direction: "in",
                 symbol: "foo",
-                expected: vec![
-                    relationships(&method_x, &[(&entry, 9, 6)]),
-                    relationships(&method_y, &[(&entry, 11, 6)]),
-                ],
+                expected: json!([
+                    {"name": "X::foo", "filePath": "reassigned.js", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "reassigned.js", "startLine": 7}, "line": 9, "column": 6},
+                    ]},
+                    {"name": "Y::foo", "filePath": "reassigned.js", "startLine": 5,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "reassigned.js", "startLine": 7}, "line": 11, "column": 6},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "X::foo",
-                expected: vec![relationships(&method_x, &[(&entry, 9, 6)])],
+                expected: json!([
+                    {"name": "X::foo", "filePath": "reassigned.js", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "reassigned.js", "startLine": 7}, "line": 9, "column": 6},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "Y::foo",
-                expected: vec![relationships(&method_y, &[(&entry, 11, 6)])],
+                expected: json!([
+                    {"name": "Y::foo", "filePath": "reassigned.js", "startLine": 5,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "reassigned.js", "startLine": 7}, "line": 11, "column": 6},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "caller",
-                expected: vec![relationships(
-                    &entry,
-                    &[
-                        (&constructor_x, 8, 16),
-                        (&method_x, 9, 6),
-                        (&constructor_y, 10, 12),
-                        (&method_y, 11, 6),
-                    ],
-                )],
+                expected: json!([
+                    {"name": "caller", "filePath": "reassigned.js", "startLine": 7,
+                     "edges": [
+                        {"symbol": {"name": "X", "filePath": "reassigned.js", "startLine": 1}, "line": 8, "column": 16},
+                        {"symbol": {"name": "X::foo", "filePath": "reassigned.js", "startLine": 2}, "line": 9, "column": 6},
+                        {"symbol": {"name": "Y", "filePath": "reassigned.js", "startLine": 4}, "line": 10, "column": 12},
+                        {"symbol": {"name": "Y::foo", "filePath": "reassigned.js", "startLine": 5}, "line": 11, "column": 6},
+                    ]},
+                ]),
             },
         ],
     })
@@ -4568,11 +5536,6 @@ function caller() {
 // y captures the X object before x is rebound to Y; y.foo() must still target X.
 #[tokio::test]
 async fn javascript_receiver_reassignment_preserves_alias() {
-    let constructor_x = description("X", "reassigned.js", 1, 3);
-    let method_x = description("X::foo", "reassigned.js", 2, 2);
-    let constructor_y = description("Y", "reassigned.js", 4, 6);
-    let method_y = description("Y::foo", "reassigned.js", 5, 5);
-    let entry = description("caller", "reassigned.js", 7, 14);
     check_case(Case {
         name: "javascript_receiver_reassignment_preserves_alias",
         files: vec![SourceFile {
@@ -4597,34 +5560,52 @@ function caller() {
             Query {
                 direction: "in",
                 symbol: "foo",
-                expected: vec![
-                    relationships(&method_x, &[(&entry, 9, 6), (&entry, 13, 6)]),
-                    relationships(&method_y, &[(&entry, 12, 6)]),
-                ],
+                expected: json!([
+                    {"name": "X::foo", "filePath": "reassigned.js", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "reassigned.js", "startLine": 7}, "line": 9, "column": 6},
+                        {"symbol": {"name": "caller", "filePath": "reassigned.js", "startLine": 7}, "line": 13, "column": 6},
+                    ]},
+                    {"name": "Y::foo", "filePath": "reassigned.js", "startLine": 5,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "reassigned.js", "startLine": 7}, "line": 12, "column": 6},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "X::foo",
-                expected: vec![relationships(&method_x, &[(&entry, 9, 6), (&entry, 13, 6)])],
+                expected: json!([
+                    {"name": "X::foo", "filePath": "reassigned.js", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "reassigned.js", "startLine": 7}, "line": 9, "column": 6},
+                        {"symbol": {"name": "caller", "filePath": "reassigned.js", "startLine": 7}, "line": 13, "column": 6},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "Y::foo",
-                expected: vec![relationships(&method_y, &[(&entry, 12, 6)])],
+                expected: json!([
+                    {"name": "Y::foo", "filePath": "reassigned.js", "startLine": 5,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "reassigned.js", "startLine": 7}, "line": 12, "column": 6},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "caller",
-                expected: vec![relationships(
-                    &entry,
-                    &[
-                        (&constructor_x, 8, 16),
-                        (&method_x, 9, 6),
-                        (&constructor_y, 11, 12),
-                        (&method_y, 12, 6),
-                        (&method_x, 13, 6),
-                    ],
-                )],
+                expected: json!([
+                    {"name": "caller", "filePath": "reassigned.js", "startLine": 7,
+                     "edges": [
+                        {"symbol": {"name": "X", "filePath": "reassigned.js", "startLine": 1}, "line": 8, "column": 16},
+                        {"symbol": {"name": "X::foo", "filePath": "reassigned.js", "startLine": 2}, "line": 9, "column": 6},
+                        {"symbol": {"name": "Y", "filePath": "reassigned.js", "startLine": 4}, "line": 11, "column": 12},
+                        {"symbol": {"name": "Y::foo", "filePath": "reassigned.js", "startLine": 5}, "line": 12, "column": 6},
+                        {"symbol": {"name": "X::foo", "filePath": "reassigned.js", "startLine": 2}, "line": 13, "column": 6},
+                    ]},
+                ]),
             },
         ],
     })
@@ -4636,11 +5617,6 @@ function caller() {
 // The union permits both assignments; each straight-line call has one concrete receiver.
 #[tokio::test]
 async fn typescript_receiver_reassignment() {
-    let constructor_x = description("X", "reassigned.ts", 1, 3);
-    let method_x = description("X::foo", "reassigned.ts", 2, 2);
-    let constructor_y = description("Y", "reassigned.ts", 4, 6);
-    let method_y = description("Y::foo", "reassigned.ts", 5, 5);
-    let entry = description("caller", "reassigned.ts", 7, 12);
     check_case(Case {
         name: "typescript_receiver_reassignment",
         files: vec![SourceFile {
@@ -4663,33 +5639,49 @@ function caller() {
             Query {
                 direction: "in",
                 symbol: "foo",
-                expected: vec![
-                    relationships(&method_x, &[(&entry, 9, 6)]),
-                    relationships(&method_y, &[(&entry, 11, 6)]),
-                ],
+                expected: json!([
+                    {"name": "X::foo", "filePath": "reassigned.ts", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "reassigned.ts", "startLine": 7}, "line": 9, "column": 6},
+                    ]},
+                    {"name": "Y::foo", "filePath": "reassigned.ts", "startLine": 5,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "reassigned.ts", "startLine": 7}, "line": 11, "column": 6},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "X::foo",
-                expected: vec![relationships(&method_x, &[(&entry, 9, 6)])],
+                expected: json!([
+                    {"name": "X::foo", "filePath": "reassigned.ts", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "reassigned.ts", "startLine": 7}, "line": 9, "column": 6},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "Y::foo",
-                expected: vec![relationships(&method_y, &[(&entry, 11, 6)])],
+                expected: json!([
+                    {"name": "Y::foo", "filePath": "reassigned.ts", "startLine": 5,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "reassigned.ts", "startLine": 7}, "line": 11, "column": 6},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "caller",
-                expected: vec![relationships(
-                    &entry,
-                    &[
-                        (&constructor_x, 8, 23),
-                        (&method_x, 9, 6),
-                        (&constructor_y, 10, 12),
-                        (&method_y, 11, 6),
-                    ],
-                )],
+                expected: json!([
+                    {"name": "caller", "filePath": "reassigned.ts", "startLine": 7,
+                     "edges": [
+                        {"symbol": {"name": "X", "filePath": "reassigned.ts", "startLine": 1}, "line": 8, "column": 23},
+                        {"symbol": {"name": "X::foo", "filePath": "reassigned.ts", "startLine": 2}, "line": 9, "column": 6},
+                        {"symbol": {"name": "Y", "filePath": "reassigned.ts", "startLine": 4}, "line": 10, "column": 12},
+                        {"symbol": {"name": "Y::foo", "filePath": "reassigned.ts", "startLine": 5}, "line": 11, "column": 6},
+                    ]},
+                ]),
             },
         ],
     })
@@ -4702,11 +5694,6 @@ function caller() {
 // The union permits both assignments; each straight-line call has one concrete receiver.
 #[tokio::test]
 async fn typescript_receiver_reassignment_preserves_alias() {
-    let constructor_x = description("X", "reassigned.ts", 1, 3);
-    let method_x = description("X::foo", "reassigned.ts", 2, 2);
-    let constructor_y = description("Y", "reassigned.ts", 4, 6);
-    let method_y = description("Y::foo", "reassigned.ts", 5, 5);
-    let entry = description("caller", "reassigned.ts", 7, 14);
     check_case(Case {
         name: "typescript_receiver_reassignment_preserves_alias",
         files: vec![SourceFile {
@@ -4731,34 +5718,52 @@ function caller() {
             Query {
                 direction: "in",
                 symbol: "foo",
-                expected: vec![
-                    relationships(&method_x, &[(&entry, 9, 6), (&entry, 13, 6)]),
-                    relationships(&method_y, &[(&entry, 12, 6)]),
-                ],
+                expected: json!([
+                    {"name": "X::foo", "filePath": "reassigned.ts", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "reassigned.ts", "startLine": 7}, "line": 9, "column": 6},
+                        {"symbol": {"name": "caller", "filePath": "reassigned.ts", "startLine": 7}, "line": 13, "column": 6},
+                    ]},
+                    {"name": "Y::foo", "filePath": "reassigned.ts", "startLine": 5,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "reassigned.ts", "startLine": 7}, "line": 12, "column": 6},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "X::foo",
-                expected: vec![relationships(&method_x, &[(&entry, 9, 6), (&entry, 13, 6)])],
+                expected: json!([
+                    {"name": "X::foo", "filePath": "reassigned.ts", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "reassigned.ts", "startLine": 7}, "line": 9, "column": 6},
+                        {"symbol": {"name": "caller", "filePath": "reassigned.ts", "startLine": 7}, "line": 13, "column": 6},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "Y::foo",
-                expected: vec![relationships(&method_y, &[(&entry, 12, 6)])],
+                expected: json!([
+                    {"name": "Y::foo", "filePath": "reassigned.ts", "startLine": 5,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "reassigned.ts", "startLine": 7}, "line": 12, "column": 6},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "caller",
-                expected: vec![relationships(
-                    &entry,
-                    &[
-                        (&constructor_x, 8, 23),
-                        (&method_x, 9, 6),
-                        (&constructor_y, 11, 12),
-                        (&method_y, 12, 6),
-                        (&method_x, 13, 6),
-                    ],
-                )],
+                expected: json!([
+                    {"name": "caller", "filePath": "reassigned.ts", "startLine": 7,
+                     "edges": [
+                        {"symbol": {"name": "X", "filePath": "reassigned.ts", "startLine": 1}, "line": 8, "column": 23},
+                        {"symbol": {"name": "X::foo", "filePath": "reassigned.ts", "startLine": 2}, "line": 9, "column": 6},
+                        {"symbol": {"name": "Y", "filePath": "reassigned.ts", "startLine": 4}, "line": 11, "column": 12},
+                        {"symbol": {"name": "Y::foo", "filePath": "reassigned.ts", "startLine": 5}, "line": 12, "column": 6},
+                        {"symbol": {"name": "X::foo", "filePath": "reassigned.ts", "startLine": 2}, "line": 13, "column": 6},
+                    ]},
+                ]),
             },
         ],
     })
@@ -4769,11 +5774,6 @@ function caller() {
 // Reassignment changes only subsequent x.foo() targets; earlier sites retain X.
 #[tokio::test]
 async fn python_receiver_reassignment() {
-    let constructor_x = description("X", "reassigned.py", 1, 3);
-    let method_x = description("X::foo", "reassigned.py", 2, 3);
-    let constructor_y = description("Y", "reassigned.py", 4, 6);
-    let method_y = description("Y::foo", "reassigned.py", 5, 6);
-    let entry = description("caller", "reassigned.py", 8, 12);
     check_case(Case {
         name: "python_receiver_reassignment",
         files: vec![SourceFile {
@@ -4796,33 +5796,49 @@ def caller():
             Query {
                 direction: "in",
                 symbol: "foo",
-                expected: vec![
-                    relationships(&method_x, &[(&entry, 10, 6)]),
-                    relationships(&method_y, &[(&entry, 12, 6)]),
-                ],
+                expected: json!([
+                    {"name": "X::foo", "filePath": "reassigned.py", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "reassigned.py", "startLine": 8}, "line": 10, "column": 6},
+                    ]},
+                    {"name": "Y::foo", "filePath": "reassigned.py", "startLine": 5,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "reassigned.py", "startLine": 8}, "line": 12, "column": 6},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "X::foo",
-                expected: vec![relationships(&method_x, &[(&entry, 10, 6)])],
+                expected: json!([
+                    {"name": "X::foo", "filePath": "reassigned.py", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "reassigned.py", "startLine": 8}, "line": 10, "column": 6},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "Y::foo",
-                expected: vec![relationships(&method_y, &[(&entry, 12, 6)])],
+                expected: json!([
+                    {"name": "Y::foo", "filePath": "reassigned.py", "startLine": 5,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "reassigned.py", "startLine": 8}, "line": 12, "column": 6},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "caller",
-                expected: vec![relationships(
-                    &entry,
-                    &[
-                        (&constructor_x, 9, 8),
-                        (&method_x, 10, 6),
-                        (&constructor_y, 11, 8),
-                        (&method_y, 12, 6),
-                    ],
-                )],
+                expected: json!([
+                    {"name": "caller", "filePath": "reassigned.py", "startLine": 8,
+                     "edges": [
+                        {"symbol": {"name": "X", "filePath": "reassigned.py", "startLine": 1}, "line": 9, "column": 8},
+                        {"symbol": {"name": "X::foo", "filePath": "reassigned.py", "startLine": 2}, "line": 10, "column": 6},
+                        {"symbol": {"name": "Y", "filePath": "reassigned.py", "startLine": 4}, "line": 11, "column": 8},
+                        {"symbol": {"name": "Y::foo", "filePath": "reassigned.py", "startLine": 5}, "line": 12, "column": 6},
+                    ]},
+                ]),
             },
         ],
     })
@@ -4834,11 +5850,6 @@ def caller():
 // y captures the X object before x is rebound to Y; y.foo() must still target X.
 #[tokio::test]
 async fn python_receiver_reassignment_preserves_alias() {
-    let constructor_x = description("X", "reassigned.py", 1, 3);
-    let method_x = description("X::foo", "reassigned.py", 2, 3);
-    let constructor_y = description("Y", "reassigned.py", 4, 6);
-    let method_y = description("Y::foo", "reassigned.py", 5, 6);
-    let entry = description("caller", "reassigned.py", 8, 14);
     check_case(Case {
         name: "python_receiver_reassignment_preserves_alias",
         files: vec![SourceFile {
@@ -4863,37 +5874,52 @@ def caller():
             Query {
                 direction: "in",
                 symbol: "foo",
-                expected: vec![
-                    relationships(&method_x, &[(&entry, 10, 6), (&entry, 14, 6)]),
-                    relationships(&method_y, &[(&entry, 13, 6)]),
-                ],
+                expected: json!([
+                    {"name": "X::foo", "filePath": "reassigned.py", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "reassigned.py", "startLine": 8}, "line": 10, "column": 6},
+                        {"symbol": {"name": "caller", "filePath": "reassigned.py", "startLine": 8}, "line": 14, "column": 6},
+                    ]},
+                    {"name": "Y::foo", "filePath": "reassigned.py", "startLine": 5,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "reassigned.py", "startLine": 8}, "line": 13, "column": 6},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "X::foo",
-                expected: vec![relationships(
-                    &method_x,
-                    &[(&entry, 10, 6), (&entry, 14, 6)],
-                )],
+                expected: json!([
+                    {"name": "X::foo", "filePath": "reassigned.py", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "reassigned.py", "startLine": 8}, "line": 10, "column": 6},
+                        {"symbol": {"name": "caller", "filePath": "reassigned.py", "startLine": 8}, "line": 14, "column": 6},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "Y::foo",
-                expected: vec![relationships(&method_y, &[(&entry, 13, 6)])],
+                expected: json!([
+                    {"name": "Y::foo", "filePath": "reassigned.py", "startLine": 5,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "reassigned.py", "startLine": 8}, "line": 13, "column": 6},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "caller",
-                expected: vec![relationships(
-                    &entry,
-                    &[
-                        (&constructor_x, 9, 8),
-                        (&method_x, 10, 6),
-                        (&constructor_y, 12, 8),
-                        (&method_y, 13, 6),
-                        (&method_x, 14, 6),
-                    ],
-                )],
+                expected: json!([
+                    {"name": "caller", "filePath": "reassigned.py", "startLine": 8,
+                     "edges": [
+                        {"symbol": {"name": "X", "filePath": "reassigned.py", "startLine": 1}, "line": 9, "column": 8},
+                        {"symbol": {"name": "X::foo", "filePath": "reassigned.py", "startLine": 2}, "line": 10, "column": 6},
+                        {"symbol": {"name": "Y", "filePath": "reassigned.py", "startLine": 4}, "line": 12, "column": 8},
+                        {"symbol": {"name": "Y::foo", "filePath": "reassigned.py", "startLine": 5}, "line": 13, "column": 6},
+                        {"symbol": {"name": "X::foo", "filePath": "reassigned.py", "startLine": 2}, "line": 14, "column": 6},
+                    ]},
+                ]),
             },
         ],
     })
@@ -4906,9 +5932,6 @@ def caller():
 // the upstream incoming/outgoing checks; foo calls default directly, not its transitive callee baz.
 #[tokio::test]
 async fn typescript_lsp_default_export_call_hierarchy() {
-    let target = description("default", "other.ts", 1, 3);
-    let entry = description("foo", "main.ts", 3, 5);
-    let leaf = description("baz", "other.ts", 5, 6);
     check_case(Case {
         name: "typescript_lsp_default_export_call_hierarchy",
         files: vec![
@@ -4936,22 +5959,42 @@ function baz() {
             Query {
                 direction: "in",
                 symbol: "default",
-                expected: vec![relationships(&target, &[(&entry, 4, 4)])],
+                expected: json!([
+                    {"name": "default", "filePath": "other.ts", "startLine": 1,
+                     "edges": [
+                        {"symbol": {"name": "foo", "filePath": "main.ts", "startLine": 3}, "line": 4, "column": 4},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "default",
-                expected: vec![relationships(&target, &[(&leaf, 2, 4)])],
+                expected: json!([
+                    {"name": "default", "filePath": "other.ts", "startLine": 1,
+                     "edges": [
+                        {"symbol": {"name": "baz", "filePath": "other.ts", "startLine": 5}, "line": 2, "column": 4},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "foo",
-                expected: vec![relationships(&entry, &[(&target, 4, 4)])],
+                expected: json!([
+                    {"name": "foo", "filePath": "main.ts", "startLine": 3,
+                     "edges": [
+                        {"symbol": {"name": "default", "filePath": "other.ts", "startLine": 1}, "line": 4, "column": 4},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "baz",
-                expected: vec![relationships(&leaf, &[(&target, 2, 4)])],
+                expected: json!([
+                    {"name": "baz", "filePath": "other.ts", "startLine": 5,
+                     "edges": [
+                        {"symbol": {"name": "default", "filePath": "other.ts", "startLine": 1}, "line": 2, "column": 4},
+                    ]},
+                ]),
             },
         ],
     })
@@ -4964,9 +6007,6 @@ function baz() {
 // interpolation creates no call, and baz belongs to bar rather than foo.
 #[tokio::test]
 async fn typescript_lsp_tagged_template_call_hierarchy() {
-    let entry = description("foo", "tagged.ts", 1, 3);
-    let target = description("bar", "tagged.ts", 5, 7);
-    let leaf = description("baz", "tagged.ts", 9, 10);
     check_case(Case {
         name: "typescript_lsp_tagged_template_call_hierarchy",
         files: vec![SourceFile {
@@ -4987,22 +6027,42 @@ function baz() {
             Query {
                 direction: "in",
                 symbol: "bar",
-                expected: vec![relationships(&target, &[(&entry, 2, 4)])],
+                expected: json!([
+                    {"name": "bar", "filePath": "tagged.ts", "startLine": 5,
+                     "edges": [
+                        {"symbol": {"name": "foo", "filePath": "tagged.ts", "startLine": 1}, "line": 2, "column": 4},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "bar",
-                expected: vec![relationships(&target, &[(&leaf, 6, 4)])],
+                expected: json!([
+                    {"name": "bar", "filePath": "tagged.ts", "startLine": 5,
+                     "edges": [
+                        {"symbol": {"name": "baz", "filePath": "tagged.ts", "startLine": 9}, "line": 6, "column": 4},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "foo",
-                expected: vec![relationships(&entry, &[(&target, 2, 4)])],
+                expected: json!([
+                    {"name": "foo", "filePath": "tagged.ts", "startLine": 1,
+                     "edges": [
+                        {"symbol": {"name": "bar", "filePath": "tagged.ts", "startLine": 5}, "line": 2, "column": 4},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "baz",
-                expected: vec![relationships(&leaf, &[(&target, 6, 4)])],
+                expected: json!([
+                    {"name": "baz", "filePath": "tagged.ts", "startLine": 9,
+                     "edges": [
+                        {"symbol": {"name": "bar", "filePath": "tagged.ts", "startLine": 5}, "line": 6, "column": 4},
+                    ]},
+                ]),
             },
         ],
     })
@@ -5016,8 +6076,6 @@ function baz() {
 // caller's outgoing targets, so it does not require an invented duplicate edge to the declaration.
 #[tokio::test]
 async fn rust_lsp_trait_method_call_hierarchy() {
-    let declaration = description("T1::callee", "trait_calls.rs", 2, 2);
-    let entry = description("caller", "trait_calls.rs", 11, 13);
     check_case(Case {
         name: "rust_lsp_trait_method_call_hierarchy",
         files: vec![SourceFile {
@@ -5041,12 +6099,20 @@ fn caller() {
             Query {
                 direction: "in",
                 symbol: "T1::callee",
-                expected: vec![relationships(&declaration, &[(&entry, 12, 8)])],
+                expected: json!([
+                    {"name": "T1::callee", "filePath": "trait_calls.rs", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "trait_calls.rs", "startLine": 11}, "line": 12, "column": 8},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "T1::callee",
-                expected: vec![relationships(&declaration, &[])],
+                expected: json!([
+                    {"name": "T1::callee", "filePath": "trait_calls.rs", "startLine": 2,
+                     "edges": []},
+                ]),
             },
         ],
     })
@@ -5057,10 +6123,6 @@ fn caller() {
 // Resolve each explicit receiver against its enclosing type; the two foo definitions must not mix.
 #[tokio::test]
 async fn java_self_this_direct_receiver() {
-    let left_method = description("Left::foo", "receivers.java", 2, 2);
-    let left_entry = description("Left::caller", "receivers.java", 3, 5);
-    let right_method = description("Right::foo", "receivers.java", 8, 8);
-    let right_entry = description("Right::caller", "receivers.java", 9, 11);
     check_case(Case {
         name: "java_self_this_direct_receiver",
         files: vec![SourceFile {
@@ -5083,25 +6145,46 @@ class Right {
             Query {
                 direction: "in",
                 symbol: "foo",
-                expected: vec![
-                    relationships(&left_method, &[(&left_entry, 4, 13)]),
-                    relationships(&right_method, &[(&right_entry, 10, 13)]),
-                ],
+                expected: json!([
+                    {"name": "Left::foo", "filePath": "receivers.java", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "Left::caller", "filePath": "receivers.java", "startLine": 3}, "line": 4, "column": 13},
+                    ]},
+                    {"name": "Right::foo", "filePath": "receivers.java", "startLine": 8,
+                     "edges": [
+                        {"symbol": {"name": "Right::caller", "filePath": "receivers.java", "startLine": 9}, "line": 10, "column": 13},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "Left::caller",
-                expected: vec![relationships(&left_entry, &[(&left_method, 4, 13)])],
+                expected: json!([
+                    {"name": "Left::caller", "filePath": "receivers.java", "startLine": 3,
+                     "edges": [
+                        {"symbol": {"name": "Left::foo", "filePath": "receivers.java", "startLine": 2}, "line": 4, "column": 13},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "Right::caller",
-                expected: vec![relationships(&right_entry, &[(&right_method, 10, 13)])],
+                expected: json!([
+                    {"name": "Right::caller", "filePath": "receivers.java", "startLine": 9,
+                     "edges": [
+                        {"symbol": {"name": "Right::foo", "filePath": "receivers.java", "startLine": 8}, "line": 10, "column": 13},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "Left::foo",
-                expected: vec![relationships(&left_method, &[(&left_entry, 4, 13)])],
+                expected: json!([
+                    {"name": "Left::foo", "filePath": "receivers.java", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "Left::caller", "filePath": "receivers.java", "startLine": 3}, "line": 4, "column": 13},
+                    ]},
+                ]),
             },
         ],
     })
@@ -5112,10 +6195,6 @@ class Right {
 // Resolve each explicit receiver against its enclosing type; the two foo definitions must not mix.
 #[tokio::test]
 async fn cpp_self_this_direct_receiver() {
-    let left_method = description("Left::foo", "receivers.cc", 2, 2);
-    let left_entry = description("Left::caller", "receivers.cc", 3, 5);
-    let right_method = description("Right::foo", "receivers.cc", 8, 8);
-    let right_entry = description("Right::caller", "receivers.cc", 9, 11);
     check_case(Case {
         name: "cpp_self_this_direct_receiver",
         files: vec![SourceFile {
@@ -5138,25 +6217,46 @@ struct Right {
             Query {
                 direction: "in",
                 symbol: "foo",
-                expected: vec![
-                    relationships(&left_method, &[(&left_entry, 4, 14)]),
-                    relationships(&right_method, &[(&right_entry, 10, 14)]),
-                ],
+                expected: json!([
+                    {"name": "Left::foo", "filePath": "receivers.cc", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "Left::caller", "filePath": "receivers.cc", "startLine": 3}, "line": 4, "column": 14},
+                    ]},
+                    {"name": "Right::foo", "filePath": "receivers.cc", "startLine": 8,
+                     "edges": [
+                        {"symbol": {"name": "Right::caller", "filePath": "receivers.cc", "startLine": 9}, "line": 10, "column": 14},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "Left::caller",
-                expected: vec![relationships(&left_entry, &[(&left_method, 4, 14)])],
+                expected: json!([
+                    {"name": "Left::caller", "filePath": "receivers.cc", "startLine": 3,
+                     "edges": [
+                        {"symbol": {"name": "Left::foo", "filePath": "receivers.cc", "startLine": 2}, "line": 4, "column": 14},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "Right::caller",
-                expected: vec![relationships(&right_entry, &[(&right_method, 10, 14)])],
+                expected: json!([
+                    {"name": "Right::caller", "filePath": "receivers.cc", "startLine": 9,
+                     "edges": [
+                        {"symbol": {"name": "Right::foo", "filePath": "receivers.cc", "startLine": 8}, "line": 10, "column": 14},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "Left::foo",
-                expected: vec![relationships(&left_method, &[(&left_entry, 4, 14)])],
+                expected: json!([
+                    {"name": "Left::foo", "filePath": "receivers.cc", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "Left::caller", "filePath": "receivers.cc", "startLine": 3}, "line": 4, "column": 14},
+                    ]},
+                ]),
             },
         ],
     })
@@ -5167,10 +6267,6 @@ struct Right {
 // Resolve each explicit receiver against its enclosing type; the two foo definitions must not mix.
 #[tokio::test]
 async fn rust_self_this_direct_receiver() {
-    let left_method = description("Left::foo", "receivers.rs", 3, 3);
-    let left_entry = description("Left::caller", "receivers.rs", 4, 6);
-    let right_method = description("Right::foo", "receivers.rs", 10, 10);
-    let right_entry = description("Right::caller", "receivers.rs", 11, 13);
     check_case(Case {
         name: "rust_self_this_direct_receiver",
         files: vec![SourceFile {
@@ -5195,25 +6291,46 @@ impl Right {
             Query {
                 direction: "in",
                 symbol: "foo",
-                expected: vec![
-                    relationships(&left_method, &[(&left_entry, 5, 13)]),
-                    relationships(&right_method, &[(&right_entry, 12, 13)]),
-                ],
+                expected: json!([
+                    {"name": "Left::foo", "filePath": "receivers.rs", "startLine": 3,
+                     "edges": [
+                        {"symbol": {"name": "Left::caller", "filePath": "receivers.rs", "startLine": 4}, "line": 5, "column": 13},
+                    ]},
+                    {"name": "Right::foo", "filePath": "receivers.rs", "startLine": 10,
+                     "edges": [
+                        {"symbol": {"name": "Right::caller", "filePath": "receivers.rs", "startLine": 11}, "line": 12, "column": 13},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "Left::caller",
-                expected: vec![relationships(&left_entry, &[(&left_method, 5, 13)])],
+                expected: json!([
+                    {"name": "Left::caller", "filePath": "receivers.rs", "startLine": 4,
+                     "edges": [
+                        {"symbol": {"name": "Left::foo", "filePath": "receivers.rs", "startLine": 3}, "line": 5, "column": 13},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "Right::caller",
-                expected: vec![relationships(&right_entry, &[(&right_method, 12, 13)])],
+                expected: json!([
+                    {"name": "Right::caller", "filePath": "receivers.rs", "startLine": 11,
+                     "edges": [
+                        {"symbol": {"name": "Right::foo", "filePath": "receivers.rs", "startLine": 10}, "line": 12, "column": 13},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "Left::foo",
-                expected: vec![relationships(&left_method, &[(&left_entry, 5, 13)])],
+                expected: json!([
+                    {"name": "Left::foo", "filePath": "receivers.rs", "startLine": 3,
+                     "edges": [
+                        {"symbol": {"name": "Left::caller", "filePath": "receivers.rs", "startLine": 4}, "line": 5, "column": 13},
+                    ]},
+                ]),
             },
         ],
     })
@@ -5224,10 +6341,6 @@ impl Right {
 // Resolve each explicit receiver against its enclosing type; the two foo definitions must not mix.
 #[tokio::test]
 async fn typescript_self_this_direct_receiver() {
-    let left_method = description("Left::foo", "receivers.ts", 2, 2);
-    let left_entry = description("Left::caller", "receivers.ts", 3, 5);
-    let right_method = description("Right::foo", "receivers.ts", 8, 8);
-    let right_entry = description("Right::caller", "receivers.ts", 9, 11);
     check_case(Case {
         name: "typescript_self_this_direct_receiver",
         files: vec![SourceFile {
@@ -5250,25 +6363,46 @@ class Right {
             Query {
                 direction: "in",
                 symbol: "foo",
-                expected: vec![
-                    relationships(&left_method, &[(&left_entry, 4, 13)]),
-                    relationships(&right_method, &[(&right_entry, 10, 13)]),
-                ],
+                expected: json!([
+                    {"name": "Left::foo", "filePath": "receivers.ts", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "Left::caller", "filePath": "receivers.ts", "startLine": 3}, "line": 4, "column": 13},
+                    ]},
+                    {"name": "Right::foo", "filePath": "receivers.ts", "startLine": 8,
+                     "edges": [
+                        {"symbol": {"name": "Right::caller", "filePath": "receivers.ts", "startLine": 9}, "line": 10, "column": 13},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "Left::caller",
-                expected: vec![relationships(&left_entry, &[(&left_method, 4, 13)])],
+                expected: json!([
+                    {"name": "Left::caller", "filePath": "receivers.ts", "startLine": 3,
+                     "edges": [
+                        {"symbol": {"name": "Left::foo", "filePath": "receivers.ts", "startLine": 2}, "line": 4, "column": 13},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "Right::caller",
-                expected: vec![relationships(&right_entry, &[(&right_method, 10, 13)])],
+                expected: json!([
+                    {"name": "Right::caller", "filePath": "receivers.ts", "startLine": 9,
+                     "edges": [
+                        {"symbol": {"name": "Right::foo", "filePath": "receivers.ts", "startLine": 8}, "line": 10, "column": 13},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "Left::foo",
-                expected: vec![relationships(&left_method, &[(&left_entry, 4, 13)])],
+                expected: json!([
+                    {"name": "Left::foo", "filePath": "receivers.ts", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "Left::caller", "filePath": "receivers.ts", "startLine": 3}, "line": 4, "column": 13},
+                    ]},
+                ]),
             },
         ],
     })
@@ -5280,10 +6414,6 @@ class Right {
 // The first instance-method parameter is named me, not self; parameter binding determines the receiver.
 #[tokio::test]
 async fn python_self_this_named_me_receiver() {
-    let left_method = description("Left::foo", "receivers.py", 2, 3);
-    let left_entry = description("Left::caller", "receivers.py", 4, 5);
-    let right_method = description("Right::foo", "receivers.py", 7, 8);
-    let right_entry = description("Right::caller", "receivers.py", 9, 10);
     check_case(Case {
         name: "python_self_this_named_me_receiver",
         files: vec![SourceFile {
@@ -5304,25 +6434,46 @@ class Right:
             Query {
                 direction: "in",
                 symbol: "foo",
-                expected: vec![
-                    relationships(&left_method, &[(&left_entry, 5, 11)]),
-                    relationships(&right_method, &[(&right_entry, 10, 11)]),
-                ],
+                expected: json!([
+                    {"name": "Left::foo", "filePath": "receivers.py", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "Left::caller", "filePath": "receivers.py", "startLine": 4}, "line": 5, "column": 11},
+                    ]},
+                    {"name": "Right::foo", "filePath": "receivers.py", "startLine": 7,
+                     "edges": [
+                        {"symbol": {"name": "Right::caller", "filePath": "receivers.py", "startLine": 9}, "line": 10, "column": 11},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "Left::caller",
-                expected: vec![relationships(&left_entry, &[(&left_method, 5, 11)])],
+                expected: json!([
+                    {"name": "Left::caller", "filePath": "receivers.py", "startLine": 4,
+                     "edges": [
+                        {"symbol": {"name": "Left::foo", "filePath": "receivers.py", "startLine": 2}, "line": 5, "column": 11},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "Right::caller",
-                expected: vec![relationships(&right_entry, &[(&right_method, 10, 11)])],
+                expected: json!([
+                    {"name": "Right::caller", "filePath": "receivers.py", "startLine": 9,
+                     "edges": [
+                        {"symbol": {"name": "Right::foo", "filePath": "receivers.py", "startLine": 7}, "line": 10, "column": 11},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "Left::foo",
-                expected: vec![relationships(&left_method, &[(&left_entry, 5, 11)])],
+                expected: json!([
+                    {"name": "Left::foo", "filePath": "receivers.py", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "Left::caller", "filePath": "receivers.py", "startLine": 4}, "line": 5, "column": 11},
+                    ]},
+                ]),
             },
         ],
     })
@@ -5334,9 +6485,6 @@ class Right:
 // The unrelated Other::foo must have no incoming calls.
 #[tokio::test]
 async fn java_self_this_inherited_receiver() {
-    let base = description("Base::foo", "inheritance.java", 2, 2);
-    let entry = description("Derived::caller", "inheritance.java", 5, 7);
-    let other = description("Other::foo", "inheritance.java", 10, 10);
     check_case(Case {
         name: "java_self_this_inherited_receiver",
         files: vec![SourceFile {
@@ -5358,20 +6506,34 @@ class Other {
             Query {
                 direction: "in",
                 symbol: "foo",
-                expected: vec![
-                    relationships(&base, &[(&entry, 6, 13)]),
-                    relationships(&other, &[]),
-                ],
+                expected: json!([
+                    {"name": "Base::foo", "filePath": "inheritance.java", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "Derived::caller", "filePath": "inheritance.java", "startLine": 5}, "line": 6, "column": 13},
+                    ]},
+                    {"name": "Other::foo", "filePath": "inheritance.java", "startLine": 10,
+                     "edges": []},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "Derived::caller",
-                expected: vec![relationships(&entry, &[(&base, 6, 13)])],
+                expected: json!([
+                    {"name": "Derived::caller", "filePath": "inheritance.java", "startLine": 5,
+                     "edges": [
+                        {"symbol": {"name": "Base::foo", "filePath": "inheritance.java", "startLine": 2}, "line": 6, "column": 13},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "Base::foo",
-                expected: vec![relationships(&base, &[(&entry, 6, 13)])],
+                expected: json!([
+                    {"name": "Base::foo", "filePath": "inheritance.java", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "Derived::caller", "filePath": "inheritance.java", "startLine": 5}, "line": 6, "column": 13},
+                    ]},
+                ]),
             },
         ],
     })
@@ -5383,10 +6545,6 @@ class Other {
 // Derived::foo and the unrelated Other::foo must have no incoming calls.
 #[tokio::test]
 async fn java_self_this_explicit_parent_receiver() {
-    let base = description("Base::foo", "inheritance.java", 2, 2);
-    let derived = description("Derived::foo", "inheritance.java", 5, 5);
-    let entry = description("Derived::caller", "inheritance.java", 6, 8);
-    let other = description("Other::foo", "inheritance.java", 11, 11);
     check_case(Case {
         name: "java_self_this_explicit_parent_receiver",
         files: vec![SourceFile {
@@ -5409,21 +6567,36 @@ class Other {
             Query {
                 direction: "in",
                 symbol: "foo",
-                expected: vec![
-                    relationships(&base, &[(&entry, 7, 14)]),
-                    relationships(&derived, &[]),
-                    relationships(&other, &[]),
-                ],
+                expected: json!([
+                    {"name": "Base::foo", "filePath": "inheritance.java", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "Derived::caller", "filePath": "inheritance.java", "startLine": 6}, "line": 7, "column": 14},
+                    ]},
+                    {"name": "Derived::foo", "filePath": "inheritance.java", "startLine": 5,
+                     "edges": []},
+                    {"name": "Other::foo", "filePath": "inheritance.java", "startLine": 11,
+                     "edges": []},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "Derived::caller",
-                expected: vec![relationships(&entry, &[(&base, 7, 14)])],
+                expected: json!([
+                    {"name": "Derived::caller", "filePath": "inheritance.java", "startLine": 6,
+                     "edges": [
+                        {"symbol": {"name": "Base::foo", "filePath": "inheritance.java", "startLine": 2}, "line": 7, "column": 14},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "Base::foo",
-                expected: vec![relationships(&base, &[(&entry, 7, 14)])],
+                expected: json!([
+                    {"name": "Base::foo", "filePath": "inheritance.java", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "Derived::caller", "filePath": "inheritance.java", "startLine": 6}, "line": 7, "column": 14},
+                    ]},
+                ]),
             },
         ],
     })
@@ -5436,9 +6609,6 @@ class Other {
 // Methods are non-virtual so this fixture does not require any speculative override expansion.
 #[tokio::test]
 async fn cpp_self_this_inherited_receiver() {
-    let base = description("Base::foo", "inheritance.cc", 2, 2);
-    let entry = description("Derived::caller", "inheritance.cc", 5, 7);
-    let other = description("Other::foo", "inheritance.cc", 10, 10);
     check_case(Case {
         name: "cpp_self_this_inherited_receiver",
         files: vec![SourceFile {
@@ -5460,20 +6630,34 @@ struct Other {
             Query {
                 direction: "in",
                 symbol: "foo",
-                expected: vec![
-                    relationships(&base, &[(&entry, 6, 14)]),
-                    relationships(&other, &[]),
-                ],
+                expected: json!([
+                    {"name": "Base::foo", "filePath": "inheritance.cc", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "Derived::caller", "filePath": "inheritance.cc", "startLine": 5}, "line": 6, "column": 14},
+                    ]},
+                    {"name": "Other::foo", "filePath": "inheritance.cc", "startLine": 10,
+                     "edges": []},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "Derived::caller",
-                expected: vec![relationships(&entry, &[(&base, 6, 14)])],
+                expected: json!([
+                    {"name": "Derived::caller", "filePath": "inheritance.cc", "startLine": 5,
+                     "edges": [
+                        {"symbol": {"name": "Base::foo", "filePath": "inheritance.cc", "startLine": 2}, "line": 6, "column": 14},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "Base::foo",
-                expected: vec![relationships(&base, &[(&entry, 6, 14)])],
+                expected: json!([
+                    {"name": "Base::foo", "filePath": "inheritance.cc", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "Derived::caller", "filePath": "inheritance.cc", "startLine": 5}, "line": 6, "column": 14},
+                    ]},
+                ]),
             },
         ],
     })
@@ -5486,10 +6670,6 @@ struct Other {
 // Methods are non-virtual so this fixture does not require any speculative override expansion.
 #[tokio::test]
 async fn cpp_self_this_explicit_parent_receiver() {
-    let base = description("Base::foo", "inheritance.cc", 2, 2);
-    let derived = description("Derived::foo", "inheritance.cc", 5, 5);
-    let entry = description("Derived::caller", "inheritance.cc", 6, 8);
-    let other = description("Other::foo", "inheritance.cc", 11, 11);
     check_case(Case {
         name: "cpp_self_this_explicit_parent_receiver",
         files: vec![SourceFile {
@@ -5512,21 +6692,36 @@ struct Other {
             Query {
                 direction: "in",
                 symbol: "foo",
-                expected: vec![
-                    relationships(&base, &[(&entry, 7, 14)]),
-                    relationships(&derived, &[]),
-                    relationships(&other, &[]),
-                ],
+                expected: json!([
+                    {"name": "Base::foo", "filePath": "inheritance.cc", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "Derived::caller", "filePath": "inheritance.cc", "startLine": 6}, "line": 7, "column": 14},
+                    ]},
+                    {"name": "Derived::foo", "filePath": "inheritance.cc", "startLine": 5,
+                     "edges": []},
+                    {"name": "Other::foo", "filePath": "inheritance.cc", "startLine": 11,
+                     "edges": []},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "Derived::caller",
-                expected: vec![relationships(&entry, &[(&base, 7, 14)])],
+                expected: json!([
+                    {"name": "Derived::caller", "filePath": "inheritance.cc", "startLine": 6,
+                     "edges": [
+                        {"symbol": {"name": "Base::foo", "filePath": "inheritance.cc", "startLine": 2}, "line": 7, "column": 14},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "Base::foo",
-                expected: vec![relationships(&base, &[(&entry, 7, 14)])],
+                expected: json!([
+                    {"name": "Base::foo", "filePath": "inheritance.cc", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "Derived::caller", "filePath": "inheritance.cc", "startLine": 6}, "line": 7, "column": 14},
+                    ]},
+                ]),
             },
         ],
     })
@@ -5538,9 +6733,6 @@ struct Other {
 // The unrelated Other::foo must have no incoming calls.
 #[tokio::test]
 async fn javascript_self_this_inherited_receiver() {
-    let base = description("Base::foo", "inheritance.js", 2, 2);
-    let entry = description("Derived::caller", "inheritance.js", 5, 7);
-    let other = description("Other::foo", "inheritance.js", 10, 10);
     check_case(Case {
         name: "javascript_self_this_inherited_receiver",
         files: vec![SourceFile {
@@ -5562,20 +6754,34 @@ class Other {
             Query {
                 direction: "in",
                 symbol: "foo",
-                expected: vec![
-                    relationships(&base, &[(&entry, 6, 13)]),
-                    relationships(&other, &[]),
-                ],
+                expected: json!([
+                    {"name": "Base::foo", "filePath": "inheritance.js", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "Derived::caller", "filePath": "inheritance.js", "startLine": 5}, "line": 6, "column": 13},
+                    ]},
+                    {"name": "Other::foo", "filePath": "inheritance.js", "startLine": 10,
+                     "edges": []},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "Derived::caller",
-                expected: vec![relationships(&entry, &[(&base, 6, 13)])],
+                expected: json!([
+                    {"name": "Derived::caller", "filePath": "inheritance.js", "startLine": 5,
+                     "edges": [
+                        {"symbol": {"name": "Base::foo", "filePath": "inheritance.js", "startLine": 2}, "line": 6, "column": 13},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "Base::foo",
-                expected: vec![relationships(&base, &[(&entry, 6, 13)])],
+                expected: json!([
+                    {"name": "Base::foo", "filePath": "inheritance.js", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "Derived::caller", "filePath": "inheritance.js", "startLine": 5}, "line": 6, "column": 13},
+                    ]},
+                ]),
             },
         ],
     })
@@ -5587,10 +6793,6 @@ class Other {
 // Derived::foo and the unrelated Other::foo must have no incoming calls.
 #[tokio::test]
 async fn javascript_self_this_explicit_parent_receiver() {
-    let base = description("Base::foo", "inheritance.js", 2, 2);
-    let derived = description("Derived::foo", "inheritance.js", 5, 5);
-    let entry = description("Derived::caller", "inheritance.js", 6, 8);
-    let other = description("Other::foo", "inheritance.js", 11, 11);
     check_case(Case {
         name: "javascript_self_this_explicit_parent_receiver",
         files: vec![SourceFile {
@@ -5613,21 +6815,36 @@ class Other {
             Query {
                 direction: "in",
                 symbol: "foo",
-                expected: vec![
-                    relationships(&base, &[(&entry, 7, 14)]),
-                    relationships(&derived, &[]),
-                    relationships(&other, &[]),
-                ],
+                expected: json!([
+                    {"name": "Base::foo", "filePath": "inheritance.js", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "Derived::caller", "filePath": "inheritance.js", "startLine": 6}, "line": 7, "column": 14},
+                    ]},
+                    {"name": "Derived::foo", "filePath": "inheritance.js", "startLine": 5,
+                     "edges": []},
+                    {"name": "Other::foo", "filePath": "inheritance.js", "startLine": 11,
+                     "edges": []},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "Derived::caller",
-                expected: vec![relationships(&entry, &[(&base, 7, 14)])],
+                expected: json!([
+                    {"name": "Derived::caller", "filePath": "inheritance.js", "startLine": 6,
+                     "edges": [
+                        {"symbol": {"name": "Base::foo", "filePath": "inheritance.js", "startLine": 2}, "line": 7, "column": 14},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "Base::foo",
-                expected: vec![relationships(&base, &[(&entry, 7, 14)])],
+                expected: json!([
+                    {"name": "Base::foo", "filePath": "inheritance.js", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "Derived::caller", "filePath": "inheritance.js", "startLine": 6}, "line": 7, "column": 14},
+                    ]},
+                ]),
             },
         ],
     })
@@ -5639,9 +6856,6 @@ class Other {
 // The unrelated Other::foo must have no incoming calls.
 #[tokio::test]
 async fn typescript_self_this_inherited_receiver() {
-    let base = description("Base::foo", "inheritance.ts", 2, 2);
-    let entry = description("Derived::caller", "inheritance.ts", 5, 7);
-    let other = description("Other::foo", "inheritance.ts", 10, 10);
     check_case(Case {
         name: "typescript_self_this_inherited_receiver",
         files: vec![SourceFile {
@@ -5663,20 +6877,34 @@ class Other {
             Query {
                 direction: "in",
                 symbol: "foo",
-                expected: vec![
-                    relationships(&base, &[(&entry, 6, 13)]),
-                    relationships(&other, &[]),
-                ],
+                expected: json!([
+                    {"name": "Base::foo", "filePath": "inheritance.ts", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "Derived::caller", "filePath": "inheritance.ts", "startLine": 5}, "line": 6, "column": 13},
+                    ]},
+                    {"name": "Other::foo", "filePath": "inheritance.ts", "startLine": 10,
+                     "edges": []},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "Derived::caller",
-                expected: vec![relationships(&entry, &[(&base, 6, 13)])],
+                expected: json!([
+                    {"name": "Derived::caller", "filePath": "inheritance.ts", "startLine": 5,
+                     "edges": [
+                        {"symbol": {"name": "Base::foo", "filePath": "inheritance.ts", "startLine": 2}, "line": 6, "column": 13},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "Base::foo",
-                expected: vec![relationships(&base, &[(&entry, 6, 13)])],
+                expected: json!([
+                    {"name": "Base::foo", "filePath": "inheritance.ts", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "Derived::caller", "filePath": "inheritance.ts", "startLine": 5}, "line": 6, "column": 13},
+                    ]},
+                ]),
             },
         ],
     })
@@ -5688,10 +6916,6 @@ class Other {
 // Derived::foo and the unrelated Other::foo must have no incoming calls.
 #[tokio::test]
 async fn typescript_self_this_explicit_parent_receiver() {
-    let base = description("Base::foo", "inheritance.ts", 2, 2);
-    let derived = description("Derived::foo", "inheritance.ts", 5, 5);
-    let entry = description("Derived::caller", "inheritance.ts", 6, 8);
-    let other = description("Other::foo", "inheritance.ts", 11, 11);
     check_case(Case {
         name: "typescript_self_this_explicit_parent_receiver",
         files: vec![SourceFile {
@@ -5714,21 +6938,36 @@ class Other {
             Query {
                 direction: "in",
                 symbol: "foo",
-                expected: vec![
-                    relationships(&base, &[(&entry, 7, 14)]),
-                    relationships(&derived, &[]),
-                    relationships(&other, &[]),
-                ],
+                expected: json!([
+                    {"name": "Base::foo", "filePath": "inheritance.ts", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "Derived::caller", "filePath": "inheritance.ts", "startLine": 6}, "line": 7, "column": 14},
+                    ]},
+                    {"name": "Derived::foo", "filePath": "inheritance.ts", "startLine": 5,
+                     "edges": []},
+                    {"name": "Other::foo", "filePath": "inheritance.ts", "startLine": 11,
+                     "edges": []},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "Derived::caller",
-                expected: vec![relationships(&entry, &[(&base, 7, 14)])],
+                expected: json!([
+                    {"name": "Derived::caller", "filePath": "inheritance.ts", "startLine": 6,
+                     "edges": [
+                        {"symbol": {"name": "Base::foo", "filePath": "inheritance.ts", "startLine": 2}, "line": 7, "column": 14},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "Base::foo",
-                expected: vec![relationships(&base, &[(&entry, 7, 14)])],
+                expected: json!([
+                    {"name": "Base::foo", "filePath": "inheritance.ts", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "Derived::caller", "filePath": "inheritance.ts", "startLine": 6}, "line": 7, "column": 14},
+                    ]},
+                ]),
             },
         ],
     })
@@ -5740,9 +6979,6 @@ class Other {
 // The unrelated Other::foo must have no incoming calls.
 #[tokio::test]
 async fn python_self_this_inherited_receiver() {
-    let base = description("Base::foo", "inheritance.py", 2, 3);
-    let entry = description("Derived::caller", "inheritance.py", 5, 6);
-    let other = description("Other::foo", "inheritance.py", 8, 9);
     check_case(Case {
         name: "python_self_this_inherited_receiver",
         files: vec![SourceFile {
@@ -5762,20 +6998,34 @@ class Other:
             Query {
                 direction: "in",
                 symbol: "foo",
-                expected: vec![
-                    relationships(&base, &[(&entry, 6, 13)]),
-                    relationships(&other, &[]),
-                ],
+                expected: json!([
+                    {"name": "Base::foo", "filePath": "inheritance.py", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "Derived::caller", "filePath": "inheritance.py", "startLine": 5}, "line": 6, "column": 13},
+                    ]},
+                    {"name": "Other::foo", "filePath": "inheritance.py", "startLine": 8,
+                     "edges": []},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "Derived::caller",
-                expected: vec![relationships(&entry, &[(&base, 6, 13)])],
+                expected: json!([
+                    {"name": "Derived::caller", "filePath": "inheritance.py", "startLine": 5,
+                     "edges": [
+                        {"symbol": {"name": "Base::foo", "filePath": "inheritance.py", "startLine": 2}, "line": 6, "column": 13},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "Base::foo",
-                expected: vec![relationships(&base, &[(&entry, 6, 13)])],
+                expected: json!([
+                    {"name": "Base::foo", "filePath": "inheritance.py", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "Derived::caller", "filePath": "inheritance.py", "startLine": 5}, "line": 6, "column": 13},
+                    ]},
+                ]),
             },
         ],
     })
@@ -5788,10 +7038,6 @@ class Other:
 // The builtin super() has no indexed definition and must not produce a synthetic call target.
 #[tokio::test]
 async fn python_self_this_explicit_parent_receiver() {
-    let base = description("Base::foo", "inheritance.py", 2, 3);
-    let derived = description("Derived::foo", "inheritance.py", 5, 6);
-    let entry = description("Derived::caller", "inheritance.py", 7, 8);
-    let other = description("Other::foo", "inheritance.py", 10, 11);
     check_case(Case {
         name: "python_self_this_explicit_parent_receiver",
         files: vec![SourceFile {
@@ -5813,21 +7059,36 @@ class Other:
             Query {
                 direction: "in",
                 symbol: "foo",
-                expected: vec![
-                    relationships(&base, &[(&entry, 8, 16)]),
-                    relationships(&derived, &[]),
-                    relationships(&other, &[]),
-                ],
+                expected: json!([
+                    {"name": "Base::foo", "filePath": "inheritance.py", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "Derived::caller", "filePath": "inheritance.py", "startLine": 7}, "line": 8, "column": 16},
+                    ]},
+                    {"name": "Derived::foo", "filePath": "inheritance.py", "startLine": 5,
+                     "edges": []},
+                    {"name": "Other::foo", "filePath": "inheritance.py", "startLine": 10,
+                     "edges": []},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "Derived::caller",
-                expected: vec![relationships(&entry, &[(&base, 8, 16)])],
+                expected: json!([
+                    {"name": "Derived::caller", "filePath": "inheritance.py", "startLine": 7,
+                     "edges": [
+                        {"symbol": {"name": "Base::foo", "filePath": "inheritance.py", "startLine": 2}, "line": 8, "column": 16},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "Base::foo",
-                expected: vec![relationships(&base, &[(&entry, 8, 16)])],
+                expected: json!([
+                    {"name": "Base::foo", "filePath": "inheritance.py", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "Derived::caller", "filePath": "inheritance.py", "startLine": 7}, "line": 8, "column": 16},
+                    ]},
+                ]),
             },
         ],
     })
@@ -5839,11 +7100,6 @@ class Other:
 // repeated sites and never cross modules; namespace imports do not call the unused stop exports.
 #[tokio::test]
 async fn python_module_alias_calls() {
-    let left = description("work", "left.py", 1, 2);
-    let right = description("work", "right.py", 1, 2);
-    let left_unused = description("stop", "left.py", 4, 5);
-    let right_unused = description("stop", "right.py", 4, 5);
-    let entry = description("caller", "caller.py", 3, 6);
     check_case(Case {
         name: "python_module_alias_calls",
         files: vec![
@@ -5880,26 +7136,39 @@ def caller():
             Query {
                 direction: "out",
                 symbol: "caller",
-                expected: vec![relationships(
-                    &entry,
-                    &[(&left, 4, 13), (&right, 5, 14), (&left, 6, 13)],
-                )],
+                expected: json!([
+                    {"name": "caller", "filePath": "caller.py", "startLine": 3,
+                     "edges": [
+                        {"symbol": {"name": "work", "filePath": "left.py", "startLine": 1}, "line": 4, "column": 13},
+                        {"symbol": {"name": "work", "filePath": "right.py", "startLine": 1}, "line": 5, "column": 14},
+                        {"symbol": {"name": "work", "filePath": "left.py", "startLine": 1}, "line": 6, "column": 13},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "work",
-                expected: vec![
-                    relationships(&left, &[(&entry, 4, 13), (&entry, 6, 13)]),
-                    relationships(&right, &[(&entry, 5, 14)]),
-                ],
+                expected: json!([
+                    {"name": "work", "filePath": "left.py", "startLine": 1,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "caller.py", "startLine": 3}, "line": 4, "column": 13},
+                        {"symbol": {"name": "caller", "filePath": "caller.py", "startLine": 3}, "line": 6, "column": 13},
+                    ]},
+                    {"name": "work", "filePath": "right.py", "startLine": 1,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "caller.py", "startLine": 3}, "line": 5, "column": 14},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "stop",
-                expected: vec![
-                    relationships(&left_unused, &[]),
-                    relationships(&right_unused, &[]),
-                ],
+                expected: json!([
+                    {"name": "stop", "filePath": "left.py", "startLine": 4,
+                     "edges": []},
+                    {"name": "stop", "filePath": "right.py", "startLine": 4,
+                     "edges": []},
+                ]),
             },
         ],
     })
@@ -5911,11 +7180,6 @@ def caller():
 // repeated sites and never cross modules; namespace imports do not call the unused stop exports.
 #[tokio::test]
 async fn javascript_module_alias_calls() {
-    let left = description("work", "left.js", 1, 1);
-    let right = description("work", "right.js", 1, 1);
-    let left_unused = description("stop", "left.js", 2, 2);
-    let right_unused = description("stop", "right.js", 2, 2);
-    let entry = description("caller", "caller.js", 3, 7);
     check_case(Case {
         name: "javascript_module_alias_calls",
         files: vec![
@@ -5947,26 +7211,39 @@ function caller() {
             Query {
                 direction: "out",
                 symbol: "caller",
-                expected: vec![relationships(
-                    &entry,
-                    &[(&left, 4, 12), (&right, 5, 13), (&left, 6, 12)],
-                )],
+                expected: json!([
+                    {"name": "caller", "filePath": "caller.js", "startLine": 3,
+                     "edges": [
+                        {"symbol": {"name": "work", "filePath": "left.js", "startLine": 1}, "line": 4, "column": 12},
+                        {"symbol": {"name": "work", "filePath": "right.js", "startLine": 1}, "line": 5, "column": 13},
+                        {"symbol": {"name": "work", "filePath": "left.js", "startLine": 1}, "line": 6, "column": 12},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "work",
-                expected: vec![
-                    relationships(&left, &[(&entry, 4, 12), (&entry, 6, 12)]),
-                    relationships(&right, &[(&entry, 5, 13)]),
-                ],
+                expected: json!([
+                    {"name": "work", "filePath": "left.js", "startLine": 1,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "caller.js", "startLine": 3}, "line": 4, "column": 12},
+                        {"symbol": {"name": "caller", "filePath": "caller.js", "startLine": 3}, "line": 6, "column": 12},
+                    ]},
+                    {"name": "work", "filePath": "right.js", "startLine": 1,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "caller.js", "startLine": 3}, "line": 5, "column": 13},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "stop",
-                expected: vec![
-                    relationships(&left_unused, &[]),
-                    relationships(&right_unused, &[]),
-                ],
+                expected: json!([
+                    {"name": "stop", "filePath": "left.js", "startLine": 2,
+                     "edges": []},
+                    {"name": "stop", "filePath": "right.js", "startLine": 2,
+                     "edges": []},
+                ]),
             },
         ],
     })
@@ -5978,11 +7255,6 @@ function caller() {
 // repeated sites and never cross modules; namespace imports do not call the unused stop exports.
 #[tokio::test]
 async fn typescript_module_alias_calls() {
-    let left = description("work", "left.ts", 1, 1);
-    let right = description("work", "right.ts", 1, 1);
-    let left_unused = description("stop", "left.ts", 2, 2);
-    let right_unused = description("stop", "right.ts", 2, 2);
-    let entry = description("caller", "caller.ts", 3, 7);
     check_case(Case {
         name: "typescript_module_alias_calls",
         files: vec![
@@ -6014,26 +7286,39 @@ function caller() {
             Query {
                 direction: "out",
                 symbol: "caller",
-                expected: vec![relationships(
-                    &entry,
-                    &[(&left, 4, 12), (&right, 5, 13), (&left, 6, 12)],
-                )],
+                expected: json!([
+                    {"name": "caller", "filePath": "caller.ts", "startLine": 3,
+                     "edges": [
+                        {"symbol": {"name": "work", "filePath": "left.ts", "startLine": 1}, "line": 4, "column": 12},
+                        {"symbol": {"name": "work", "filePath": "right.ts", "startLine": 1}, "line": 5, "column": 13},
+                        {"symbol": {"name": "work", "filePath": "left.ts", "startLine": 1}, "line": 6, "column": 12},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "work",
-                expected: vec![
-                    relationships(&left, &[(&entry, 4, 12), (&entry, 6, 12)]),
-                    relationships(&right, &[(&entry, 5, 13)]),
-                ],
+                expected: json!([
+                    {"name": "work", "filePath": "left.ts", "startLine": 1,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "caller.ts", "startLine": 3}, "line": 4, "column": 12},
+                        {"symbol": {"name": "caller", "filePath": "caller.ts", "startLine": 3}, "line": 6, "column": 12},
+                    ]},
+                    {"name": "work", "filePath": "right.ts", "startLine": 1,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "caller.ts", "startLine": 3}, "line": 5, "column": 13},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "stop",
-                expected: vec![
-                    relationships(&left_unused, &[]),
-                    relationships(&right_unused, &[]),
-                ],
+                expected: json!([
+                    {"name": "stop", "filePath": "left.ts", "startLine": 2,
+                     "edges": []},
+                    {"name": "stop", "filePath": "right.ts", "startLine": 2,
+                     "edges": []},
+                ]),
             },
         ],
     })
@@ -6045,10 +7330,6 @@ function caller() {
 // The local run variable points to local_target; its call must resolve there, not to library.work.
 #[tokio::test]
 async fn python_binding_import_alias_local_shadow() {
-    let imported = description("work", "library.py", 1, 2);
-    let shadowed = description("shadowed", "caller.py", 4, 6);
-    let control = description("control", "caller.py", 7, 8);
-    let local = description("local_target", "caller.py", 2, 3);
     check_case(Case {
         name: "python_binding_import_alias_local_shadow",
         files: vec![
@@ -6075,22 +7356,42 @@ def control():
             Query {
                 direction: "in",
                 symbol: "work",
-                expected: vec![relationships(&imported, &[(&control, 8, 4)])],
+                expected: json!([
+                    {"name": "work", "filePath": "library.py", "startLine": 1,
+                     "edges": [
+                        {"symbol": {"name": "control", "filePath": "caller.py", "startLine": 7}, "line": 8, "column": 4},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "shadowed",
-                expected: vec![relationships(&shadowed, &[(&local, 6, 4)])],
+                expected: json!([
+                    {"name": "shadowed", "filePath": "caller.py", "startLine": 4,
+                     "edges": [
+                        {"symbol": {"name": "local_target", "filePath": "caller.py", "startLine": 2}, "line": 6, "column": 4},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "control",
-                expected: vec![relationships(&control, &[(&imported, 8, 4)])],
+                expected: json!([
+                    {"name": "control", "filePath": "caller.py", "startLine": 7,
+                     "edges": [
+                        {"symbol": {"name": "work", "filePath": "library.py", "startLine": 1}, "line": 8, "column": 4},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "local_target",
-                expected: vec![relationships(&local, &[(&shadowed, 6, 4)])],
+                expected: json!([
+                    {"name": "local_target", "filePath": "caller.py", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "shadowed", "filePath": "caller.py", "startLine": 4}, "line": 6, "column": 4},
+                    ]},
+                ]),
             },
         ],
     })
@@ -6102,9 +7403,6 @@ def control():
 // The callback parameter has no known concrete target; its call stays unresolved.
 #[tokio::test]
 async fn python_binding_import_alias_parameter_shadow() {
-    let imported = description("work", "library.py", 1, 2);
-    let shadowed = description("shadowed", "caller.py", 2, 3);
-    let control = description("control", "caller.py", 4, 5);
     check_case(Case {
         name: "python_binding_import_alias_parameter_shadow",
         files: vec![
@@ -6128,17 +7426,30 @@ def control():
             Query {
                 direction: "in",
                 symbol: "work",
-                expected: vec![relationships(&imported, &[(&control, 5, 4)])],
+                expected: json!([
+                    {"name": "work", "filePath": "library.py", "startLine": 1,
+                     "edges": [
+                        {"symbol": {"name": "control", "filePath": "caller.py", "startLine": 4}, "line": 5, "column": 4},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "shadowed",
-                expected: vec![relationships(&shadowed, &[])],
+                expected: json!([
+                    {"name": "shadowed", "filePath": "caller.py", "startLine": 2,
+                     "edges": []},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "control",
-                expected: vec![relationships(&control, &[(&imported, 5, 4)])],
+                expected: json!([
+                    {"name": "control", "filePath": "caller.py", "startLine": 4,
+                     "edges": [
+                        {"symbol": {"name": "work", "filePath": "library.py", "startLine": 1}, "line": 5, "column": 4},
+                    ]},
+                ]),
             },
         ],
     })
@@ -6151,9 +7462,6 @@ def control():
 // Keep the known direct call while leaving the unavailable dependency unresolved.
 #[tokio::test]
 async fn python_binding_unavailable_import_target() {
-    let decoy = description("work", "decoy.py", 1, 2);
-    let known = description("known", "caller.py", 2, 3);
-    let entry = description("caller", "caller.py", 4, 6);
     check_case(Case {
         name: "python_binding_unavailable_import_target",
         files: vec![
@@ -6178,17 +7486,30 @@ def caller():
             Query {
                 direction: "out",
                 symbol: "caller",
-                expected: vec![relationships(&entry, &[(&known, 5, 4)])],
+                expected: json!([
+                    {"name": "caller", "filePath": "caller.py", "startLine": 4,
+                     "edges": [
+                        {"symbol": {"name": "known", "filePath": "caller.py", "startLine": 2}, "line": 5, "column": 4},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "work",
-                expected: vec![relationships(&decoy, &[])],
+                expected: json!([
+                    {"name": "work", "filePath": "decoy.py", "startLine": 1,
+                     "edges": []},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "known",
-                expected: vec![relationships(&known, &[(&entry, 5, 4)])],
+                expected: json!([
+                    {"name": "known", "filePath": "caller.py", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "caller.py", "startLine": 4}, "line": 5, "column": 4},
+                    ]},
+                ]),
             },
         ],
     })
@@ -6201,10 +7522,6 @@ def caller():
 // The known direct call must still be returned; unresolved calls have no resolved query edges.
 #[tokio::test]
 async fn python_binding_unknown_factory_receiver() {
-    let decoy_factory = description("make", "decoy.py", 1, 2);
-    let decoy_method = description("Local::foo", "decoy.py", 4, 5);
-    let known = description("known", "caller.py", 2, 3);
-    let entry = description("caller", "caller.py", 4, 6);
     check_case(Case {
         name: "python_binding_unknown_factory_receiver",
         files: vec![
@@ -6232,22 +7549,38 @@ def caller():
             Query {
                 direction: "out",
                 symbol: "caller",
-                expected: vec![relationships(&entry, &[(&known, 5, 4)])],
+                expected: json!([
+                    {"name": "caller", "filePath": "caller.py", "startLine": 4,
+                     "edges": [
+                        {"symbol": {"name": "known", "filePath": "caller.py", "startLine": 2}, "line": 5, "column": 4},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "make",
-                expected: vec![relationships(&decoy_factory, &[])],
+                expected: json!([
+                    {"name": "make", "filePath": "decoy.py", "startLine": 1,
+                     "edges": []},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "Local::foo",
-                expected: vec![relationships(&decoy_method, &[])],
+                expected: json!([
+                    {"name": "Local::foo", "filePath": "decoy.py", "startLine": 4,
+                     "edges": []},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "known",
-                expected: vec![relationships(&known, &[(&entry, 5, 4)])],
+                expected: json!([
+                    {"name": "known", "filePath": "caller.py", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "caller.py", "startLine": 4}, "line": 5, "column": 4},
+                    ]},
+                ]),
             },
         ],
     })
@@ -6259,10 +7592,6 @@ def caller():
 // The local run variable points to local_target; its call must resolve there, not to library.work.
 #[tokio::test]
 async fn javascript_binding_import_alias_local_shadow() {
-    let imported = description("work", "library.js", 1, 1);
-    let shadowed = description("shadowed", "caller.js", 3, 6);
-    let control = description("control", "caller.js", 7, 9);
-    let local = description("local_target", "caller.js", 2, 2);
     check_case(Case {
         name: "javascript_binding_import_alias_local_shadow",
         files: vec![
@@ -6289,22 +7618,42 @@ function control() {
             Query {
                 direction: "in",
                 symbol: "work",
-                expected: vec![relationships(&imported, &[(&control, 8, 4)])],
+                expected: json!([
+                    {"name": "work", "filePath": "library.js", "startLine": 1,
+                     "edges": [
+                        {"symbol": {"name": "control", "filePath": "caller.js", "startLine": 7}, "line": 8, "column": 4},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "shadowed",
-                expected: vec![relationships(&shadowed, &[(&local, 5, 4)])],
+                expected: json!([
+                    {"name": "shadowed", "filePath": "caller.js", "startLine": 3,
+                     "edges": [
+                        {"symbol": {"name": "local_target", "filePath": "caller.js", "startLine": 2}, "line": 5, "column": 4},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "control",
-                expected: vec![relationships(&control, &[(&imported, 8, 4)])],
+                expected: json!([
+                    {"name": "control", "filePath": "caller.js", "startLine": 7,
+                     "edges": [
+                        {"symbol": {"name": "work", "filePath": "library.js", "startLine": 1}, "line": 8, "column": 4},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "local_target",
-                expected: vec![relationships(&local, &[(&shadowed, 5, 4)])],
+                expected: json!([
+                    {"name": "local_target", "filePath": "caller.js", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "shadowed", "filePath": "caller.js", "startLine": 3}, "line": 5, "column": 4},
+                    ]},
+                ]),
             },
         ],
     })
@@ -6316,9 +7665,6 @@ function control() {
 // The callback parameter has no known concrete target; its call stays unresolved.
 #[tokio::test]
 async fn javascript_binding_import_alias_parameter_shadow() {
-    let imported = description("work", "library.js", 1, 1);
-    let shadowed = description("shadowed", "caller.js", 2, 4);
-    let control = description("control", "caller.js", 5, 7);
     check_case(Case {
         name: "javascript_binding_import_alias_parameter_shadow",
         files: vec![
@@ -6343,17 +7689,30 @@ function control() {
             Query {
                 direction: "in",
                 symbol: "work",
-                expected: vec![relationships(&imported, &[(&control, 6, 4)])],
+                expected: json!([
+                    {"name": "work", "filePath": "library.js", "startLine": 1,
+                     "edges": [
+                        {"symbol": {"name": "control", "filePath": "caller.js", "startLine": 5}, "line": 6, "column": 4},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "shadowed",
-                expected: vec![relationships(&shadowed, &[])],
+                expected: json!([
+                    {"name": "shadowed", "filePath": "caller.js", "startLine": 2,
+                     "edges": []},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "control",
-                expected: vec![relationships(&control, &[(&imported, 6, 4)])],
+                expected: json!([
+                    {"name": "control", "filePath": "caller.js", "startLine": 5,
+                     "edges": [
+                        {"symbol": {"name": "work", "filePath": "library.js", "startLine": 1}, "line": 6, "column": 4},
+                    ]},
+                ]),
             },
         ],
     })
@@ -6366,9 +7725,6 @@ function control() {
 // Keep the known direct call while leaving the unavailable dependency unresolved.
 #[tokio::test]
 async fn javascript_binding_unavailable_import_target() {
-    let decoy = description("work", "decoy.js", 1, 1);
-    let known = description("known", "caller.js", 2, 2);
-    let entry = description("caller", "caller.js", 3, 6);
     check_case(Case {
         name: "javascript_binding_unavailable_import_target",
         files: vec![
@@ -6392,17 +7748,30 @@ function caller() {
             Query {
                 direction: "out",
                 symbol: "caller",
-                expected: vec![relationships(&entry, &[(&known, 4, 4)])],
+                expected: json!([
+                    {"name": "caller", "filePath": "caller.js", "startLine": 3,
+                     "edges": [
+                        {"symbol": {"name": "known", "filePath": "caller.js", "startLine": 2}, "line": 4, "column": 4},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "work",
-                expected: vec![relationships(&decoy, &[])],
+                expected: json!([
+                    {"name": "work", "filePath": "decoy.js", "startLine": 1,
+                     "edges": []},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "known",
-                expected: vec![relationships(&known, &[(&entry, 4, 4)])],
+                expected: json!([
+                    {"name": "known", "filePath": "caller.js", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "caller.js", "startLine": 3}, "line": 4, "column": 4},
+                    ]},
+                ]),
             },
         ],
     })
@@ -6415,10 +7784,6 @@ function caller() {
 // The known direct call must still be returned; unresolved calls have no resolved query edges.
 #[tokio::test]
 async fn javascript_binding_unknown_factory_receiver() {
-    let decoy_factory = description("make", "decoy.js", 1, 1);
-    let decoy_method = description("Local::foo", "decoy.js", 3, 3);
-    let known = description("known", "caller.js", 2, 2);
-    let entry = description("caller", "caller.js", 3, 6);
     check_case(Case {
         name: "javascript_binding_unknown_factory_receiver",
         files: vec![
@@ -6445,22 +7810,38 @@ function caller() {
             Query {
                 direction: "out",
                 symbol: "caller",
-                expected: vec![relationships(&entry, &[(&known, 4, 4)])],
+                expected: json!([
+                    {"name": "caller", "filePath": "caller.js", "startLine": 3,
+                     "edges": [
+                        {"symbol": {"name": "known", "filePath": "caller.js", "startLine": 2}, "line": 4, "column": 4},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "make",
-                expected: vec![relationships(&decoy_factory, &[])],
+                expected: json!([
+                    {"name": "make", "filePath": "decoy.js", "startLine": 1,
+                     "edges": []},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "Local::foo",
-                expected: vec![relationships(&decoy_method, &[])],
+                expected: json!([
+                    {"name": "Local::foo", "filePath": "decoy.js", "startLine": 3,
+                     "edges": []},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "known",
-                expected: vec![relationships(&known, &[(&entry, 4, 4)])],
+                expected: json!([
+                    {"name": "known", "filePath": "caller.js", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "caller.js", "startLine": 3}, "line": 4, "column": 4},
+                    ]},
+                ]),
             },
         ],
     })
@@ -6472,10 +7853,6 @@ function caller() {
 // The local run variable points to local_target; its call must resolve there, not to library.work.
 #[tokio::test]
 async fn typescript_binding_import_alias_local_shadow() {
-    let imported = description("work", "library.ts", 1, 1);
-    let shadowed = description("shadowed", "caller.ts", 3, 6);
-    let control = description("control", "caller.ts", 7, 9);
-    let local = description("local_target", "caller.ts", 2, 2);
     check_case(Case {
         name: "typescript_binding_import_alias_local_shadow",
         files: vec![
@@ -6502,22 +7879,42 @@ function control() {
             Query {
                 direction: "in",
                 symbol: "work",
-                expected: vec![relationships(&imported, &[(&control, 8, 4)])],
+                expected: json!([
+                    {"name": "work", "filePath": "library.ts", "startLine": 1,
+                     "edges": [
+                        {"symbol": {"name": "control", "filePath": "caller.ts", "startLine": 7}, "line": 8, "column": 4},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "shadowed",
-                expected: vec![relationships(&shadowed, &[(&local, 5, 4)])],
+                expected: json!([
+                    {"name": "shadowed", "filePath": "caller.ts", "startLine": 3,
+                     "edges": [
+                        {"symbol": {"name": "local_target", "filePath": "caller.ts", "startLine": 2}, "line": 5, "column": 4},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "control",
-                expected: vec![relationships(&control, &[(&imported, 8, 4)])],
+                expected: json!([
+                    {"name": "control", "filePath": "caller.ts", "startLine": 7,
+                     "edges": [
+                        {"symbol": {"name": "work", "filePath": "library.ts", "startLine": 1}, "line": 8, "column": 4},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "local_target",
-                expected: vec![relationships(&local, &[(&shadowed, 5, 4)])],
+                expected: json!([
+                    {"name": "local_target", "filePath": "caller.ts", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "shadowed", "filePath": "caller.ts", "startLine": 3}, "line": 5, "column": 4},
+                    ]},
+                ]),
             },
         ],
     })
@@ -6529,9 +7926,6 @@ function control() {
 // The callback parameter has no known concrete target; its call stays unresolved.
 #[tokio::test]
 async fn typescript_binding_import_alias_parameter_shadow() {
-    let imported = description("work", "library.ts", 1, 1);
-    let shadowed = description("shadowed", "caller.ts", 2, 4);
-    let control = description("control", "caller.ts", 5, 7);
     check_case(Case {
         name: "typescript_binding_import_alias_parameter_shadow",
         files: vec![
@@ -6556,17 +7950,30 @@ function control() {
             Query {
                 direction: "in",
                 symbol: "work",
-                expected: vec![relationships(&imported, &[(&control, 6, 4)])],
+                expected: json!([
+                    {"name": "work", "filePath": "library.ts", "startLine": 1,
+                     "edges": [
+                        {"symbol": {"name": "control", "filePath": "caller.ts", "startLine": 5}, "line": 6, "column": 4},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "shadowed",
-                expected: vec![relationships(&shadowed, &[])],
+                expected: json!([
+                    {"name": "shadowed", "filePath": "caller.ts", "startLine": 2,
+                     "edges": []},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "control",
-                expected: vec![relationships(&control, &[(&imported, 6, 4)])],
+                expected: json!([
+                    {"name": "control", "filePath": "caller.ts", "startLine": 5,
+                     "edges": [
+                        {"symbol": {"name": "work", "filePath": "library.ts", "startLine": 1}, "line": 6, "column": 4},
+                    ]},
+                ]),
             },
         ],
     })
@@ -6579,9 +7986,6 @@ function control() {
 // Keep the known direct call while leaving the unavailable dependency unresolved.
 #[tokio::test]
 async fn typescript_binding_unavailable_import_target() {
-    let decoy = description("work", "decoy.ts", 1, 1);
-    let known = description("known", "caller.ts", 2, 2);
-    let entry = description("caller", "caller.ts", 3, 6);
     check_case(Case {
         name: "typescript_binding_unavailable_import_target",
         files: vec![
@@ -6605,17 +8009,30 @@ function caller() {
             Query {
                 direction: "out",
                 symbol: "caller",
-                expected: vec![relationships(&entry, &[(&known, 4, 4)])],
+                expected: json!([
+                    {"name": "caller", "filePath": "caller.ts", "startLine": 3,
+                     "edges": [
+                        {"symbol": {"name": "known", "filePath": "caller.ts", "startLine": 2}, "line": 4, "column": 4},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "work",
-                expected: vec![relationships(&decoy, &[])],
+                expected: json!([
+                    {"name": "work", "filePath": "decoy.ts", "startLine": 1,
+                     "edges": []},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "known",
-                expected: vec![relationships(&known, &[(&entry, 4, 4)])],
+                expected: json!([
+                    {"name": "known", "filePath": "caller.ts", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "caller.ts", "startLine": 3}, "line": 4, "column": 4},
+                    ]},
+                ]),
             },
         ],
     })
@@ -6628,10 +8045,6 @@ function caller() {
 // The known direct call must still be returned; unresolved calls have no resolved query edges.
 #[tokio::test]
 async fn typescript_binding_unknown_factory_receiver() {
-    let decoy_factory = description("make", "decoy.ts", 1, 1);
-    let decoy_method = description("Local::foo", "decoy.ts", 3, 3);
-    let known = description("known", "caller.ts", 2, 2);
-    let entry = description("caller", "caller.ts", 3, 6);
     check_case(Case {
         name: "typescript_binding_unknown_factory_receiver",
         files: vec![
@@ -6658,22 +8071,38 @@ function caller() {
             Query {
                 direction: "out",
                 symbol: "caller",
-                expected: vec![relationships(&entry, &[(&known, 4, 4)])],
+                expected: json!([
+                    {"name": "caller", "filePath": "caller.ts", "startLine": 3,
+                     "edges": [
+                        {"symbol": {"name": "known", "filePath": "caller.ts", "startLine": 2}, "line": 4, "column": 4},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "make",
-                expected: vec![relationships(&decoy_factory, &[])],
+                expected: json!([
+                    {"name": "make", "filePath": "decoy.ts", "startLine": 1,
+                     "edges": []},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "Local::foo",
-                expected: vec![relationships(&decoy_method, &[])],
+                expected: json!([
+                    {"name": "Local::foo", "filePath": "decoy.ts", "startLine": 3,
+                     "edges": []},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "known",
-                expected: vec![relationships(&known, &[(&entry, 4, 4)])],
+                expected: json!([
+                    {"name": "known", "filePath": "caller.ts", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "caller.ts", "startLine": 3}, "line": 4, "column": 4},
+                    ]},
+                ]),
             },
         ],
     })
@@ -6687,9 +8116,6 @@ function caller() {
 // Reverse queries supplement the upstream incoming/outgoing checks and exclude transitive edges.
 #[tokio::test]
 async fn typescript_upstream_class_expression() {
-    let entry = description("foo", "expression.ts", 1, 3);
-    let target = description("Bar", "expression.ts", 5, 9);
-    let leaf = description("baz", "expression.ts", 11, 12);
     check_case(Case {
         name: "typescript_upstream_class_expression",
         files: vec![SourceFile {
@@ -6712,22 +8138,42 @@ function baz() {
             Query {
                 direction: "in",
                 symbol: "Bar",
-                expected: vec![relationships(&target, &[(&entry, 2, 8)])],
+                expected: json!([
+                    {"name": "Bar", "filePath": "expression.ts", "startLine": 5,
+                     "edges": [
+                        {"symbol": {"name": "foo", "filePath": "expression.ts", "startLine": 1}, "line": 2, "column": 8},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "Bar",
-                expected: vec![relationships(&target, &[(&leaf, 7, 8)])],
+                expected: json!([
+                    {"name": "Bar", "filePath": "expression.ts", "startLine": 5,
+                     "edges": [
+                        {"symbol": {"name": "baz", "filePath": "expression.ts", "startLine": 11}, "line": 7, "column": 8},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "foo",
-                expected: vec![relationships(&entry, &[(&target, 2, 8)])],
+                expected: json!([
+                    {"name": "foo", "filePath": "expression.ts", "startLine": 1,
+                     "edges": [
+                        {"symbol": {"name": "Bar", "filePath": "expression.ts", "startLine": 5}, "line": 2, "column": 8},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "baz",
-                expected: vec![relationships(&leaf, &[(&target, 7, 8)])],
+                expected: json!([
+                    {"name": "baz", "filePath": "expression.ts", "startLine": 11,
+                     "edges": [
+                        {"symbol": {"name": "Bar", "filePath": "expression.ts", "startLine": 5}, "line": 7, "column": 8},
+                    ]},
+                ]),
             },
         ],
     })
@@ -6740,9 +8186,6 @@ function baz() {
 // Preserve class-level ownership of constructor calls and add inverse queries for both edges.
 #[tokio::test]
 async fn typescript_upstream_default_export_class() {
-    let entry = description("foo", "main.ts", 3, 5);
-    let target = description("default", "other.ts", 1, 5);
-    let leaf = description("baz", "other.ts", 7, 8);
     check_case(Case {
         name: "typescript_upstream_default_export_class",
         files: vec![
@@ -6772,22 +8215,42 @@ function baz() {
             Query {
                 direction: "in",
                 symbol: "default",
-                expected: vec![relationships(&target, &[(&entry, 4, 8)])],
+                expected: json!([
+                    {"name": "default", "filePath": "other.ts", "startLine": 1,
+                     "edges": [
+                        {"symbol": {"name": "foo", "filePath": "main.ts", "startLine": 3}, "line": 4, "column": 8},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "default",
-                expected: vec![relationships(&target, &[(&leaf, 3, 8)])],
+                expected: json!([
+                    {"name": "default", "filePath": "other.ts", "startLine": 1,
+                     "edges": [
+                        {"symbol": {"name": "baz", "filePath": "other.ts", "startLine": 7}, "line": 3, "column": 8},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "foo",
-                expected: vec![relationships(&entry, &[(&target, 4, 8)])],
+                expected: json!([
+                    {"name": "foo", "filePath": "main.ts", "startLine": 3,
+                     "edges": [
+                        {"symbol": {"name": "default", "filePath": "other.ts", "startLine": 1}, "line": 4, "column": 8},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "baz",
-                expected: vec![relationships(&leaf, &[(&target, 3, 8)])],
+                expected: json!([
+                    {"name": "baz", "filePath": "other.ts", "startLine": 7,
+                     "edges": [
+                        {"symbol": {"name": "default", "filePath": "other.ts", "startLine": 1}, "line": 3, "column": 8},
+                    ]},
+                ]),
             },
         ],
     })
@@ -6802,9 +8265,6 @@ function baz() {
 // import = require() must reach exported, while baz remains its direct callee, not foo's.
 #[tokio::test]
 async fn typescript_upstream_export_equals() {
-    let entry = description("foo", "main.ts", 3, 5);
-    let target = description("exported", "other.ts", 1, 3);
-    let leaf = description("baz", "other.ts", 5, 6);
     check_case(Case {
         name: "typescript_upstream_export_equals",
         files: vec![
@@ -6832,22 +8292,42 @@ function baz() {
             Query {
                 direction: "in",
                 symbol: "exported",
-                expected: vec![relationships(&target, &[(&entry, 4, 4)])],
+                expected: json!([
+                    {"name": "exported", "filePath": "other.ts", "startLine": 1,
+                     "edges": [
+                        {"symbol": {"name": "foo", "filePath": "main.ts", "startLine": 3}, "line": 4, "column": 4},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "exported",
-                expected: vec![relationships(&target, &[(&leaf, 2, 4)])],
+                expected: json!([
+                    {"name": "exported", "filePath": "other.ts", "startLine": 1,
+                     "edges": [
+                        {"symbol": {"name": "baz", "filePath": "other.ts", "startLine": 5}, "line": 2, "column": 4},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "foo",
-                expected: vec![relationships(&entry, &[(&target, 4, 4)])],
+                expected: json!([
+                    {"name": "foo", "filePath": "main.ts", "startLine": 3,
+                     "edges": [
+                        {"symbol": {"name": "exported", "filePath": "other.ts", "startLine": 1}, "line": 4, "column": 4},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "baz",
-                expected: vec![relationships(&leaf, &[(&target, 2, 4)])],
+                expected: json!([
+                    {"name": "baz", "filePath": "other.ts", "startLine": 5,
+                     "edges": [
+                        {"symbol": {"name": "exported", "filePath": "other.ts", "startLine": 1}, "line": 2, "column": 4},
+                    ]},
+                ]),
             },
         ],
     })
@@ -6861,9 +8341,6 @@ function baz() {
 // The component owns its call to baz, which must not appear as a direct callee of foo.
 #[tokio::test]
 async fn typescript_upstream_jsx() {
-    let entry = description("foo", "main.tsx", 1, 3);
-    let target = description("Bar", "main.tsx", 5, 7);
-    let leaf = description("baz", "main.tsx", 9, 10);
     check_case(Case {
         name: "typescript_upstream_jsx",
         files: vec![SourceFile {
@@ -6884,22 +8361,42 @@ function baz() {
             Query {
                 direction: "in",
                 symbol: "Bar",
-                expected: vec![relationships(&target, &[(&entry, 2, 12)])],
+                expected: json!([
+                    {"name": "Bar", "filePath": "main.tsx", "startLine": 5,
+                     "edges": [
+                        {"symbol": {"name": "foo", "filePath": "main.tsx", "startLine": 1}, "line": 2, "column": 12},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "Bar",
-                expected: vec![relationships(&target, &[(&leaf, 6, 4)])],
+                expected: json!([
+                    {"name": "Bar", "filePath": "main.tsx", "startLine": 5,
+                     "edges": [
+                        {"symbol": {"name": "baz", "filePath": "main.tsx", "startLine": 9}, "line": 6, "column": 4},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "foo",
-                expected: vec![relationships(&entry, &[(&target, 2, 12)])],
+                expected: json!([
+                    {"name": "foo", "filePath": "main.tsx", "startLine": 1,
+                     "edges": [
+                        {"symbol": {"name": "Bar", "filePath": "main.tsx", "startLine": 5}, "line": 2, "column": 12},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "baz",
-                expected: vec![relationships(&leaf, &[(&target, 6, 4)])],
+                expected: json!([
+                    {"name": "baz", "filePath": "main.tsx", "startLine": 9,
+                     "edges": [
+                        {"symbol": {"name": "Bar", "filePath": "main.tsx", "startLine": 5}, "line": 6, "column": 4},
+                    ]},
+                ]),
             },
         ],
     })
@@ -6912,9 +8409,6 @@ function baz() {
 // Calls within the out-of-line bar definition belong to Foo::bar and resolve this against Foo.
 #[tokio::test]
 async fn cpp_class_header_and_implementation() {
-    let bar = description("Foo::bar", "Foo.cc", 3, 5);
-    let baz = description("Foo::baz", "Foo.cc", 7, 7);
-    let entry = description("caller", "caller.cc", 2, 5);
     check_case(Case {
         name: "cpp_class_header_and_implementation",
         files: vec![
@@ -6953,32 +8447,63 @@ void caller(Foo& ref, Foo* ptr) {
             Query {
                 direction: "in",
                 symbol: "bar",
-                expected: vec![relationships(&bar, &[(&entry, 3, 8), (&entry, 4, 9)])],
+                expected: json!([
+                    {"name": "Foo::bar", "filePath": "Foo.cc", "startLine": 3,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "caller.cc", "startLine": 2}, "line": 3, "column": 8},
+                        {"symbol": {"name": "caller", "filePath": "caller.cc", "startLine": 2}, "line": 4, "column": 9},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "Foo::bar",
-                expected: vec![relationships(&bar, &[(&entry, 3, 8), (&entry, 4, 9)])],
+                expected: json!([
+                    {"name": "Foo::bar", "filePath": "Foo.cc", "startLine": 3,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "caller.cc", "startLine": 2}, "line": 3, "column": 8},
+                        {"symbol": {"name": "caller", "filePath": "caller.cc", "startLine": 2}, "line": 4, "column": 9},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "caller",
-                expected: vec![relationships(&entry, &[(&bar, 3, 8), (&bar, 4, 9)])],
+                expected: json!([
+                    {"name": "caller", "filePath": "caller.cc", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "Foo::bar", "filePath": "Foo.cc", "startLine": 3}, "line": 3, "column": 8},
+                        {"symbol": {"name": "Foo::bar", "filePath": "Foo.cc", "startLine": 3}, "line": 4, "column": 9},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "Foo::bar",
-                expected: vec![relationships(&bar, &[(&baz, 4, 10)])],
+                expected: json!([
+                    {"name": "Foo::bar", "filePath": "Foo.cc", "startLine": 3,
+                     "edges": [
+                        {"symbol": {"name": "Foo::baz", "filePath": "Foo.cc", "startLine": 7}, "line": 4, "column": 10},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "baz",
-                expected: vec![relationships(&baz, &[(&bar, 4, 10)])],
+                expected: json!([
+                    {"name": "Foo::baz", "filePath": "Foo.cc", "startLine": 7,
+                     "edges": [
+                        {"symbol": {"name": "Foo::bar", "filePath": "Foo.cc", "startLine": 3}, "line": 4, "column": 10},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "Foo::baz",
-                expected: vec![relationships(&baz, &[])],
+                expected: json!([
+                    {"name": "Foo::baz", "filePath": "Foo.cc", "startLine": 7,
+                     "edges": []},
+                ]),
             },
         ],
     })
@@ -6990,8 +8515,6 @@ void caller(Foo& ref, Foo* ptr) {
 // calls to the same instantiation retain their individual source sites.
 #[tokio::test]
 async fn cpp_template_explicit_arguments() {
-    let target = description("work", "explicit.cc", 1, 1);
-    let entry = description("caller", "explicit.cc", 2, 6);
     check_case(Case {
         name: "cpp_template_explicit_arguments",
         files: vec![SourceFile {
@@ -7008,23 +8531,34 @@ void caller() {
             Query {
                 direction: "in",
                 symbol: "work",
-                expected: vec![relationships(
-                    &target,
-                    &[(&entry, 3, 4), (&entry, 4, 4), (&entry, 5, 4)],
-                )],
+                expected: json!([
+                    {"name": "work", "filePath": "explicit.cc", "startLine": 1,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "explicit.cc", "startLine": 2}, "line": 3, "column": 4},
+                        {"symbol": {"name": "caller", "filePath": "explicit.cc", "startLine": 2}, "line": 4, "column": 4},
+                        {"symbol": {"name": "caller", "filePath": "explicit.cc", "startLine": 2}, "line": 5, "column": 4},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "caller",
-                expected: vec![relationships(
-                    &entry,
-                    &[(&target, 3, 4), (&target, 4, 4), (&target, 5, 4)],
-                )],
+                expected: json!([
+                    {"name": "caller", "filePath": "explicit.cc", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "work", "filePath": "explicit.cc", "startLine": 1}, "line": 3, "column": 4},
+                        {"symbol": {"name": "work", "filePath": "explicit.cc", "startLine": 1}, "line": 4, "column": 4},
+                        {"symbol": {"name": "work", "filePath": "explicit.cc", "startLine": 1}, "line": 5, "column": 4},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "work",
-                expected: vec![relationships(&target, &[])],
+                expected: json!([
+                    {"name": "work", "filePath": "explicit.cc", "startLine": 1,
+                     "edges": []},
+                ]),
             },
         ],
     })
@@ -7036,8 +8570,6 @@ void caller() {
 // parameter and argument types are not additional call targets.
 #[tokio::test]
 async fn cpp_template_deduced_arguments() {
-    let target = description("work", "deduced.cc", 1, 1);
-    let entry = description("caller", "deduced.cc", 2, 6);
     check_case(Case {
         name: "cpp_template_deduced_arguments",
         files: vec![SourceFile {
@@ -7054,23 +8586,34 @@ void caller() {
             Query {
                 direction: "in",
                 symbol: "work",
-                expected: vec![relationships(
-                    &target,
-                    &[(&entry, 3, 4), (&entry, 4, 4), (&entry, 5, 4)],
-                )],
+                expected: json!([
+                    {"name": "work", "filePath": "deduced.cc", "startLine": 1,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "deduced.cc", "startLine": 2}, "line": 3, "column": 4},
+                        {"symbol": {"name": "caller", "filePath": "deduced.cc", "startLine": 2}, "line": 4, "column": 4},
+                        {"symbol": {"name": "caller", "filePath": "deduced.cc", "startLine": 2}, "line": 5, "column": 4},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "caller",
-                expected: vec![relationships(
-                    &entry,
-                    &[(&target, 3, 4), (&target, 4, 4), (&target, 5, 4)],
-                )],
+                expected: json!([
+                    {"name": "caller", "filePath": "deduced.cc", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "work", "filePath": "deduced.cc", "startLine": 1}, "line": 3, "column": 4},
+                        {"symbol": {"name": "work", "filePath": "deduced.cc", "startLine": 1}, "line": 4, "column": 4},
+                        {"symbol": {"name": "work", "filePath": "deduced.cc", "startLine": 1}, "line": 5, "column": 4},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "work",
-                expected: vec![relationships(&target, &[])],
+                expected: json!([
+                    {"name": "work", "filePath": "deduced.cc", "startLine": 1,
+                     "edges": []},
+                ]),
             },
         ],
     })
@@ -7082,9 +8625,6 @@ void caller() {
 // caller's direct callees remain work alone. Dependent lookup/overload selection is outside this case.
 #[tokio::test]
 async fn cpp_template_body_call_ownership() {
-    let helper = description("helper", "body.cc", 1, 1);
-    let target = description("work", "body.cc", 2, 5);
-    let entry = description("caller", "body.cc", 6, 9);
     check_case(Case {
         name: "cpp_template_body_call_ownership",
         files: vec![SourceFile {
@@ -7104,22 +8644,46 @@ void caller() {
             Query {
                 direction: "in",
                 symbol: "work",
-                expected: vec![relationships(&target, &[(&entry, 7, 4), (&entry, 8, 4)])],
+                expected: json!([
+                    {"name": "work", "filePath": "body.cc", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "caller", "filePath": "body.cc", "startLine": 6}, "line": 7, "column": 4},
+                        {"symbol": {"name": "caller", "filePath": "body.cc", "startLine": 6}, "line": 8, "column": 4},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "caller",
-                expected: vec![relationships(&entry, &[(&target, 7, 4), (&target, 8, 4)])],
+                expected: json!([
+                    {"name": "caller", "filePath": "body.cc", "startLine": 6,
+                     "edges": [
+                        {"symbol": {"name": "work", "filePath": "body.cc", "startLine": 2}, "line": 7, "column": 4},
+                        {"symbol": {"name": "work", "filePath": "body.cc", "startLine": 2}, "line": 8, "column": 4},
+                    ]},
+                ]),
             },
             Query {
                 direction: "out",
                 symbol: "work",
-                expected: vec![relationships(&target, &[(&helper, 3, 4), (&helper, 4, 4)])],
+                expected: json!([
+                    {"name": "work", "filePath": "body.cc", "startLine": 2,
+                     "edges": [
+                        {"symbol": {"name": "helper", "filePath": "body.cc", "startLine": 1}, "line": 3, "column": 4},
+                        {"symbol": {"name": "helper", "filePath": "body.cc", "startLine": 1}, "line": 4, "column": 4},
+                    ]},
+                ]),
             },
             Query {
                 direction: "in",
                 symbol: "helper",
-                expected: vec![relationships(&helper, &[(&target, 3, 4), (&target, 4, 4)])],
+                expected: json!([
+                    {"name": "helper", "filePath": "body.cc", "startLine": 1,
+                     "edges": [
+                        {"symbol": {"name": "work", "filePath": "body.cc", "startLine": 2}, "line": 3, "column": 4},
+                        {"symbol": {"name": "work", "filePath": "body.cc", "startLine": 2}, "line": 4, "column": 4},
+                    ]},
+                ]),
             },
         ],
     })
