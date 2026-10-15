@@ -598,7 +598,8 @@ fn fixture(
                 scope: None,
                 signature: None,
                 documentation: None,
-            })),
+        ..Default::default()
+    })),
         },
         vector,
     };

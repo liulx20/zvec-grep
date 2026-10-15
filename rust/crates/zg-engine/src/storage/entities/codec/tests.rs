@@ -125,7 +125,8 @@ fn entity_records_preserve_structured_content_ranges_and_external_metadata() {
             scope: Some("module".into()),
             signature: Some("pub async fn symbol()".into()),
             documentation: Some("documentation".into()),
-        }));
+        ..Default::default()
+    }));
         round_trip(&entity);
         let record: Value =
             serde_json::from_str(&encode_entity(&entity).expect("encode entity")).expect("JSON");

@@ -118,7 +118,8 @@ fn metadata_fragments(
             scope: Some("Garden".into()),
             signature: Some("pub async fn harvest() -> Crop".into()),
             documentation: Some("Produces the seasonal crop.".into()),
-        })),
+        ..Default::default()
+    })),
         fragments: vec![
             EntityFragment {
                 id: FragmentId::new(&id, 0),

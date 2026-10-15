@@ -2,20 +2,33 @@
 
 mod entity;
 mod glob;
+mod graph;
 mod metadata;
 pub(crate) mod model;
 mod source;
 mod workspace;
 
 // Entities.
-pub(crate) use entity::{Entity, EntityFragment, EntityId, FragmentId};
+pub(crate) use entity::{Entity, EntityFragment, EntityId, FragmentId, validate_entities};
 
 // Glob rules.
 pub use glob::GlobRule;
 
 // Metadata.
 pub(crate) use metadata::IndexField;
+pub use metadata::Language;
 pub use metadata::{CodeMetadata, EntityMetadata, MarkdownMetadata, SymbolType};
+// Visibility has no consumers yet.
+#[allow(unused_imports)]
+pub use metadata::Visibility;
+
+// Graph extraction contracts. The walk-time collectors and the persistence
+// layer are still pending, so most types have no consumers yet.
+#[allow(unused_imports)]
+pub(crate) use graph::{
+    EdgeProvenance, FileEdge, FileGraphNode, FileGraphResult, GraphEdgeKind, GraphRefKind,
+    PendingRef, PendingRefStatus,
+};
 
 // Models.
 pub(crate) use model::{EmbeddingModelInfo, Metric};
@@ -27,6 +40,7 @@ pub(crate) use source::{
     TextRange,
 };
 pub use source::{ContentKind, FileCategory, FileFormat};
+pub(crate) use source::{formats_for_path, reference_compatible_with};
 
 // Workspaces.
 pub use workspace::ScanRules;

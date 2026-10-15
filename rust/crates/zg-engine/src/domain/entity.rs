@@ -1,6 +1,8 @@
 use crate::{EngineError, EngineResult};
 
-use super::{Content, EntityMetadata, FileId, Range};
+use std::collections::HashSet;
+
+use super::{Content, EntityMetadata, FileId, Range, TextRange};
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(crate) struct EntityId(String);
@@ -76,6 +78,16 @@ impl Entity {
         }
         Ok(())
     }
+
+    fn text_fragment_source_range(&self, local: TextRange) -> EngineResult<Range> {
+        match self.source_range {
+            Range::Text(origin) => local.within(origin).map(Range::Text),
+            Range::Full => Ok(Range::Text(local)),
+            Range::Byte(_) => Err(EngineError::invalid_argument(
+                "fragment content coordinates cannot be mapped to this entity source",
+            )),
+        }
+    }
 }
 
 fn validate_fragment_range(content: &Content, range: Range) -> EngineResult<()> {
@@ -110,4 +122,42 @@ fn content_has_value(content: &Content) -> bool {
             .iter()
             .any(|cell| cell.contents.iter().any(content_has_value)),
     }
+}
+
+/// Checks canonical identities and fragment ranges for one complete source file.
+pub(crate) fn validate_entities(file_id: FileId, entities: &[Entity]) -> EngineResult<()> {
+    let mut entity_ids = HashSet::new();
+    let mut fragment_ids = HashSet::new();
+    for entity in entities {
+        if entity.file_id != file_id {
+            return Err(EngineError::invalid_argument(
+                "entity belongs to a different source file",
+            ));
+        }
+        if !entity_ids.insert(&entity.id) {
+            return Err(EngineError::invalid_argument("duplicate entity id"));
+        }
+        entity.source_range.validate()?;
+        if !content_has_value(&entity.content) || entity.fragments.is_empty() {
+            return Err(EngineError::invalid_argument(
+                "entity requires content and at least one fragment",
+            ));
+        }
+        // Build line starts once per entity so validating every fragment stays linear
+        // in the content size, rather than rescanning each fragment's prefix.
+        let text_coordinates = match &entity.content {
+            Content::Text(text) => Some((text.as_str(), crate::utils::line_byte_offsets(text))),
+            _ => None,
+        };
+        for fragment in &entity.fragments {
+            if !fragment_ids.insert(&fragment.id) {
+                return Err(EngineError::invalid_argument("duplicate fragment id"));
+            }
+            fragment.range.validate_content(&entity.content)?;
+            if let (Range::Byte(range), Some((text, lines))) = (fragment.range, &text_coordinates) {
+                entity.text_fragment_source_range(range.text_range(text, lines)?)?;
+            }
+        }
+    }
+    Ok(())
 }

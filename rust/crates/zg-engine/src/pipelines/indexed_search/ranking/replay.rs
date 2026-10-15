@@ -145,7 +145,8 @@ fn snapshot_candidates(case: &Case) -> Vec<SearchHit> {
                 scope: candidate.scope.clone(),
                 signature: None,
                 documentation: None,
-            });
+        ..Default::default()
+    });
             let mut result = hit(
                 &i.to_string(),
                 file_id,

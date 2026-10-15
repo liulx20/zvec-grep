@@ -1071,7 +1071,8 @@ mod tests {
                     scope: None,
                     signature: None,
                     documentation: None,
-                },
+        ..Default::default()
+    },
             ));
         }
         let mut storage = pushdown_storage();

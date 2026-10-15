@@ -12,5 +12,6 @@ pub(crate) use content::{Content, ImageContent, TableCell, TableCellRole, TableC
 pub(crate) use directory::{DirectoryId, DirectoryRecord};
 pub(crate) use file::{FileId, FileIndexStatus, FileRecord, FileSnapshot};
 pub use format::{FileCategory, FileFormat};
+pub(crate) use format::{formats_for_path, reference_compatible_with};
 pub(crate) use path::SourcePath;
 pub(crate) use range::{ByteRange, Range, TextRange};

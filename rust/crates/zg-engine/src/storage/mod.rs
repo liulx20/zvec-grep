@@ -1,5 +1,6 @@
 //! Persistent index tables and their coordinated lifecycle.
 mod directories;
+pub(crate) mod graph;
 mod entities;
 mod files;
 mod fragments;

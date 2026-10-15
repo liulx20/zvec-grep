@@ -2,6 +2,8 @@
 
 use crate::domain::{Content, EntityMetadata, FileFormat, ImageContent, Range, SourcePath};
 
+use super::graph::PartitionedGraph;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct TextSource {
     pub relative_path: SourcePath,
@@ -58,6 +60,17 @@ pub(crate) struct ExtractedEntity {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ExtractedEntityFragment {
     pub range: Range,
+}
+
+/// Per-source extraction result: search fragments plus an optional code graph.
+///
+/// The graph is produced by the code path once the walk-time edge collection
+/// and file-local partition are implemented; every other source kind returns
+/// `None`.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct IndexingExtractionOutput {
+    pub fragments: Vec<ExtractedEntity>,
+    pub graph: Option<PartitionedGraph>,
 }
 
 #[cfg(test)]

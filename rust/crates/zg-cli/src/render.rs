@@ -1062,6 +1062,7 @@ mod output_tests {
                 scope: Some("app".into()),
                 signature: None,
                 documentation: None,
+                ..Default::default()
             }));
             let mut buffer = Vec::new();
             write_item_preview(&mut buffer, &item, OutputOptions::default())

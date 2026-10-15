@@ -2,6 +2,7 @@
 
 mod chunking;
 mod code;
+mod graph;
 mod image;
 mod markdown;
 mod service;
@@ -15,7 +16,10 @@ pub(crate) use spi::{ImageSource, Source, SourceKind, TextSource};
 pub(crate) use spi::ChunkOptions;
 
 // Indexing output.
-pub(crate) use spi::{ExtractedEntity, ExtractedEntityFragment};
+pub(crate) use spi::{ExtractedEntity, ExtractedEntityFragment, IndexingExtractionOutput};
+
+// Code-graph walk output.
+pub(crate) use graph::{FILE_SCOPE_INDEX, PartitionedGraph};
 
 use crate::{
     EngineError,
@@ -42,7 +46,7 @@ pub(crate) fn extract<'source>(
 pub(crate) fn extract_for_indexing<'source>(
     source: impl Into<Source<'source>>,
     options: ChunkOptions,
-) -> Result<Vec<ExtractedEntity>, EngineError> {
+) -> Result<IndexingExtractionOutput, EngineError> {
     service::extract_for_indexing(source, options)
 }
 
