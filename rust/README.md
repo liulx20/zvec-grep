@@ -150,6 +150,18 @@ piped output is compact. `--compact` forces compact output, and
 `--preview=full` explicitly requests full previews even in compact output.
 The former `--human` option is no longer accepted.
 
+`zg --callers <symbol> [root] --limit 20` and `zg --callees <symbol> [root] --limit 20`
+read persisted call edges from an existing graph index. The equivalent engine
+methods are `ZvecGrep::callers` and `ZvecGrep::callees`, and both MCP toolsets expose
+`callers` and `callees`. Queries accept scope-qualified names such as
+`Class::method`, keep same-name definitions separate, and return compact JSON
+with a per-match `totalEdges` before truncation. Call-site line/column coordinates
+refer to the caller file. These reads do not load models or refresh/build indexes.
+Unresolved references are excluded, so an empty result does not prove absence.
+Indexing persists relationships in `graph/graph.sqlite` under the active index
+generation. An older index without graph data must be rebuilt explicitly before
+relationship queries are available.
+
 This version indexes text with one embedding model per workspace. Choose it with
 `zg --index --embedding <model>` or set a default with
 `zg --config model set <model> --default`. Code, documents and structured text use
