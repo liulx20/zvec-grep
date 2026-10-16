@@ -274,21 +274,6 @@ impl WorkspaceIndexService {
             storage_path: manifest.storage_home(),
             embeddings: models.iter().map(|model| model.info().clone()).collect(),
         })?;
-        // The graph database lives in its own directory beside the zvec
-        // collections and shares their generation lifecycle: build generations
-        // carry it, resets and generation drops remove it. The directory name
-        // stays domain-neutral ("graph", not "code-graph") so non-code graphs
-        // can share the same layout. Opening fails loudly so schema rejects
-        // surface instead of silently skipping graph persistence.
-        let graph = std::sync::Mutex::new(
-            crate::storage::graph::SqliteGraphStorage::open(
-                &manifest.storage_home().join("graph").join("graph.sqlite"),
-                crate::storage::graph::OpenMode::ReadWrite,
-            )
-            .map_err(|error| {
-                EngineError::storage_failure(format!("open graph database: {error}"))
-            })?,
-        );
         let writer = self.writers.register(
             crate::pipelines::indexed_search::writer::WriterSession::new(
                 storage,
@@ -307,7 +292,6 @@ impl WorkspaceIndexService {
         let result = index_workspace(&IndexingContext {
             workspace_index: &manifest.workspace,
             storage: &writer.session.storage,
-            graph: Some(&graph),
             scanner: &self.scanner,
             embedding_models: &embedding_models,
             embedding_concurrency: options.embedding_concurrency,
@@ -316,16 +300,13 @@ impl WorkspaceIndexService {
             changes: &options.changes,
         })
         .await;
-        // Cross-file resolution runs once per pass while the graph handle is
-        // still open. A failed sweep degrades quietly: every reference stays
-        // pending and the next pass retries, so resolution must not fail an
-        // index whose zvec writes already succeeded.
-        if result.is_ok() {
-            let mut guard = graph
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let _ = super::graph_resolver::resolve_pending(&mut guard);
-        }
+        let result = result.and_then(|indexed| {
+            writer
+                .session
+                .storage
+                .with_resolution_session(super::graph_resolver::resolve_pending)?;
+            Ok(indexed)
+        });
         #[cfg(test)]
         let result = result.and_then(|indexed| {
             // Exercise service cleanup when the indexing pipeline reports a failed checkpoint.

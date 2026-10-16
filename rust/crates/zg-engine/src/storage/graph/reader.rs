@@ -50,12 +50,13 @@ impl SqliteGraphStorage {
     }
 
     /// Entity IDs owned by a file in the last persisted snapshot, recovered
-    /// from its `contains` edges. The coordinator reads this right before
-    /// `write_file_graph` so stale inbound references can be invalidated.
+    /// from its `contains` edges. This is not the complete canonical ID set;
+    /// update coordination must read IDs from zvec instead.
     /// Returns an empty set for files that were never persisted.
     ///
     /// # Errors
     /// Propagates SQLite errors.
+    #[cfg(test)]
     pub(crate) fn file_entity_ids(&self, file_id: u32) -> Result<Vec<String>> {
         let mut statement = self.connection.prepare(
             "SELECT DISTINCT target FROM edges

@@ -2,24 +2,24 @@
 //!
 //! The resolver consumes the graph storage's own pending queue, name index,
 //! and file-path index, so it needs no extraction state:
-//! [`SqliteGraphStorage::list_pending_refs`] pages the backlog, relative
-//! import specifiers resolve through [`SqliteGraphStorage::file_id_by_path`],
-//! [`SqliteGraphStorage::lookup_by_name`] narrows name candidates, ambiguous
-//! bare names resolve through [`SqliteGraphStorage::imported_file_ids`] when
+//! [`ResolutionSession::list_pending_refs`] pages the backlog, relative
+//! import specifiers resolve through [`ResolutionSession::file_id_by_path`],
+//! [`ResolutionSession::lookup_candidates`] narrows name candidates, ambiguous
+//! bare names resolve through [`ResolutionSession::imported_file_ids`] when
 //! the file's imports pin them to one module, `self`/`this` receiver calls
 //! bind to the one same-file declaration of the invoked member, qualified
 //! `Class::method` receivers bind to the entity whose `qualified_name`
 //! spells the same path, export/arity evidence narrows the remaining
 //! ambiguities, external import specifiers terminate as failed, and
-//! [`SqliteGraphStorage::apply_resolutions`] writes each batch atomically.
+//! [`ResolutionSession::apply_resolutions`] writes each batch atomically.
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 
 use crate::domain::{FileFormat, formats_for_path, reference_compatible_with};
+use crate::storage::ResolutionSession;
 use crate::storage::graph::{
-    EdgeKind, NameIndexEntry, PendingRef, Provenance, Resolution, SqliteGraphStorage,
-    StoredPendingRef,
+    EdgeKind, NameIndexEntry, PendingRef, Provenance, Resolution, StoredPendingRef,
 };
 
 /// Outcome of one resolution sweep.
@@ -68,12 +68,11 @@ pub(super) struct ResolutionSweep {
 /// storage lock, matching the serialization contract of `apply_resolutions`.
 ///
 /// # Errors
-/// Propagates graph storage failures; nothing is written unless the final
-/// batch applies, so a failed sweep leaves every reference pending for the
-/// next pass to retry.
+/// Propagates storage failures. Completed writeback batches remain committed;
+/// references not yet written stay pending for a later sweep.
 pub(super) fn resolve_pending(
-    graph: &mut SqliteGraphStorage,
-) -> crate::storage::graph::Result<ResolutionSweep> {
+    graph: &mut dyn ResolutionSession,
+) -> crate::EngineResult<ResolutionSweep> {
     let mut sweep = ResolutionSweep::default();
     let mut resolutions = Vec::new();
     let mut failures: Vec<i64> = Vec::new();
@@ -114,7 +113,11 @@ pub(super) fn resolve_pending(
                 continue;
             }
             let hits = {
-                let raw = graph.lookup_by_name(&stored.reference.name_tail)?;
+                let Some(raw) = graph.lookup_candidates(&stored.reference.name_tail)? else {
+                    // Hidden candidates must not turn an ambiguous name into
+                    // a seemingly unique match against an unfinished snapshot.
+                    continue;
+                };
                 filter_compatible_hits(graph, stored, raw, &mut candidate_paths)?
             };
             if let Some(resolution) = resolve_receiver_local(stored, &hits) {
@@ -184,11 +187,11 @@ pub(super) fn resolve_pending(
 /// # Errors
 /// Propagates graph storage failures.
 fn filter_compatible_hits(
-    graph: &SqliteGraphStorage,
+    graph: &dyn ResolutionSession,
     stored: &StoredPendingRef,
     hits: Vec<NameIndexEntry>,
     candidate_paths: &mut HashMap<u32, Option<String>>,
-) -> crate::storage::graph::Result<Vec<NameIndexEntry>> {
+) -> crate::EngineResult<Vec<NameIndexEntry>> {
     let mut filtered = Vec::with_capacity(hits.len());
     for hit in hits {
         let path = match candidate_paths.entry(hit.file_id) {
@@ -220,10 +223,10 @@ fn filter_compatible_hits(
 /// # Errors
 /// Propagates graph storage failures; an unmatched specifier is `None`.
 fn resolve_import(
-    graph: &SqliteGraphStorage,
+    graph: &dyn ResolutionSession,
     stored: &StoredPendingRef,
     importing_paths: &mut HashMap<u32, Option<String>>,
-) -> crate::storage::graph::Result<Option<Resolution>> {
+) -> crate::EngineResult<Option<Resolution>> {
     let reference = &stored.reference;
     if reference.reference_kind != EdgeKind::Imports
         || !(reference.reference_name.starts_with("./")
@@ -263,11 +266,11 @@ fn resolve_import(
 /// # Errors
 /// Propagates graph storage failures; an unresolvable reference is `None`.
 fn resolve_import_bound(
-    graph: &SqliteGraphStorage,
+    graph: &dyn ResolutionSession,
     stored: &StoredPendingRef,
     hits: &[NameIndexEntry],
     importing_files: &mut HashMap<u32, Vec<u32>>,
-) -> crate::storage::graph::Result<Option<Resolution>> {
+) -> crate::EngineResult<Option<Resolution>> {
     let reference = &stored.reference;
     if reference.receiver_name.is_some()
         || !matches!(
@@ -376,10 +379,10 @@ fn resolve_qualified_name(
 /// # Errors
 /// Propagates graph storage failures; every other reference is `false`.
 fn is_unresolvable_import(
-    graph: &SqliteGraphStorage,
+    graph: &dyn ResolutionSession,
     reference: &PendingRef,
     module_paths: &mut HashMap<(String, String), bool>,
-) -> crate::storage::graph::Result<bool> {
+) -> crate::EngineResult<bool> {
     if reference.reference_kind != EdgeKind::Imports {
         return Ok(false);
     }
@@ -543,7 +546,62 @@ fn extensions_for(language: &str) -> &'static [&'static str] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::graph::{EntityRecord, FileGraph};
+    use crate::storage::graph::{EntityRecord, FileGraph, SqliteGraphStorage};
+
+    // Algorithm fixtures use only the restricted interface. Canonical visibility
+    // and writeback validation are exercised by IndexStore session tests.
+    impl ResolutionSession for SqliteGraphStorage {
+        fn list_pending_refs(
+            &mut self,
+            limit: usize,
+            cursor: i64,
+        ) -> crate::EngineResult<crate::storage::graph::PendingRefPage> {
+            SqliteGraphStorage::list_pending_refs(self, limit, cursor)
+                .map_err(|error| crate::EngineError::storage_failure(error.to_string()))
+        }
+        fn file_path(&self, file_id: u32) -> crate::EngineResult<Option<String>> {
+            SqliteGraphStorage::file_path(self, file_id)
+                .map_err(|error| crate::EngineError::storage_failure(error.to_string()))
+        }
+        fn file_id_by_path(&self, path: &str) -> crate::EngineResult<Option<u32>> {
+            SqliteGraphStorage::file_id_by_path(self, path)
+                .map_err(|error| crate::EngineError::storage_failure(error.to_string()))
+        }
+        fn path_has_module(&self, name: &str, extensions: &[&str]) -> crate::EngineResult<bool> {
+            SqliteGraphStorage::path_has_module(self, name, extensions)
+                .map_err(|error| crate::EngineError::storage_failure(error.to_string()))
+        }
+        fn imported_file_ids(&self, file_id: u32) -> crate::EngineResult<Vec<u32>> {
+            SqliteGraphStorage::imported_file_ids(self, file_id)
+                .map_err(|error| crate::EngineError::storage_failure(error.to_string()))
+        }
+        fn apply_resolutions(
+            &mut self,
+            resolutions: &[Resolution],
+        ) -> crate::EngineResult<crate::storage::graph::ResolutionStats> {
+            SqliteGraphStorage::apply_resolutions(self, resolutions)
+                .map_err(|error| crate::EngineError::storage_failure(error.to_string()))
+        }
+        fn apply_failures(&mut self, ids: &[i64]) -> crate::EngineResult<usize> {
+            SqliteGraphStorage::apply_failures(self, ids)
+                .map_err(|error| crate::EngineError::storage_failure(error.to_string()))
+        }
+        fn record_candidates(
+            &mut self,
+            entries: &[(i64, Vec<String>)],
+        ) -> crate::EngineResult<usize> {
+            SqliteGraphStorage::record_candidates(self, entries)
+                .map_err(|error| crate::EngineError::storage_failure(error.to_string()))
+        }
+        fn lookup_candidates(
+            &self,
+            name: &str,
+        ) -> crate::EngineResult<Option<Vec<NameIndexEntry>>> {
+            self.lookup_by_name(name)
+                .map(Some)
+                .map_err(|error| crate::EngineError::storage_failure(error.to_string()))
+        }
+    }
 
     fn record(entity_id: &str, name: &str) -> EntityRecord {
         EntityRecord {

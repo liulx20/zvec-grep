@@ -121,10 +121,6 @@ impl IndexEmbeddingRuntime for ModelRuntimeLease {
 pub(crate) struct IndexingContext<'context> {
     pub workspace_index: &'context Workspace,
     pub storage: &'context dyn IndexStorage,
-    /// Graph persistence handle opened alongside the zvec storage; `None`
-    /// skips graph writes (tests, graph-less callers). Writers take `&mut`,
-    /// so the handle is shared through a mutex.
-    pub graph: Option<&'context Mutex<crate::storage::graph::SqliteGraphStorage>>,
     pub scanner: &'context dyn WorkspaceScannerPort,
     pub embedding_models: &'context [&'context dyn IndexEmbeddingRuntime],
     pub embedding_concurrency: Option<usize>,
@@ -312,8 +308,6 @@ struct IndexWriteStats {
     entities_created: usize,
     failed_files: Vec<PathBuf>,
     failed_reasons: Vec<String>,
-    /// Graph writes that degraded after a successful zvec commit.
-    graph_failures: usize,
 }
 
 #[derive(Default)]
@@ -494,26 +488,6 @@ fn delete_stale_files(
                 file.relative_path.display()
             ))
         })?;
-        if let Some(graph) = context.graph {
-            // Fails loudly: zvec rows are already gone, so a silent leftover
-            // would strand pending references on deleted files. Deletion is
-            // idempotent, so a retry pass converges.
-            let mut graph = lock_graph(graph);
-            let old_entity_ids = graph.file_entity_ids(file.id.get()).map_err(|error| {
-                EngineError::storage_failure(format!(
-                    "read stale graph for {}: {error}",
-                    file.relative_path.display()
-                ))
-            })?;
-            graph
-                .delete_file_graph(file.id.get(), &old_entity_ids)
-                .map_err(|error| {
-                    EngineError::storage_failure(format!(
-                        "delete stale graph for {}: {error}",
-                        file.relative_path.display()
-                    ))
-                })?;
-        }
     }
     Ok(())
 }
@@ -736,7 +710,7 @@ async fn index_candidates(
 
         if prepared.fragments.is_empty() {
             let commit_started = Instant::now();
-            commit_file(context.storage, context.graph, prepared, Vec::new(), &mut stats)?;
+            commit_file(context.storage, prepared, Vec::new(), &mut stats)?;
             timings.record("index_commit", commit_started.elapsed(), 1);
             report_indexing(context, &stats, diff, progress_base, None, None);
             continue;
@@ -897,7 +871,7 @@ fn apply_embedding_files(
             EmbeddedFileOutcome::Success { file, vectors } => {
                 let path = file.file.relative_path.clone();
                 let commit_started = Instant::now();
-                commit_file(context.storage, context.graph, file, vectors, stats)?;
+                commit_file(context.storage, file, vectors, stats)?;
                 timings.record("index_commit", commit_started.elapsed(), 1);
                 report_indexing(
                     context,
@@ -932,7 +906,6 @@ fn apply_embedding_files(
 
 fn commit_file(
     storage: &dyn IndexStorage,
-    graph: Option<&Mutex<crate::storage::graph::SqliteGraphStorage>>,
     file: PreparedFile,
     vectors: Vec<Vec<f32>>,
     stats: &mut IndexWriteStats,
@@ -957,53 +930,15 @@ fn commit_file(
             vector,
         })
         .collect::<Vec<_>>();
-    storage.replace_file(&file.file, &file.entities, &entries)?;
-    // zvec succeeded, so a graph failure degrades instead of failing the
-    // commit; the snapshot can be rebuilt by reindexing the file.
-    if let Some(graph) = graph {
-        if let Err(_error) = persist_file_graph(
-            graph,
-            file.file.id,
-            &file.file.relative_path,
-            file.graph.as_ref(),
-        ) {
-            stats.graph_failures += 1;
-        }
-    }
+    storage.replace_file(
+        &file.file,
+        &file.entities,
+        &entries,
+        &file.graph.unwrap_or_default(),
+    )?;
     stats.files_indexed += 1;
     stats.entities_created += public_entities;
     Ok(())
-}
-
-/// Writes or clears one file's graph rows. `write_file_graph` recovers the
-/// previous entity IDs from the graph itself; both stores were mutated under
-/// the same workspace write lock, so the recovered set matches zvec unless an
-/// earlier graph write degraded. `relative_path` anchors import resolution;
-/// it is normalized to forward slashes on every platform.
-///
-/// # Errors
-/// Propagates graph persistence failures for the caller to degrade on.
-fn persist_file_graph(
-    graph: &Mutex<crate::storage::graph::SqliteGraphStorage>,
-    file_id: FileId,
-    relative_path: &std::path::Path,
-    snapshot: Option<&crate::storage::graph::FileGraph>,
-) -> Result<(), crate::storage::graph::Error> {
-    let mut graph = lock_graph(graph);
-    let old_entity_ids = graph.file_entity_ids(file_id.get())?;
-    let relative_path = relative_path.to_string_lossy().replace('\\', "/");
-    match snapshot {
-        Some(snapshot) => {
-            graph.write_file_graph(file_id.get(), &relative_path, snapshot, &old_entity_ids)
-        }
-        None => graph.delete_file_graph(file_id.get(), &old_entity_ids),
-    }
-}
-
-fn lock_graph(
-    graph: &Mutex<crate::storage::graph::SqliteGraphStorage>,
-) -> MutexGuard<'_, crate::storage::graph::SqliteGraphStorage> {
-    graph.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 fn graph_language(formats: &[FileFormat]) -> FileFormat {
@@ -2416,8 +2351,9 @@ mod tests {
             max_chunk_chars: Some(64),
             chunk_overlap_chars: Some(0),
         };
-        let mut extracted =
-            extract_for_indexing(&source, options).expect("extract markdown").fragments;
+        let mut extracted = extract_for_indexing(&source, options)
+            .expect("extract markdown")
+            .fragments;
         let file_id = FileId::new(42);
         let entities = bind_entities(file_id, extracted.clone()).expect("bind entities");
         extracted.reverse();
@@ -2529,6 +2465,7 @@ mod tests {
         }
         let storage = MemoryStorage::default();
         let prepared = PreparedFile {
+            graph: None,
             file: FileRecord {
                 id: file_id,
                 relative_path: SourcePath::new("file.md").expect("path"),
@@ -2541,12 +2478,10 @@ mod tests {
             },
             entities,
             fragments,
-            graph: None,
         };
         let vectors = vec![vec![1.0, 0.0], vec![0.0, 1.0]];
         commit_file(
             &storage,
-            None,
             prepared,
             vectors.clone(),
             &mut IndexWriteStats::default(),
@@ -2607,6 +2542,7 @@ mod tests {
             file: &FileRecord,
             entities: &[Entity],
             entries: &[IndexedFragment],
+            _graph: &crate::storage::graph::FileGraph,
         ) -> EngineResult<()> {
             if self
                 .fail_replacements_once
@@ -3038,7 +2974,6 @@ mod tests {
             let error = index_workspace(&IndexingContext {
                 workspace_index: &workspace,
                 storage: &storage,
-                graph: None,
                 scanner: &scanner,
                 embedding_models: &[&model],
                 embedding_concurrency: None,
@@ -3079,7 +3014,6 @@ mod tests {
         let result = index_workspace(&IndexingContext {
             workspace_index: &workspace,
             storage: &storage,
-                graph: None,
             scanner: &scanner,
             embedding_models: &[&model],
             embedding_concurrency: None,
@@ -3120,7 +3054,6 @@ mod tests {
         let context = IndexingContext {
             workspace_index: &workspace,
             storage: &storage,
-                graph: None,
             scanner: &scanner,
             embedding_models: &[&model],
             embedding_concurrency: None,
@@ -3166,7 +3099,6 @@ mod tests {
         let error = index_workspace(&IndexingContext {
             workspace_index: &workspace,
             storage: &storage,
-                graph: None,
             scanner: &scanner,
             embedding_models: &[&model],
             embedding_concurrency: None,
@@ -3202,7 +3134,6 @@ mod tests {
         let context = IndexingContext {
             workspace_index: &workspace,
             storage: &storage,
-                graph: None,
             scanner: &scanner,
             embedding_models: &[&model],
             embedding_concurrency: Some(2),
@@ -3297,7 +3228,6 @@ mod tests {
         index_workspace(&IndexingContext {
             workspace_index: &workspace,
             storage: &storage,
-                graph: None,
             scanner: &scanner,
             embedding_models: &[&model],
             embedding_concurrency: None,
@@ -3332,7 +3262,6 @@ mod tests {
         let result = index_workspace(&IndexingContext {
             workspace_index: &workspace,
             storage: &storage,
-                graph: None,
             scanner: &scanner,
             embedding_models: &[&model],
             embedding_concurrency: None,
@@ -3372,7 +3301,6 @@ mod tests {
         let error = index_workspace(&IndexingContext {
             workspace_index: &workspace,
             storage: &storage,
-                graph: None,
             scanner: &scanner,
             embedding_models: &[&model],
             embedding_concurrency: None,
@@ -3425,7 +3353,6 @@ mod tests {
             let context = IndexingContext {
                 workspace_index: &workspace,
                 storage: &storage,
-                graph: None,
                 scanner: &scanner,
                 embedding_models: &models,
                 embedding_concurrency: None,
@@ -3460,7 +3387,6 @@ mod tests {
         let context = IndexingContext {
             workspace_index: &workspace,
             storage: &storage,
-                graph: None,
             scanner: &scanner,
             embedding_models: &[&model],
             embedding_concurrency: None,
@@ -3583,7 +3509,6 @@ mod tests {
         let context = IndexingContext {
             workspace_index: &workspace,
             storage: &storage,
-                graph: None,
             scanner: &scanner,
             embedding_models: &[&model],
             embedding_concurrency: None,
@@ -3648,7 +3573,6 @@ mod tests {
         let context = IndexingContext {
             workspace_index: &workspace,
             storage: &storage,
-                graph: None,
             scanner: &scanner,
             embedding_models: &[&model],
             embedding_concurrency: Some(2),
@@ -3705,7 +3629,6 @@ mod tests {
         index_workspace(&IndexingContext {
             workspace_index: &workspace,
             storage: &storage,
-                graph: None,
             scanner: &scanner,
             embedding_models: &[&model],
             embedding_concurrency: Some(2),
@@ -3722,7 +3645,6 @@ mod tests {
         let result = index_workspace(&IndexingContext {
             workspace_index: &workspace,
             storage: &storage,
-                graph: None,
             scanner: &scanner,
             embedding_models: &[&model],
             embedding_concurrency: Some(2),
@@ -3777,7 +3699,6 @@ mod tests {
         index_workspace(&IndexingContext {
             workspace_index: &workspace,
             storage: &storage,
-                graph: None,
             scanner: &scanner,
             embedding_models: &[&model],
             embedding_concurrency: None,
@@ -3818,7 +3739,6 @@ mod tests {
         let result = index_workspace(&IndexingContext {
             workspace_index: &workspace,
             storage: &storage,
-                graph: None,
             scanner: &scanner,
             embedding_models: &[&model],
             embedding_concurrency: None,
@@ -3910,7 +3830,6 @@ mod tests {
         let result = index_workspace(&IndexingContext {
             workspace_index: &workspace,
             storage: &storage,
-                graph: None,
             scanner: &scanner,
             embedding_models: &[&model],
             embedding_concurrency: Some(1),
