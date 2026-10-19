@@ -1,6 +1,7 @@
 //! SQLite persistence for directed code relationships and pending references.
 //!
-//! Nodes and file metadata remain in the entity store. Each file replacement is
+//! Canonical nodes and file metadata remain in zvec; SQLite holds relationships,
+//! a derived name index, and resolver candidate evidence. Each file replacement is
 //! atomic within SQLite; the indexing coordinator owns consistency with zvec.
 //! Callers must serialize reference reads, resolution and writeback with file updates.
 //! This module does not resolve names, run FTS, or manage workspace locks.

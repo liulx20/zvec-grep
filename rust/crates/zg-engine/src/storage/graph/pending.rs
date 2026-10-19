@@ -35,6 +35,14 @@ impl SqliteGraphStorage {
         } else {
             None
         };
+        let mut candidates = self.connection.prepare(
+            "SELECT target_id FROM reference_candidates WHERE ref_id = ? ORDER BY target_id",
+        )?;
+        for reference in &mut refs {
+            reference.candidates = candidates
+                .query_map([reference.id], |row| row.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+        }
         Ok(PendingRefPage { refs, next_cursor })
     }
 
@@ -75,6 +83,10 @@ impl SqliteGraphStorage {
                 if changed == 0 {
                     stats.stale += 1;
                 } else {
+                    tx.execute(
+                        "DELETE FROM reference_candidates WHERE ref_id = ?",
+                        [resolution.ref_id],
+                    )?;
                     stats.resolved += 1;
                 }
             }
@@ -87,6 +99,7 @@ impl SqliteGraphStorage {
 fn ref_from_row(row: &Row<'_>) -> rusqlite::Result<StoredPendingRef> {
     Ok(StoredPendingRef {
         id: row.get(0)?,
+        candidates: Vec::new(),
         file_id: row.get(1)?,
         reference: PendingRef {
             owner_id: row.get(2)?,
@@ -100,4 +113,67 @@ fn ref_from_row(row: &Row<'_>) -> rusqlite::Result<StoredPendingRef> {
             metadata: decode_metadata(&row.get::<_, String>(9)?)?,
         },
     })
+}
+
+impl SqliteGraphStorage {
+    /// Records ambiguity without changing the public extraction reference type.
+    pub(crate) fn record_candidates(&mut self, entries: &[(i64, Vec<String>)]) -> Result<usize> {
+        for (id, candidates) in entries {
+            if *id < 1 || candidates.is_empty() {
+                return Err(Error::InvalidInput(
+                    "candidate sets require a positive ref ID and candidates",
+                ));
+            }
+            for candidate in candidates {
+                nonempty(candidate)?;
+            }
+        }
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut recorded = 0;
+        for (id, candidates) in entries {
+            let pending: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM edges WHERE id = ? AND status = 'pending')",
+                [id],
+                |row| row.get(0),
+            )?;
+            if !pending {
+                continue;
+            }
+            tx.execute("DELETE FROM reference_candidates WHERE ref_id = ?", [id])?;
+            for candidate in candidates {
+                tx.execute(
+                    "INSERT OR IGNORE INTO reference_candidates (ref_id, target_id) VALUES (?, ?)",
+                    params![id, candidate],
+                )?;
+            }
+            recorded += 1;
+        }
+        tx.commit()?;
+        Ok(recorded)
+    }
+
+    /// Failed references are retried when their owning file is rewritten.
+    pub(crate) fn apply_failures(&mut self, ids: &[i64]) -> Result<usize> {
+        if ids.iter().any(|id| *id < 1) {
+            return Err(Error::InvalidInput("failures require a positive ref ID"));
+        }
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut failed = 0;
+        for id in ids {
+            let changed = tx.execute(
+                "UPDATE edges SET status = 'failed' WHERE id = ? AND status = 'pending'",
+                [id],
+            )?;
+            if changed != 0 {
+                tx.execute("DELETE FROM reference_candidates WHERE ref_id = ?", [id])?;
+                failed += changed;
+            }
+        }
+        tx.commit()?;
+        Ok(failed)
+    }
 }

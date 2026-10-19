@@ -186,8 +186,7 @@ fn callers(store: &IndexStore, target: &Entity) -> Vec<FileEdge> {
 
 fn resolve(store: &IndexStore, target: &Entity) -> i64 {
     store
-        .write(|state| {
-            let graph = state.graph.as_mut().expect("graph is open");
+        .with_resolution_session(|graph| {
             let refs = graph.list_pending_refs(100, 0).expect("pending refs");
             assert_eq!(refs.refs.len(), 1);
             let id = refs.refs[0].id;
@@ -705,3 +704,5 @@ fn process_exit_during_canonical_replacement_recovers_from_durable_status() {
         "incoming reference survives for re-resolution"
     );
 }
+
+mod resolution_tests;

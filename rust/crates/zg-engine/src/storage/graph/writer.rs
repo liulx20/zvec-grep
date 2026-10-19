@@ -11,7 +11,8 @@ impl SqliteGraphStorage {
     /// Atomically replaces one file's local graph and invalidates inbound edges.
     /// `old_entity_ids` must contain **all** pre-update entity IDs from zvec; pass
     /// an empty slice for a new file. Snapshot node IDs validate ownership;
-    /// node metadata is not persisted here. The implicit file endpoint is `f{file_id}`, matching
+    /// named nodes also supply the resolver's derived name index.
+    /// The implicit file endpoint is `f{file_id}`, matching
     /// the zvec file document key. Cross-file edges must use `apply_resolutions`.
     /// Read old IDs before mutating zvec, under the same workspace write lock.
     /// This transaction covers SQLite only; the coordinator owns cross-store recovery.
@@ -36,6 +37,15 @@ impl SqliteGraphStorage {
         targets.dedup();
         for chunk in targets.chunks(TARGET_ID_BATCH_SIZE) {
             let placeholders = vec!["?"; chunk.len()].join(",");
+            // Discard the complete candidate set if any member changes. Retaining
+            // only the survivors could turn ambiguity into false uniqueness.
+            tx.execute(
+                &format!(
+                    "DELETE FROM reference_candidates WHERE ref_id IN
+                    (SELECT ref_id FROM reference_candidates WHERE target_id IN ({placeholders}))"
+                ),
+                params_from_iter(chunk.iter().copied()),
+            )?;
             // Even unchanged target IDs require re-resolution. Preserve the row ID
             // and reference evidence for the next resolution pass.
             tx.execute(
@@ -54,6 +64,25 @@ impl SqliteGraphStorage {
             )?;
         }
         tx.execute("DELETE FROM edges WHERE file_id = ?", [file_id])?;
+        tx.execute("DELETE FROM entity_names WHERE file_id = ?", [file_id])?;
+        {
+            let mut insert = tx.prepare(
+                "INSERT INTO entity_names (entity_id, file_id, name, qualified_name, is_exported, arity)
+                 VALUES (?, ?, ?, ?, ?, ?)"
+            )?;
+            for node in &graph.nodes {
+                if let Some(name) = node.name.as_deref().filter(|name| !name.trim().is_empty()) {
+                    insert.execute(params![
+                        node.id,
+                        file_id,
+                        name,
+                        node.qualified_name,
+                        node.is_exported,
+                        node.arity
+                    ])?;
+                }
+            }
+        }
         {
             let mut insert = tx.prepare(
                 "INSERT INTO edges

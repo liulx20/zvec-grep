@@ -24,6 +24,8 @@ pub(crate) struct StoredPendingRef {
     /// Matches zvec's `FileId`; the resolver retrieves file paths from zvec.
     pub file_id: u32,
     pub reference: PendingRef,
+    /// Resolver evidence for an unresolved, ambiguous reference.
+    pub candidates: Vec<String>,
 }
 
 /// Page over pending references. Restart pagination after file mutations.
@@ -49,4 +51,14 @@ pub(crate) struct Resolution {
 pub(crate) struct ResolutionStats {
     pub resolved: usize,
     pub stale: usize,
+}
+
+/// A projection of a named graph node used to select resolution candidates.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct NameIndexEntry {
+    pub entity_id: String,
+    pub file_id: u32,
+    pub qualified_name: String,
+    pub is_exported: bool,
+    pub arity: Option<usize>,
 }

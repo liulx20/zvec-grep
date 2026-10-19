@@ -573,7 +573,7 @@ fn schemas_reject_foreign_and_newer_databases_without_rewriting_versions() {
 }
 
 #[test]
-fn schema_contains_only_edges_and_enforces_json_objects() {
+fn schema_contains_relationships_and_resolver_indexes_and_enforces_json_objects() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("graph.sqlite");
     open(&path).close().expect("init");
@@ -586,7 +586,15 @@ fn schema_contains_only_edges_and_enforces_json_objects() {
         .expect("query")
         .collect::<rusqlite::Result<_>>()
         .expect("rows");
-    assert_eq!(names, ["edges", "sqlite_sequence"]);
+    assert_eq!(
+        names,
+        [
+            "edges",
+            "entity_names",
+            "reference_candidates",
+            "sqlite_sequence"
+        ]
+    );
     assert!(raw.execute("INSERT INTO edges (file_id, kind, source, target, provenance, status, metadata) VALUES (1, 'calls', 'a', 'b', 'file_local', 'resolved', '[]')", []).is_err());
     assert!(raw.execute("INSERT INTO edges (file_id, kind, source, target, provenance, status, line) VALUES (1, 'calls', 'a', 'b', 'file_local', 'resolved', 0)", []).is_err());
 }
@@ -1058,4 +1066,28 @@ fn contains_references_use_the_same_kinds_as_resolved_edges() {
         db.list_pending_refs(100, 0).expect("requeued").refs[0].reference,
         pending
     );
+}
+
+#[test]
+fn graph_without_name_index_requires_rebuild_instead_of_incomplete_resolution() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("graph.sqlite");
+    open(&path).close().expect("initialize");
+    let raw = Connection::open(&path).expect("raw");
+    raw.execute_batch("DROP TABLE reference_candidates; DROP TABLE entity_names;")
+        .expect("graph-storage schema before resolver integration");
+    for mode in [OpenMode::ReadOnly, OpenMode::ReadWrite] {
+        assert!(matches!(
+            SqliteGraphStorage::open(&path, mode),
+            Err(Error::UnsupportedSchema { version: 1, .. })
+        ));
+    }
+    let count: i64 = raw
+        .query_row(
+            "SELECT count(*) FROM sqlite_schema WHERE name = 'entity_names'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("unchanged schema");
+    assert_eq!(count, 0);
 }

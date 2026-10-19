@@ -3,7 +3,7 @@ mod directories;
 mod entities;
 mod files;
 mod fragments;
-// Relationship reads and resolution are integrated separately from coordinated writes.
+// Query consumers and resolver rules are integrated in follow-up work.
 #[cfg_attr(not(test), allow(dead_code, unused_imports))]
 pub(crate) mod graph;
 mod path;
@@ -14,3 +14,6 @@ pub(crate) mod types;
 mod zvec;
 
 pub(crate) use store::IndexStore;
+
+#[allow(unused_imports)]
+pub(crate) use store::ResolutionSession;

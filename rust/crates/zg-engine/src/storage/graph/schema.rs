@@ -10,7 +10,11 @@ pub(crate) fn validate(connection: &Connection) -> Result<()> {
     let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     let application_id: i64 =
         connection.query_row("PRAGMA application_id", [], |row| row.get(0))?;
-    if version != VERSION || application_id != APPLICATION_ID {
+    let resolver_tables: i64 = connection.query_row(
+        "SELECT count(*) FROM sqlite_schema WHERE type = 'table' AND name IN ('entity_names', 'reference_candidates')",
+        [], |row| row.get(0),
+    )?;
+    if version != VERSION || application_id != APPLICATION_ID || resolver_tables != 2 {
         return Err(Error::UnsupportedSchema {
             version,
             application_id,
@@ -33,6 +37,7 @@ pub(crate) fn initialize(connection: &mut Connection) -> Result<()> {
             return Err(Error::ForeignDatabase);
         }
         tx.execute_batch(SCHEMA)?;
+        tx.execute_batch(RESOLUTION_SCHEMA)?;
         tx.pragma_update(None, "user_version", VERSION)?;
         tx.pragma_update(None, "application_id", APPLICATION_ID)?;
     } else {
@@ -44,7 +49,7 @@ pub(crate) fn initialize(connection: &mut Connection) -> Result<()> {
 
 // Direct local edges and references share one table. Resolution fills the target
 // on the existing reference row; invalidation clears it and retains the evidence.
-// `failed` is reserved for resolver integration; no API currently sets it.
+// Failed references leave the pending queue until their owning file is rewritten.
 const SCHEMA: &str = "
 CREATE TABLE edges (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -76,4 +81,23 @@ CREATE INDEX edges_source_kind ON edges(source, kind);
 CREATE INDEX edges_target_kind ON edges(target, kind);
 -- Index only the pending queue so resolved queries use the endpoint indexes.
 CREATE INDEX edges_pending_id ON edges(id) WHERE status = 'pending';
+";
+
+const RESOLUTION_SCHEMA: &str = "
+CREATE TABLE entity_names (
+    entity_id TEXT PRIMARY KEY,
+    file_id INTEGER NOT NULL CHECK (file_id BETWEEN 0 AND 4294967295),
+    name TEXT NOT NULL CHECK (length(trim(name)) > 0),
+    qualified_name TEXT NOT NULL,
+    is_exported INTEGER NOT NULL CHECK (is_exported IN (0, 1)),
+    arity INTEGER CHECK (arity >= 0)
+) STRICT;
+CREATE INDEX entity_names_file ON entity_names(file_id);
+CREATE INDEX entity_names_name ON entity_names(name);
+CREATE TABLE reference_candidates (
+    ref_id INTEGER NOT NULL REFERENCES edges(id) ON DELETE CASCADE,
+    target_id TEXT NOT NULL,
+    PRIMARY KEY (ref_id, target_id)
+) STRICT;
+CREATE INDEX reference_candidates_target ON reference_candidates(target_id);
 ";
