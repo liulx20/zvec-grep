@@ -800,21 +800,21 @@ fn graph_queries_skip_unrelated_resolved_edges() {
 }
 
 #[test]
-fn prior_schema_version_requires_rebuild_without_mutation() {
+fn previous_development_schema_requires_rebuild_without_mutation() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("old.sqlite");
     let raw = Connection::open(&path).expect("raw");
-    raw.execute_batch("PRAGMA application_id = 1514623568; PRAGMA user_version = 1; CREATE TABLE pending_refs (id INTEGER PRIMARY KEY);").expect("old schema");
+    raw.execute_batch("PRAGMA application_id = 1514623568; PRAGMA user_version = 10; CREATE TABLE pending_refs (id INTEGER PRIMARY KEY);").expect("old schema");
     for mode in [OpenMode::ReadOnly, OpenMode::ReadWrite] {
         assert!(matches!(
             SqliteGraphStorage::open(&path, mode),
-            Err(Error::UnsupportedSchema { version: 1, .. })
+            Err(Error::UnsupportedSchema { version: 10, .. })
         ));
     }
     assert_eq!(
         raw.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .expect("version"),
-        1
+        10
     );
     assert_eq!(
         raw.query_row(
