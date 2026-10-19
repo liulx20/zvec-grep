@@ -1,13 +1,14 @@
 use super::{
-    Error, PendingRef, PendingRefPage, Provenance, Resolution, ResolutionStats, Result,
-    SqliteGraphStorage, StoredPendingRef, decode_enum, decode_metadata, nonempty,
+    Error, PendingRefPage, Resolution, ResolutionStats, Result, SqliteGraphStorage,
+    StoredPendingRef, decode_enum, decode_metadata, nonempty,
 };
+use crate::domain::{EdgeProvenance, PendingRef, PendingRefStatus};
 use rusqlite::{Row, TransactionBehavior, params};
 
 /// Maximum references per page, excluding the one-row pagination lookahead.
 pub(super) const MAX_PENDING_PAGE_SIZE: usize = 1024;
 
-const SELECT_REF: &str = "SELECT id, file_id, source, reference_name, receiver_name, kind, arity, line, col, metadata, candidates, language, name_tail FROM edges";
+const SELECT_REF: &str = "SELECT id, file_id, source, reference_name, receiver_name, kind, arity, line, col, metadata FROM edges";
 
 impl SqliteGraphStorage {
     /// Lists only pending refs using keyset pagination; no snapshot spans pages.
@@ -50,7 +51,7 @@ impl SqliteGraphStorage {
     ) -> Result<ResolutionStats> {
         for resolution in resolutions {
             nonempty(&resolution.target_id)?;
-            if resolution.ref_id < 1 || resolution.provenance == Provenance::FileLocal {
+            if resolution.ref_id < 1 || resolution.provenance == EdgeProvenance::FileLocal {
                 return Err(Error::InvalidInput(
                     "resolution requires a positive ref ID and cross-file provenance",
                 ));
@@ -88,28 +89,15 @@ fn ref_from_row(row: &Row<'_>) -> rusqlite::Result<StoredPendingRef> {
         id: row.get(0)?,
         file_id: row.get(1)?,
         reference: PendingRef {
-            from_node_id: row.get(2)?,
-            reference_name: row.get(3)?,
+            owner_id: row.get(2)?,
+            ref_name: row.get(3)?,
             receiver_name: row.get(4)?,
-            reference_kind: decode_enum(row.get(5)?)?,
+            ref_kind: decode_enum(row.get(5)?)?,
             arity: row.get(6)?,
             line: row.get(7)?,
-            col: row.get(8)?,
+            column: row.get(8)?,
+            status: PendingRefStatus::Pending,
             metadata: decode_metadata(&row.get::<_, String>(9)?)?,
-            candidates: row
-                .get::<_, Option<String>>(10)?
-                .map(|value| {
-                    serde_json::from_str(&value).map_err(|error| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            10,
-                            rusqlite::types::Type::Text,
-                            Box::new(error),
-                        )
-                    })
-                })
-                .transpose()?,
-            language: row.get(11)?,
-            name_tail: row.get(12)?,
         },
     })
 }

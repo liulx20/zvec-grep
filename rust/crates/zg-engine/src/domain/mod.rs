@@ -24,24 +24,8 @@ pub(crate) use entity::FragmentId;
 // Glob rules.
 pub use glob::GlobRule;
 
-// Graph extraction contracts. The walk-time collectors and the persistence
-// layer are still pending, so most types have no consumers yet.
-#[allow(unused_imports)]
-pub(crate) use graph::EdgeProvenance;
-#[allow(unused_imports)]
-pub(crate) use graph::FileEdge;
-#[allow(unused_imports)]
-pub(crate) use graph::FileGraphNode;
-#[allow(unused_imports)]
-pub(crate) use graph::FileGraphResult;
-#[allow(unused_imports)]
-pub(crate) use graph::GraphEdgeKind;
-#[allow(unused_imports)]
-pub(crate) use graph::GraphRefKind;
-#[allow(unused_imports)]
-pub(crate) use graph::PendingRef;
-#[allow(unused_imports)]
-pub(crate) use graph::PendingRefStatus;
+// Shared graph contracts used by persistence.
+pub(crate) use graph::{EdgeProvenance, FileEdge, GraphEdgeKind, PendingRef, PendingRefStatus};
 
 // Indexes.
 pub(crate) use index::FTS_CONFIG;

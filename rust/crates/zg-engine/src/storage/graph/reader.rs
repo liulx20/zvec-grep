@@ -1,6 +1,5 @@
-use super::{
-    Direction, Edge, EdgeKind, Result, SqliteGraphStorage, decode_enum, decode_metadata, nonempty,
-};
+use super::{Direction, Result, SqliteGraphStorage, decode_enum, decode_metadata, nonempty};
+use crate::domain::{FileEdge, GraphEdgeKind};
 use rusqlite::{Row, params_from_iter};
 
 impl SqliteGraphStorage {
@@ -14,8 +13,8 @@ impl SqliteGraphStorage {
         &self,
         id: &str,
         direction: Direction,
-        kinds: Option<&[EdgeKind]>,
-    ) -> Result<Vec<Edge>> {
+        kinds: Option<&[GraphEdgeKind]>,
+    ) -> Result<Vec<FileEdge>> {
         nonempty(id)?;
         let endpoint = match direction {
             Direction::In => "target = ?1",
@@ -47,8 +46,8 @@ impl SqliteGraphStorage {
     }
 }
 
-fn edge_from_row(row: &Row<'_>) -> rusqlite::Result<Edge> {
-    Ok(Edge {
+fn edge_from_row(row: &Row<'_>) -> rusqlite::Result<FileEdge> {
+    Ok(FileEdge {
         kind: decode_enum(row.get(0)?)?,
         source: row.get(1)?,
         target: row.get(2)?,

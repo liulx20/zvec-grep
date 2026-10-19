@@ -1,7 +1,8 @@
+use crate::domain::{EdgeProvenance, PendingRefStatus};
 use rusqlite::{TransactionBehavior, params, params_from_iter};
 use std::collections::HashSet;
 
-use super::{Error, FileGraph, Provenance, Result, SqliteGraphStorage, nonempty};
+use super::{Error, FileGraph, Result, SqliteGraphStorage, nonempty};
 
 // Bound IN-clause parameters; invalidation also binds the owning file ID.
 const TARGET_ID_BATCH_SIZE: usize = 512;
@@ -36,13 +37,19 @@ impl SqliteGraphStorage {
         for chunk in targets.chunks(TARGET_ID_BATCH_SIZE) {
             let placeholders = vec!["?"; chunk.len()].join(",");
             // Even unchanged target IDs require re-resolution. Preserve the row ID
-            // and reference context, but discard candidates from the old snapshot.
+            // and reference evidence for the next resolution pass.
             tx.execute(
-                &format!("UPDATE edges SET status = 'pending', target = NULL, provenance = NULL, candidates = NULL
-                  WHERE target IN ({placeholders}) AND file_id <> ? AND reference_name IS NOT NULL"),
+                &format!(
+                    "UPDATE edges SET status = 'pending', target = NULL, provenance = NULL
+                  WHERE target IN ({placeholders}) AND file_id <> ? AND reference_name IS NOT NULL"
+                ),
                 params_from_iter(
-                    chunk.iter().map(|id| rusqlite::types::Value::Text((*id).into()))
-                        .chain(std::iter::once(rusqlite::types::Value::Integer(i64::from(file_id)))),
+                    chunk
+                        .iter()
+                        .map(|id| rusqlite::types::Value::Text((*id).into()))
+                        .chain(std::iter::once(rusqlite::types::Value::Integer(i64::from(
+                            file_id,
+                        )))),
                 ),
             )?;
             tx.execute(
@@ -70,25 +77,18 @@ impl SqliteGraphStorage {
                 ])?;
             }
             let mut insert = tx.prepare("INSERT INTO edges
-                (file_id, source, reference_name, receiver_name, kind, arity, line, col, candidates, language, name_tail, status, metadata)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)")?;
+                (file_id, source, reference_name, receiver_name, kind, arity, line, col, status, metadata)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)")?;
             for reference in &graph.pending_refs {
                 insert.execute(params![
                     file_id,
-                    reference.from_node_id,
-                    reference.reference_name,
+                    reference.owner_id,
+                    reference.ref_name,
                     reference.receiver_name,
-                    reference.reference_kind.as_str(),
+                    reference.ref_kind.as_str(),
                     reference.arity,
                     reference.line,
-                    reference.col,
-                    reference
-                        .candidates
-                        .as_ref()
-                        .map(serde_json::to_string)
-                        .transpose()?,
-                    reference.language,
-                    reference.name_tail,
+                    reference.column,
                     serde_json::to_string(&reference.metadata)?
                 ])?;
             }
@@ -127,7 +127,10 @@ fn validate(file_id: &str, graph: &FileGraph, old_entity_ids: &[String]) -> Resu
     }
     let owns = |id: &str| id == file_id || local.contains(id);
     for edge in &graph.edges {
-        if edge.provenance != Provenance::FileLocal || !owns(&edge.source) || !owns(&edge.target) {
+        if edge.provenance != EdgeProvenance::FileLocal
+            || !owns(&edge.source)
+            || !owns(&edge.target)
+        {
             return Err(Error::InvalidInput(
                 "file snapshots require local edges; use apply_resolutions for cross-file edges",
             ));
@@ -137,8 +140,13 @@ fn validate(file_id: &str, graph: &FileGraph, old_entity_ids: &[String]) -> Resu
         }
     }
     for reference in &graph.pending_refs {
-        nonempty(&reference.reference_name)?;
-        if !owns(&reference.from_node_id) || reference.line == 0 {
+        if reference.status != PendingRefStatus::Pending {
+            return Err(Error::InvalidInput(
+                "file snapshots require pending references",
+            ));
+        }
+        nonempty(&reference.ref_name)?;
+        if !owns(&reference.owner_id) || reference.line == 0 {
             return Err(Error::InvalidInput(
                 "pending refs require local ownership and one-based lines",
             ));
