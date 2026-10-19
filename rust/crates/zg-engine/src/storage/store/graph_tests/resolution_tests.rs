@@ -23,6 +23,99 @@ fn named(store: &IndexStore, path: &str) -> Snapshot {
 }
 
 #[test]
+fn missing_graph_with_only_unfinished_files_can_recover() {
+    let temporary = tempfile::tempdir().expect("workspace");
+    let store = open(temporary.path(), false);
+    let unfinished = snapshot(&store, "unfinished.rs", &["target"]);
+    status(&store, &unfinished.file, FileIndexStatus::NotIndexed);
+    store.close().expect("close writer");
+    fs::remove_file(temporary.path().join("graph/graph.sqlite")).expect("remove graph");
+    let store = open(temporary.path(), false);
+    store
+        .with_resolution_session(|session| {
+            assert!(session.lookup_candidates("target")?.is_none());
+            Ok(())
+        })
+        .expect("defer until reconstruction");
+    let mut recovered = unfinished;
+    recovered.graph.nodes[0].name = Some("target".into());
+    write(&store, &recovered);
+    store
+        .with_resolution_session(|session| {
+            assert_eq!(
+                session
+                    .lookup_candidates("target")?
+                    .expect("reconstructed names")
+                    .len(),
+                1
+            );
+            Ok(())
+        })
+        .expect("recover unfinished file");
+}
+
+#[cfg(unix)]
+#[test]
+fn native_paths_do_not_merge_backslashes_or_lossy_unicode() {
+    use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+    let temporary = tempfile::tempdir().expect("workspace");
+    let store = open(temporary.path(), false);
+    let backslash = named(&store, r"src\target.rs");
+    let nested = named(&store, "src/target.rs");
+    let unicode = named(&store, "src/�.rs");
+    let mut native = snapshot(
+        &store,
+        OsString::from_vec(b"src/\xff.rs".to_vec()),
+        &["native"],
+    );
+    let mut import = reference(&native.entities[0]);
+    import.ref_kind = GraphEdgeKind::Imports;
+    native.graph.pending_refs.push(import);
+    write(&store, &native);
+    named(&store, r"only\child.rs");
+    let descendant = snapshot(
+        &store,
+        OsString::from_vec(b"package/\xff.rs".to_vec()),
+        &["child"],
+    );
+    write(&store, &descendant);
+    store
+        .with_resolution_session(|session| {
+            for file in [&backslash.file, &nested.file, &unicode.file] {
+                let path = file.relative_path.to_str().expect("Unicode fixture");
+                assert_eq!(session.file_id_by_path(path)?, Some(file.id.get()));
+                assert_eq!(session.file_path(file.id.get())?.as_deref(), Some(path));
+            }
+            assert_eq!(session.file_path(native.file.id.get())?, None);
+            assert!(!session.path_has_module("only", &[])?);
+            assert!(!session.path_has_module("only/child", &["rs"])?);
+            assert!(session.path_has_module(r"only\child", &["rs"])?);
+            assert!(session.path_has_module("src", &[])?);
+            assert!(session.path_has_module("package", &[])?);
+            assert!(!session.path_has_module("pack", &[])?);
+            assert!(!session.path_has_module("package/�", &["rs"])?);
+            let pending = session.list_pending_refs(10, 0)?.refs.remove(0);
+            let target_id = nested.file.id.get();
+            assert_eq!(
+                session
+                    .apply_resolutions(&[Resolution {
+                        ref_id: pending.id,
+                        target_id: format!("f{target_id}"),
+                        provenance: EdgeProvenance::ImportScoped,
+                    }])?
+                    .resolved,
+                1
+            );
+            assert_eq!(
+                session.imported_file_ids(native.file.id.get())?,
+                vec![target_id]
+            );
+            Ok(())
+        })
+        .expect("lossless resolver paths");
+}
+
+#[test]
 fn hidden_reference_pages_preserve_cursor_and_do_not_block_ready_files() {
     let temporary = tempfile::tempdir().expect("fixture operation");
     let store = open(temporary.path(), false);

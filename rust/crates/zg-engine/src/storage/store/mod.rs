@@ -162,6 +162,18 @@ impl IndexStore {
             None
         } else {
             let graph_path = home.join("graph").join("graph.sqlite");
+            if !graph_path
+                .try_exists()
+                .map_err(|error| io_error("inspect graph database", &graph_path, &error))?
+                && files
+                    .list()?
+                    .iter()
+                    .any(|file| file.index_status.is_indexed())
+            {
+                return Err(EngineError::storage_failure(
+                    "graph database is missing for indexed files; rebuild the index with `zg --index --rebuild`",
+                ));
+            }
             let graph =
                 SqliteGraphStorage::open(&graph_path, OpenMode::ReadWrite).map_err(graph_error)?;
             sync_directory(&home.join("graph"))?;

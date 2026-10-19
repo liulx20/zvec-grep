@@ -1,11 +1,15 @@
 //! Restricted resolver access to a coordinated, locked storage snapshot.
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    path::{Path, PathBuf},
+};
 
 use super::{StoreState, graph_error};
 use crate::storage::graph::{
     NameIndexEntry, PendingRefPage, Resolution, ResolutionStats, SqliteGraphStorage,
     StoredPendingRef,
 };
+use crate::storage::path::query_path;
 use crate::{
     EngineResult,
     domain::{EntityId, FileId, FileIndexStatus, FileRecord},
@@ -17,6 +21,7 @@ pub(crate) trait ResolutionSession {
     fn list_pending_refs(&mut self, limit: usize, cursor: i64) -> EngineResult<PendingRefPage>;
     /// None defers name lookup until the workspace and all candidates are visible.
     fn lookup_candidates(&self, name: &str) -> EngineResult<Option<Vec<NameIndexEntry>>>;
+    /// Unicode projection of an Indexed file's path; unrepresentable paths return None.
     fn file_path(&self, file_id: u32) -> EngineResult<Option<String>>;
     fn file_id_by_path(&self, path: &str) -> EngineResult<Option<u32>>;
     /// Existence evidence only, including unfinished modules: temporarily
@@ -32,14 +37,17 @@ pub(super) struct StoreResolutionSession<'a> {
     state: &'a mut StoreState,
     issued: HashMap<i64, StoredPendingRef>,
     files: HashMap<FileId, FileRecord>,
-    paths: HashMap<String, FileId>,
+    paths: HashMap<PathBuf, FileId>,
     names_available: bool,
 }
 
 impl<'a> StoreResolutionSession<'a> {
     pub(super) fn new(state: &'a mut StoreState) -> EngineResult<Self> {
         let files: HashMap<_, _> = state.files.list()?.into_iter().map(|f| (f.id, f)).collect();
-        let paths = files.values().map(|f| (normalized_path(f), f.id)).collect();
+        let paths = files
+            .values()
+            .map(|f| (f.relative_path.to_path_buf(), f.id))
+            .collect();
         let names_available = !files.values().any(|file| {
             matches!(
                 file.index_status,
@@ -164,13 +172,13 @@ impl ResolutionSession for StoreResolutionSession<'_> {
         Ok(self
             .indexed_files(&[FileId::new(file_id)])
             .remove(&FileId::new(file_id))
-            .map(|file| file.relative_path.to_string_lossy().replace('\\', "/")))
+            .and_then(|file| query_path(&file.relative_path)))
     }
 
     fn file_id_by_path(&self, path: &str) -> EngineResult<Option<u32>> {
         Ok(self
             .paths
-            .get(path)
+            .get(Path::new(path))
             .and_then(|id| self.files.get(id))
             .filter(|f| f.index_status.is_indexed())
             .map(|f| f.id.get()))
@@ -179,16 +187,23 @@ impl ResolutionSession for StoreResolutionSession<'_> {
     fn path_has_module(&self, name: &str, extensions: &[&str]) -> EngineResult<bool> {
         if extensions
             .iter()
-            .any(|ext| self.paths.contains_key(&format!("{name}.{ext}")))
+            .any(|ext| self.paths.contains_key(Path::new(&format!("{name}.{ext}"))))
         {
             return Ok(true);
         }
-        let prefix = format!("{name}/");
-        Ok(self.paths.keys().any(|path| path.starts_with(&prefix)))
+        let module = Path::new(name);
+        Ok(self
+            .paths
+            .keys()
+            .any(|path| path != module && path.starts_with(module)))
     }
 
     fn imported_file_ids(&self, file_id: u32) -> EngineResult<Vec<u32>> {
-        if self.file_path(file_id)?.is_none() {
+        if !self
+            .files
+            .get(&FileId::new(file_id))
+            .is_some_and(|file| file.index_status.is_indexed())
+        {
             return Ok(Vec::new());
         }
         let targets = self.graph().import_targets(file_id).map_err(graph_error)?;
@@ -256,8 +271,4 @@ impl ResolutionSession for StoreResolutionSession<'_> {
             .record_candidates(&valid)
             .map_err(graph_error)
     }
-}
-
-fn normalized_path(file: &FileRecord) -> String {
-    file.relative_path.to_string_lossy().replace('\\', "/")
 }

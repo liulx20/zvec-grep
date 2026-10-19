@@ -44,7 +44,7 @@ fn open(path: &Path, read_only: bool) -> IndexStore {
     IndexStore::open(options).expect("open combined storage")
 }
 
-fn snapshot(store: &IndexStore, path: &str, symbols: &[&str]) -> Snapshot {
+fn snapshot(store: &IndexStore, path: impl Into<PathBuf>, symbols: &[&str]) -> Snapshot {
     let relative_path = SourcePath::new(path).expect("source path");
     let id = store
         .resolve_file_ids(&[relative_path.to_path_buf()])
@@ -389,14 +389,29 @@ fn graph_and_entities_reopen_together_and_read_only_handles_reject_writes() {
 }
 
 #[test]
-fn older_indexes_without_graph_open_read_only_without_creating_a_database() {
+fn missing_graph_rejects_indexed_writers_but_preserves_read_only_access() {
     let temporary = tempfile::tempdir().expect("workspace");
     let store = open(temporary.path(), false);
     let source = snapshot(&store, "source.rs", &["canonical record"]);
     write(&store, &source);
+    let embeddings = store.shared().expect("writer").schema.clone();
     store.close().expect("close writer");
     let path = temporary.path().join("graph/graph.sqlite");
     fs::remove_file(&path).expect("simulate pre-graph index");
+
+    for _ in 0..2 {
+        let error = IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
+            storage_path: temporary.path().to_owned(),
+            embeddings: embeddings.clone(),
+        })
+        .err()
+        .expect("missing graph requires reconstruction");
+        assert!(error.message().contains("zg --index --rebuild"));
+        assert!(
+            !path.exists(),
+            "failed opening must not create an empty graph"
+        );
+    }
 
     let reader = open(temporary.path(), true);
     assert!(
@@ -405,6 +420,11 @@ fn older_indexes_without_graph_open_read_only_without_creating_a_database() {
             .expect("optional graph")
     );
     assert_eq!(stored_entities(&reader, &source.entities).len(), 1);
+    assert!(
+        reader.list_files().expect("canonical records")[0]
+            .index_status
+            .is_indexed()
+    );
     assert!(!path.exists());
     reader.close().expect("close reader");
     assert!(!path.exists());
