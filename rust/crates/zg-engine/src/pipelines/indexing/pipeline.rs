@@ -34,8 +34,8 @@ use crate::{
     },
     domain::{
         Content, ContentKind, Entity, EntityFragment, EntityId, EntityMetadata, FileCategory,
-        FileFormat, FileId, FileIndexStatus, FileRecord, FileSnapshot, FragmentId, Range,
-        SourcePath, Workspace,
+        FileFormat, FileGraphResult, FileId, FileIndexStatus, FileRecord, FileSnapshot, FragmentId,
+        Range, SourcePath, Workspace,
         model::{EmbeddingModelInfo, EmbeddingPurpose, EmbeddingResult},
     },
     extraction::{
@@ -615,6 +615,7 @@ struct PreparedFile {
     file: FileRecord,
     entities: Vec<Entity>,
     fragments: Vec<PreparedFragment>,
+    graph: FileGraphResult,
 }
 
 enum PreparedCandidate {
@@ -923,7 +924,7 @@ fn commit_file(
             vector,
         })
         .collect::<Vec<_>>();
-    storage.replace_file(&file.file, &file.entities, &entries)?;
+    storage.replace_file(&file.file, &file.entities, &entries, &file.graph)?;
     stats.files_indexed += 1;
     stats.entities_created += public_entities;
     Ok(())
@@ -998,6 +999,7 @@ async fn prepare_candidate(
         file,
         entities,
         fragments,
+        graph: extracted.graph.unwrap_or_default(),
     })))
 }
 
@@ -2440,6 +2442,7 @@ mod tests {
     #[derive(Default)]
     struct MemoryStorage {
         files: Mutex<Vec<FileRecord>>,
+        graphs: Mutex<HashMap<FileId, FileGraphResult>>,
         entries: Mutex<HashMap<FileId, Vec<IndexedFragment>>>,
         identities: Mutex<HashMap<PathBuf, FileId>>,
         resolved_paths: Mutex<Vec<Vec<PathBuf>>>,
@@ -2490,6 +2493,20 @@ mod tests {
             fragment.model = "fixture/model".into();
         }
         let storage = MemoryStorage::default();
+        let graph = FileGraphResult {
+            pending_refs: vec![crate::domain::PendingRef {
+                owner_id: format!("f{}", file_id.get()),
+                ref_name: "target".into(),
+                receiver_name: None,
+                ref_kind: crate::domain::GraphEdgeKind::Calls,
+                arity: None,
+                line: 1,
+                column: 0,
+                status: crate::domain::PendingRefStatus::Pending,
+                metadata: std::collections::BTreeMap::new(),
+            }],
+            ..FileGraphResult::default()
+        };
         let prepared = PreparedFile {
             file: FileRecord::new(
                 file_id,
@@ -2504,6 +2521,7 @@ mod tests {
             .expect("file record"),
             entities,
             fragments,
+            graph: graph.clone(),
         };
         let vectors = vec![vec![1.0, 0.0], vec![0.0, 1.0]];
         commit_file(
@@ -2513,6 +2531,10 @@ mod tests {
             &mut IndexWriteStats::default(),
         )
         .expect("commit prepared fragments");
+        assert_eq!(
+            storage.graphs.lock().expect("stored graph")[&file_id],
+            graph
+        );
         let entries = storage.entries.lock().expect("stored entries");
         for (((entry, body), vector), ordinal) in entries[&file_id]
             .iter()
@@ -2568,6 +2590,7 @@ mod tests {
             file: &FileRecord,
             entities: &[Entity],
             entries: &[IndexedFragment],
+            graph: &FileGraphResult,
         ) -> EngineResult<()> {
             if self
                 .fail_replacements_once
@@ -2582,6 +2605,10 @@ mod tests {
                 indexed_epoch_ms: 1,
                 entity_count: entities.len() as u64,
             })?;
+            self.graphs
+                .lock()
+                .expect("stored graphs")
+                .insert(file.id(), graph.clone());
             self.entries
                 .lock()
                 .expect("stored entries")

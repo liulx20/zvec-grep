@@ -4,7 +4,7 @@
 //! atomic within SQLite; the indexing coordinator owns consistency with zvec.
 //! Callers must serialize reference reads, resolution and writeback with file updates.
 //! This module does not resolve names, run FTS, or manage workspace locks.
-//! Indexing integration is pending; this storage is not yet opened by `IndexStore`.
+//! `IndexStore` owns the writable connection and coordinates file replacement.
 
 mod pending;
 mod reader;
@@ -53,6 +53,13 @@ pub(crate) struct SqliteGraphStorage {
 }
 
 impl SqliteGraphStorage {
+    pub(crate) fn validate_snapshot(
+        file_id: u32,
+        graph: &crate::domain::FileGraphResult,
+    ) -> Result<()> {
+        writer::validate(&format!("f{file_id}"), graph, &[])
+    }
+
     /// Opens an existing reader, or initializes a writer and its parent directory.
     ///
     /// # Errors
@@ -89,6 +96,7 @@ impl SqliteGraphStorage {
             OpenMode::ReadWrite => {
                 schema::initialize(&mut connection)?;
                 connection.pragma_update(None, "journal_mode", "WAL")?;
+                connection.pragma_update(None, "synchronous", "FULL")?;
             }
         }
         Ok(Self { connection })

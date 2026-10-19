@@ -3,7 +3,7 @@ mod directories;
 mod entities;
 mod files;
 mod fragments;
-// Graph persistence is exercised in tests; indexing integration follows separately.
+// Relationship reads and resolution are integrated separately from coordinated writes.
 #[cfg_attr(not(test), allow(dead_code, unused_imports))]
 pub(crate) mod graph;
 mod path;

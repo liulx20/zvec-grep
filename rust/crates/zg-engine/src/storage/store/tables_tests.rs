@@ -53,7 +53,15 @@ impl IndexStore {
         );
         let shared = self.shared()?;
         validate_batch(file, entities, entries, &shared.schema)?;
-        self.write(|state| super::replace_file(state, file, entities, entries))
+        self.write(|state| {
+            super::replace_file(
+                state,
+                file,
+                entities,
+                entries,
+                &crate::domain::FileGraphResult::default(),
+            )
+        })
     }
 }
 

@@ -107,7 +107,11 @@ impl SqliteGraphStorage {
     }
 }
 
-fn validate(file_id: &str, graph: &FileGraphResult, old_entity_ids: &[String]) -> Result<()> {
+pub(super) fn validate(
+    file_id: &str,
+    graph: &FileGraphResult,
+    old_entity_ids: &[String],
+) -> Result<()> {
     for id in old_entity_ids {
         nonempty(id)?;
     }
