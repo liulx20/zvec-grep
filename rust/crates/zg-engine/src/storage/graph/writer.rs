@@ -52,10 +52,6 @@ impl SqliteGraphStorage {
                         )))),
                 ),
             )?;
-            tx.execute(
-                &format!("DELETE FROM edges WHERE target IN ({placeholders})"),
-                params_from_iter(chunk.iter().copied()),
-            )?;
         }
         tx.execute("DELETE FROM edges WHERE file_id = ?", [file_id])?;
         {
@@ -112,7 +108,6 @@ impl SqliteGraphStorage {
 }
 
 fn validate(file_id: &str, graph: &FileGraphResult, old_entity_ids: &[String]) -> Result<()> {
-    nonempty(file_id)?;
     for id in old_entity_ids {
         nonempty(id)?;
     }
