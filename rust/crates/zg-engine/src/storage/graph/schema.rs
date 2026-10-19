@@ -25,7 +25,7 @@ pub(crate) fn initialize(connection: &mut Connection) -> Result<()> {
     let application_id: i64 = tx.query_row("PRAGMA application_id", [], |row| row.get(0))?;
     if version == 0 && application_id == 0 {
         let objects: i64 = tx.query_row(
-            "SELECT count(*) FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'",
+            "SELECT count(*) FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*'",
             [],
             |row| row.get(0),
         )?;
