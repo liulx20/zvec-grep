@@ -1,9 +1,11 @@
-use crate::domain::{EdgeProvenance, FileEdge, GraphEdgeKind, PendingRef, PendingRefStatus};
+use crate::domain::{
+    EdgeProvenance, FileEdge, FileGraph, GraphEdgeKind, PendingRef, PendingRefStatus,
+};
 use std::path::Path;
 
 use super::{
-    Direction, Error, FileGraph, Metadata, OpenMode, Resolution, ResolutionStats,
-    SqliteGraphStorage, pending::MAX_PENDING_PAGE_SIZE,
+    Direction, Error, Metadata, OpenMode, Resolution, ResolutionStats, SqliteGraphStorage,
+    pending::MAX_PENDING_PAGE_SIZE,
 };
 use rusqlite::Connection;
 use serde_json::json;

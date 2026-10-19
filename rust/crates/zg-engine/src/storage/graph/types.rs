@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-use crate::domain::{EdgeProvenance, FileEdge, PendingRef};
+use crate::domain::{EdgeProvenance, PendingRef};
 
 /// Extensible evidence attached to edges and unresolved references.
 pub(crate) type Metadata = BTreeMap<String, Value>;
@@ -15,16 +15,6 @@ pub(crate) enum Direction {
     Out,
     #[default]
     Both,
-}
-
-/// A complete per-file snapshot. Node metadata is deliberately not stored here.
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
-pub(crate) struct FileGraph {
-    /// Complete current entity IDs for ownership validation, not persisted as nodes.
-    /// The zvec file key `f{file_id}` is an implicit local endpoint.
-    pub entity_ids: Vec<String>,
-    pub edges: Vec<FileEdge>,
-    pub pending_refs: Vec<PendingRef>,
 }
 
 /// A pending reference with its database identity.

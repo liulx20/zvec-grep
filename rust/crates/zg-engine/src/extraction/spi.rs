@@ -1,7 +1,7 @@
 //! Prepared inputs and indexing options for extraction.
 
 use crate::domain::{
-    Content, EntityMetadata, FileFormat, FileGraphResult, ImageContent, Range, SourcePath,
+    Content, EntityMetadata, FileFormat, FileGraph, ImageContent, Range, SourcePath,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -70,7 +70,7 @@ pub(crate) struct ExtractedEntityFragment {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ExtractionOutput {
     pub fragments: Vec<ExtractedEntity>,
-    pub graph: Option<FileGraphResult>,
+    pub graph: Option<FileGraph>,
 }
 
 #[cfg(test)]

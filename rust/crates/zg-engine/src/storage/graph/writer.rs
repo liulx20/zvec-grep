@@ -1,8 +1,8 @@
-use crate::domain::{EdgeProvenance, PendingRefStatus};
+use crate::domain::{EdgeProvenance, FileGraph, PendingRefStatus};
 use rusqlite::{TransactionBehavior, params, params_from_iter};
 use std::collections::HashSet;
 
-use super::{Error, FileGraph, Result, SqliteGraphStorage, nonempty};
+use super::{Error, Result, SqliteGraphStorage, nonempty};
 
 // Bound IN-clause parameters; invalidation also binds the owning file ID.
 const TARGET_ID_BATCH_SIZE: usize = 512;

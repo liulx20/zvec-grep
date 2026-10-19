@@ -24,9 +24,6 @@ pub(crate) use entity::FragmentId;
 // Glob rules.
 pub use glob::GlobRule;
 
-// Shared graph contracts used by persistence.
-pub(crate) use graph::{EdgeProvenance, FileEdge, GraphEdgeKind, PendingRef, PendingRefStatus};
-
 // Indexes.
 pub(crate) use index::FTS_CONFIG;
 pub(crate) use index::FtsConfig;
@@ -43,6 +40,11 @@ pub use metadata::SymbolType;
 // Visibility has no consumers yet.
 #[allow(unused_imports)]
 pub use metadata::Visibility;
+
+// Shared graph contracts for extraction and persistence.
+pub(crate) use graph::{
+    EdgeProvenance, FileEdge, FileGraph, GraphEdgeKind, PendingRef, PendingRefStatus,
+};
 
 // Models.
 pub(crate) use model::EmbeddingMetric;
