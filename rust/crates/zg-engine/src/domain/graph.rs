@@ -4,6 +4,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use super::metadata::SymbolType;
+
 /// Edge kinds produced by the extraction layer.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -60,12 +62,32 @@ pub(crate) struct PendingRef {
     pub metadata: BTreeMap<String, serde_json::Value>,
 }
 
-/// A complete per-file snapshot. Node metadata is deliberately not stored here.
+/// A graph node derived from an indexed entity fragment. The pipeline layer
+/// builds these from the existing fragment results; the extraction graph
+/// layer only defines the shape.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct FileGraphNode {
+    pub id: String,
+    pub kind: SymbolType,
+    pub name: Option<String>,
+    /// `scope::name` breadcrumb joined with `::`, or the bare name.
+    pub qualified_name: String,
+    pub language: String,
+    pub start_line: usize,
+    pub end_line: usize,
+    pub start_column: usize,
+    pub end_column: usize,
+    pub signature: Option<String>,
+    pub doc: Option<String>,
+    pub arity: Option<usize>,
+    pub visibility: Option<String>,
+    pub is_exported: bool,
+}
+
+/// Per-file graph extraction output, assembled after the walk and partition.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
-pub(crate) struct FileGraph {
-    /// Complete current entity IDs for ownership validation, not persisted as nodes.
-    /// The zvec file key `f{file_id}` is an implicit local endpoint.
-    pub entity_ids: Vec<String>,
+pub(crate) struct FileGraphResult {
+    pub nodes: Vec<FileGraphNode>,
     pub edges: Vec<FileEdge>,
     pub pending_refs: Vec<PendingRef>,
 }

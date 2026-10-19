@@ -1,5 +1,6 @@
 use crate::domain::{
-    EdgeProvenance, FileEdge, FileGraph, GraphEdgeKind, PendingRef, PendingRefStatus,
+    EdgeProvenance, FileEdge, FileGraphNode, FileGraphResult, GraphEdgeKind, PendingRef,
+    PendingRefStatus, SymbolType,
 };
 use std::path::Path;
 
@@ -36,9 +37,28 @@ fn reference(owner: &str, name: &str) -> PendingRef {
     }
 }
 
-fn graph(ids: &[&str], edges: Vec<FileEdge>, refs: Vec<PendingRef>) -> FileGraph {
-    FileGraph {
-        entity_ids: ids.iter().map(|id| (*id).into()).collect(),
+fn node(id: &str) -> FileGraphNode {
+    FileGraphNode {
+        id: id.to_owned(),
+        kind: SymbolType::Function,
+        name: Some(id.to_owned()),
+        qualified_name: id.to_owned(),
+        language: "rust".into(),
+        start_line: 1,
+        end_line: 1,
+        start_column: 0,
+        end_column: 1,
+        signature: None,
+        doc: None,
+        arity: None,
+        visibility: None,
+        is_exported: false,
+    }
+}
+
+fn graph(ids: &[&str], edges: Vec<FileEdge>, refs: Vec<PendingRef>) -> FileGraphResult {
+    FileGraphResult {
+        nodes: ids.iter().map(|id| node(id)).collect(),
         edges,
         pending_refs: refs,
     }
@@ -328,9 +348,9 @@ fn deletion_chunks_large_entity_lists() {
     let ids: Vec<String> = (0..1600).map(|i| format!("entity-{i}")).collect();
     db.write_file_graph(
         5,
-        &FileGraph {
-            entity_ids: ids.clone(),
-            ..FileGraph::default()
+        &FileGraphResult {
+            nodes: ids.iter().map(|id| node(id)).collect(),
+            ..FileGraphResult::default()
         },
         &[],
     )

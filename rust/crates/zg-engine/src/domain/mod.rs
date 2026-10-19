@@ -42,8 +42,10 @@ pub use metadata::SymbolType;
 pub use metadata::Visibility;
 
 // Shared graph contracts for extraction and persistence.
+#[allow(unused_imports)]
 pub(crate) use graph::{
-    EdgeProvenance, FileEdge, FileGraph, GraphEdgeKind, PendingRef, PendingRefStatus,
+    EdgeProvenance, FileEdge, FileGraphNode, FileGraphResult, GraphEdgeKind, PendingRef,
+    PendingRefStatus,
 };
 
 // Models.

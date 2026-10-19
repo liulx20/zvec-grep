@@ -1,4 +1,4 @@
-use crate::domain::{EdgeProvenance, FileGraph, PendingRefStatus};
+use crate::domain::{EdgeProvenance, FileGraphResult, PendingRefStatus};
 use rusqlite::{TransactionBehavior, params, params_from_iter};
 use std::collections::HashSet;
 
@@ -10,8 +10,8 @@ const TARGET_ID_BATCH_SIZE: usize = 512;
 impl SqliteGraphStorage {
     /// Atomically replaces one file's local graph and invalidates inbound edges.
     /// `old_entity_ids` must contain **all** pre-update entity IDs from zvec; pass
-    /// an empty slice for a new file. Entity IDs in the new snapshot are not stored
-    /// in a second node table. The implicit file endpoint is `f{file_id}`, matching
+    /// an empty slice for a new file. Snapshot node IDs validate ownership;
+    /// node metadata is not persisted here. The implicit file endpoint is `f{file_id}`, matching
     /// the zvec file document key. Cross-file edges must use `apply_resolutions`.
     /// Read old IDs before mutating zvec, under the same workspace write lock.
     /// This transaction covers SQLite only; the coordinator owns cross-store recovery.
@@ -22,7 +22,7 @@ impl SqliteGraphStorage {
     pub(crate) fn write_file_graph(
         &mut self,
         file_id: u32,
-        graph: &FileGraph,
+        graph: &FileGraphResult,
         old_entity_ids: &[String],
     ) -> Result<()> {
         let file_node_id = format!("f{file_id}");
@@ -107,17 +107,18 @@ impl SqliteGraphStorage {
         file_id: u32,
         old_entity_ids: &[String],
     ) -> Result<()> {
-        self.write_file_graph(file_id, &FileGraph::default(), old_entity_ids)
+        self.write_file_graph(file_id, &FileGraphResult::default(), old_entity_ids)
     }
 }
 
-fn validate(file_id: &str, graph: &FileGraph, old_entity_ids: &[String]) -> Result<()> {
+fn validate(file_id: &str, graph: &FileGraphResult, old_entity_ids: &[String]) -> Result<()> {
     nonempty(file_id)?;
     for id in old_entity_ids {
         nonempty(id)?;
     }
     let mut local = HashSet::new();
-    for id in &graph.entity_ids {
+    for node in &graph.nodes {
+        let id = &node.id;
         nonempty(id)?;
         if id == file_id || !local.insert(id.as_str()) {
             return Err(Error::InvalidInput(
