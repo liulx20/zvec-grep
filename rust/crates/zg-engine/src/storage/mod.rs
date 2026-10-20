@@ -11,4 +11,7 @@ mod store;
 pub(crate) mod types;
 mod zvec;
 
-pub(crate) use store::IndexStore;
+pub(crate) use store::{IndexStore, RelationshipReadSession};
+
+#[cfg(test)]
+pub(crate) mod test_support;

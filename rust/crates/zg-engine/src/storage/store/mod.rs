@@ -34,7 +34,9 @@ use super::{
 use crate::domain::FileGraphResult;
 use crate::domain::model::EmbeddingModelInfo;
 
+mod relationships;
 mod resolution;
+pub(crate) use relationships::RelationshipReadSession;
 
 type StoreRegistry = Mutex<HashMap<PathBuf, Weak<SharedStore>>>;
 static STORES: OnceLock<StoreRegistry> = OnceLock::new();
@@ -54,6 +56,7 @@ struct StoreState {
     fragments: Fragments,
     graph: Option<SqliteGraphStorage>,
     optimize_marker: PathBuf,
+    graph_path: PathBuf,
     needs_optimize: bool,
     closed: bool,
 }
@@ -206,6 +209,7 @@ impl IndexStore {
                 graph,
                 optimize_marker,
                 needs_optimize,
+                graph_path: home.join("graph/graph.sqlite"),
                 closed: false,
             }),
             schema,
@@ -851,3 +855,19 @@ mod tables_tests;
 
 #[cfg(test)]
 mod graph_tests;
+
+#[cfg(test)]
+impl IndexStore {
+    pub(crate) fn set_test_file_status(
+        &self,
+        id: FileId,
+        status: FileIndexStatus,
+    ) -> EngineResult<()> {
+        self.write(|state| {
+            let mut file = state.files.fetch(&[id])?.remove(&id).expect("fixture file");
+            file.set_index_status(status)?;
+            let directories = state.directories.ensure(file.relative_path())?;
+            state.files.put(&file, &directories)
+        })
+    }
+}
