@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     EngineError, EngineResult,
-    domain::{Entity, FileGraphResult, FileId, FileIndexStatus, FileRecord},
+    domain::{Entity, FileId, FileIndexStatus, FileRecord},
     utils::{atomic_write as write_record, sync_directory},
 };
 
@@ -28,6 +28,8 @@ use super::{
     },
     zvec::{corrupt, initialize},
 };
+#[cfg(test)]
+use crate::domain::FileGraphResult;
 use crate::domain::model::EmbeddingModelInfo;
 
 // The resolver integration consumes this restricted interface in a follow-up PR.
@@ -391,6 +393,7 @@ impl IndexStore {
         self.write(|state| write_batch::replace(state, writes, &files))
     }
 
+    #[cfg(test)]
     pub(crate) fn mark_file_failed(&self, file: &FileRecord, error: &str) -> EngineResult<()> {
         let mut file = file.clone();
         file.set_index_status(FileIndexStatus::Failed {
@@ -403,28 +406,16 @@ impl IndexStore {
             entries: &[],
             graph: &graph,
         };
-        self.write(|state| write_batch::replace(state, &[write], std::slice::from_ref(&file)))
+        self.replace_files(&[write])
     }
 
+    #[cfg(test)]
     pub(crate) fn delete_file(&self, file_id: FileId) -> EngineResult<()> {
-        self.write(|state| {
-            state.needs_optimize = true;
-            let old_ids = state.entities.list_ids(file_id)?;
-            state.files.mark_deleting(file_id)?;
-            state.files.flush()?;
-            state
-                .graph
-                .as_mut()
-                .expect("writable graph")
-                .delete_file_graph(file_id.get(), &old_ids)
-                .map_err(graph_error)?;
-            state.fragments.delete_file(file_id)?;
-            state.entities.delete_file(file_id)?;
-            flush_content(state)?;
-            state.files.delete(file_id)?;
-            state.files.flush()?;
-            finish_write_batch(state)
-        })
+        self.delete_files(&[file_id])
+    }
+
+    pub(crate) fn delete_files(&self, file_ids: &[FileId]) -> EngineResult<()> {
+        self.write(|state| write_batch::delete(state, file_ids))
     }
 
     /// Flush accepted writes, including any unfinished file's retry state.
@@ -478,8 +469,8 @@ impl IndexStore {
 
 // Flushes create native segment/index files even for small writes. Compact
 // periodically so a long indexing run does not retain all of their handles
-// until finalization. Count batches (including single-file failure/deletion
-// writes), not files, because flush frequency determines the amplification.
+// until finalization. Count batches (including failures and deletions),
+// not files, because flush frequency determines the amplification.
 const WRITE_BATCHES_BEFORE_OPTIMIZE: usize = 16;
 
 fn finish_write_batch(state: &mut StoreState) -> EngineResult<()> {

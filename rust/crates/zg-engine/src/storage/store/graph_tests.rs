@@ -327,9 +327,24 @@ fn failed_files_clear_their_graph_and_invalidate_incoming_references() {
     write(&store, &source);
     let ref_id = resolve(&store, &target.entities[1]);
 
+    let successful = snapshot(&store, "successful.rs", &["successful"]);
+    let mut failed = target.file.clone();
+    failed.index_status = FileIndexStatus::Failed {
+        error: "extraction failed".into(),
+    };
+    let empty_graph = FileGraphResult::default();
     store
-        .mark_file_failed(&target.file, "extraction failed")
-        .expect("mark failed");
+        .replace_files(&[
+            as_write(&successful),
+            FileWrite {
+                file: &failed,
+                entities: &[],
+                entries: &[],
+                graph: &empty_graph,
+            },
+        ])
+        .expect("publish successful and failed files together");
+    assert_eq!(stored_entities(&store, &successful.entities).len(), 1);
     assert!(stored_entities(&store, &target.entities).is_empty());
     assert!(callers(&store, &target.entities[1]).is_empty());
     assert_eq!(pending(&store)[0].id, ref_id);
@@ -776,11 +791,73 @@ fn invalid_batch_member_leaves_every_file_unchanged() {
             .contains("already owned by another file in this batch")
     );
     assert_eq!(store.list_files().expect("file statuses"), before);
+    let mut failed = replacement.file.clone();
+    failed.index_status = FileIndexStatus::Failed {
+        error: "failed".into(),
+    };
+    let error = store
+        .replace_files(&[FileWrite {
+            file: &failed,
+            ..as_write(&replacement)
+        }])
+        .expect_err("reject failed file with content");
+    assert!(
+        error
+            .to_string()
+            .contains("failed files must have empty content and graph")
+    );
+    assert_eq!(store.list_files().expect("file statuses"), before);
+}
+
+fn apply_crash_batch(
+    store: &IndexStore,
+    snapshots: &[Snapshot],
+    operation: &str,
+) -> EngineResult<()> {
+    if operation == "delete" {
+        return store.delete_files(
+            &snapshots
+                .iter()
+                .map(|snapshot| snapshot.file.id)
+                .collect::<Vec<_>>(),
+        );
+    }
+    let files: Vec<_> = snapshots
+        .iter()
+        .map(|snapshot| {
+            let mut file = snapshot.file.clone();
+            if operation == "fail" {
+                file.index_status = FileIndexStatus::Failed {
+                    error: "extraction failed".into(),
+                };
+            }
+            file
+        })
+        .collect();
+    let graph = FileGraphResult::default();
+    let writes: Vec<_> = snapshots
+        .iter()
+        .zip(&files)
+        .map(|(snapshot, file)| {
+            if operation == "fail" {
+                FileWrite {
+                    file,
+                    entities: &[],
+                    entries: &[],
+                    graph: &graph,
+                }
+            } else {
+                as_write(snapshot)
+            }
+        })
+        .collect();
+    store.replace_files(&writes)
 }
 
 #[test]
 fn process_exit_after_partial_batch_graph_commit_leaves_all_files_retryable() {
     const CHILD_ROOT: &str = "ZG_TEST_BATCH_CRASH_ROOT";
+    const CHILD_OPERATION: &str = "ZG_TEST_BATCH_CRASH_OPERATION";
     if let Some(root) = std::env::var_os(CHILD_ROOT) {
         let store = open(Path::new(&root), false);
         let originals: Vec<_> = ["first.rs", "second.rs"]
@@ -789,81 +866,102 @@ fn process_exit_after_partial_batch_graph_commit_leaves_all_files_retryable() {
             .collect();
         store
             .replace_files(&originals.iter().map(as_write).collect::<Vec<_>>())
-            .expect("batch persistence fixture");
-        let mut replacements: Vec<_> = ["first.rs", "second.rs"]
+            .expect("original batch");
+        let replacements = replacement_snapshots(&store);
+        Connection::open(Path::new(&root).join("graph/graph.sqlite")).expect("graph database").execute_batch(&format!(
+            "CREATE TRIGGER reject_second BEFORE DELETE ON entity_names WHEN OLD.file_id = {} BEGIN SELECT RAISE(ABORT, 'batch interruption'); END;",
+            replacements[1].file.id.get()
+        )).expect("inject second file failure");
+        let operation = std::env::var(CHILD_OPERATION).expect("batch operation");
+        assert!(apply_crash_batch(&store, &replacements, &operation).is_err());
+        // No close/checkpoint/destructors: only the batch's own flushes persist markers.
+        std::process::exit(77);
+    }
+    for operation in ["replace", "delete", "fail"] {
+        let temporary = tempfile::tempdir().expect("workspace");
+        let child = std::process::Command::new(std::env::current_exe().expect("test executable"))
+            .args(["--exact", "storage::store::graph_tests::process_exit_after_partial_batch_graph_commit_leaves_all_files_retryable", "--nocapture"])
+            .env(CHILD_ROOT, temporary.path()).env(CHILD_OPERATION, operation).output().expect("interrupted batch writer");
+        assert_eq!(
+            child.status.code(),
+            Some(77),
+            "{}: {}",
+            operation,
+            String::from_utf8_lossy(&child.stderr)
+        );
+        let store = open(temporary.path(), false);
+        let files = store.list_files().expect("retry markers");
+        assert_eq!(files.len(), 2);
+        let expected = if operation == "delete" {
+            FileIndexStatus::Deleting
+        } else {
+            FileIndexStatus::NotIndexed
+        };
+        assert!(files.iter().all(|file| file.index_status == expected));
+        let replacements = replacement_snapshots(&store);
+        // The first graph transaction committed; the second rolled back.
+        let names = store
+            .read(|state| {
+                state
+                    .graph
+                    .as_ref()
+                    .expect("graph")
+                    .lookup_by_name(&replacements[0].graph.nodes[0].qualified_name)
+                    .map_err(graph_error)
+            })
+            .expect("first graph outcome");
+        assert_eq!(names.len(), usize::from(operation == "replace"));
+        let originals: Vec<_> = ["first.rs", "second.rs"]
             .iter()
-            .map(|path| snapshot(&store, *path, &["new first", "new second"]))
+            .map(|path| snapshot(&store, *path, &["old first", "old second"]))
             .collect();
-        for replacement in &mut replacements {
+        for (index, old) in originals.iter().enumerate() {
+            assert_eq!(stored_entities(&store, &old.entities).len(), 2);
+            let names = read_graph(&store, |graph| {
+                graph
+                    .lookup_by_name(&old.graph.nodes[0].qualified_name)
+                    .expect("old graph names")
+            });
+            assert_eq!(
+                names.len(),
+                index,
+                "only the first graph transaction committed"
+            );
+        }
+        Connection::open(temporary.path().join("graph/graph.sqlite"))
+            .expect("graph database")
+            .execute_batch("DROP TRIGGER reject_second")
+            .expect("allow retry");
+        apply_crash_batch(&store, &replacements, operation).expect("retry batch");
+        store.close().expect("close completed batch");
+        let store = open(temporary.path(), false);
+        let files = store.list_files().expect("published statuses");
+        assert_eq!(files.len(), if operation == "delete" { 0 } else { 2 });
+        for replacement in replacements {
+            assert_eq!(
+                stored_entities(&store, &replacement.entities).len(),
+                if operation == "replace" { 2 } else { 0 }
+            );
+        }
+        for old in originals {
+            assert!(stored_entities(&store, &old.entities).is_empty());
+        }
+        assert!(files.iter().all(|file| if operation == "fail" {
+            matches!(&file.index_status, FileIndexStatus::Failed { error } if error == "extraction failed")
+        } else { file.index_status.is_indexed() }));
+    }
+}
+
+fn replacement_snapshots(store: &IndexStore) -> Vec<Snapshot> {
+    ["first.rs", "second.rs"]
+        .iter()
+        .map(|path| {
+            let mut replacement = snapshot(store, *path, &["new first", "new second"]);
             replacement.graph.edges.push(local_call(
                 &replacement.entities[0],
                 &replacement.entities[1],
             ));
-        }
-        Connection::open(Path::new(&root).join("graph/graph.sqlite")).expect("batch persistence fixture").execute_batch(&format!(
-            "CREATE TRIGGER reject_second BEFORE INSERT ON edges WHEN NEW.file_id = {} BEGIN SELECT RAISE(ABORT, 'batch interruption'); END;",
-            replacements[1].file.id.get()
-        )).expect("batch persistence fixture");
-        assert!(
-            store
-                .replace_files(&replacements.iter().map(as_write).collect::<Vec<_>>())
-                .is_err()
-        );
-        assert_eq!(callers(&store, &replacements[0].entities[1]).len(), 1);
-        // No close/checkpoint/destructors: only the batch's own flushes persist markers.
-        std::process::exit(77);
-    }
-    let temporary = tempfile::tempdir().expect("workspace");
-    let child = std::process::Command::new(std::env::current_exe().expect("test executable"))
-        .args(["--exact", "storage::store::graph_tests::process_exit_after_partial_batch_graph_commit_leaves_all_files_retryable", "--nocapture"])
-        .env(CHILD_ROOT, temporary.path()).output().expect("run interrupted batch writer");
-    assert_eq!(
-        child.status.code(),
-        Some(77),
-        "{}",
-        String::from_utf8_lossy(&child.stderr)
-    );
-    let store = open(temporary.path(), false);
-    let files = store.list_files().expect("file statuses");
-    assert_eq!(files.len(), 2);
-    assert!(
-        files
-            .iter()
-            .all(|file| file.index_status == FileIndexStatus::NotIndexed)
-    );
-    let mut replacements = Vec::new();
-    for path in ["first.rs", "second.rs"] {
-        let old = snapshot(&store, path, &["old first", "old second"]);
-        assert_eq!(stored_entities(&store, &old.entities).len(), 2);
-        let mut replacement = snapshot(&store, path, &["new first", "new second"]);
-        replacement.graph.edges.push(local_call(
-            &replacement.entities[0],
-            &replacement.entities[1],
-        ));
-        assert!(stored_entities(&store, &replacement.entities).is_empty());
-        replacements.push(replacement);
-    }
-    Connection::open(temporary.path().join("graph/graph.sqlite"))
-        .expect("batch persistence fixture")
-        .execute_batch("DROP TRIGGER reject_second")
-        .expect("batch persistence fixture");
-    store
-        .replace_files(&replacements.iter().map(as_write).collect::<Vec<_>>())
-        .expect("batch persistence fixture");
-    store.close().expect("close completed batch");
-    let store = open(temporary.path(), false);
-    assert!(
-        store
-            .list_files()
-            .expect("batch persistence fixture")
-            .iter()
-            .all(|file| file.index_status.is_indexed())
-    );
-    for replacement in replacements {
-        assert_eq!(stored_entities(&store, &replacement.entities).len(), 2);
-        assert_eq!(
-            callers(&store, &replacement.entities[1]),
-            replacement.graph.edges
-        );
-    }
+            replacement
+        })
+        .collect()
 }

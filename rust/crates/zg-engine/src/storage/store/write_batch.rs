@@ -1,6 +1,8 @@
 //! Durable publication of a bounded batch under the `IndexStore` write lock.
+use crate::domain::FileGraphResult;
+
 use super::{
-    EmbeddingModelInfo, EngineError, EngineResult, Entities, FileIndexStatus, FileRecord,
+    EmbeddingModelInfo, EngineError, EngineResult, Entities, FileId, FileIndexStatus, FileRecord,
     FileWrite, Fragments, HashSet, SqliteGraphStorage, StoreState, finish_write_batch, graph_error,
     now_epoch_ms, validate_batch,
 };
@@ -51,6 +53,17 @@ pub(super) fn validate(
                 ));
             }
             let mut file = file.clone();
+            if matches!(file.index_status, FileIndexStatus::Failed { .. }) {
+                if !entities.is_empty()
+                    || !entries.is_empty()
+                    || *graph != FileGraphResult::default()
+                {
+                    return Err(EngineError::invalid_argument(
+                        "failed files must have empty content and graph",
+                    ));
+                }
+                return Ok(file);
+            }
             file.index_status = FileIndexStatus::Indexed {
                 indexed_epoch_ms: now_epoch_ms()?,
                 entity_count: u64::try_from(entities.len())
@@ -116,6 +129,43 @@ pub(super) fn replace(
     // is safe: unpublished files remain retryable, published files are complete.
     for (file, (directories, ..)) in files.iter().zip(&prepared) {
         state.files.put(file, directories)?;
+    }
+    state.files.flush()?;
+    finish_write_batch(state)
+}
+
+/// Keep all retry markers and old IDs until every graph invalidation commits.
+pub(super) fn delete(state: &mut StoreState, file_ids: &[FileId]) -> EngineResult<()> {
+    if file_ids.is_empty() {
+        return Ok(());
+    }
+    let old_ids = file_ids
+        .iter()
+        .map(|id| state.entities.list_ids(*id))
+        .collect::<EngineResult<Vec<_>>>()?;
+    state.needs_optimize = true;
+    for id in file_ids {
+        state.files.mark_deleting(*id)?;
+    }
+    state.files.flush()?;
+    for (id, old_ids) in file_ids.iter().zip(&old_ids) {
+        state
+            .graph
+            .as_mut()
+            .expect("writable graph")
+            .delete_file_graph(id.get(), old_ids)
+            .map_err(graph_error)?;
+    }
+    for id in file_ids {
+        state.fragments.delete_file(*id)?;
+        state.entities.delete_file(*id)?;
+    }
+    state.entities.flush()?;
+    state.fragments.flush()?;
+    // Removing file records is the final publication step, after both stores
+    // have deleted their contents. Partial removal is safely retryable.
+    for id in file_ids {
+        state.files.delete(*id)?;
     }
     state.files.flush()?;
     finish_write_batch(state)

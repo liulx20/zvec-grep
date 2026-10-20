@@ -13,8 +13,7 @@ pub(crate) trait IndexStorage: Send + Sync {
     fn list_files(&self) -> EngineResult<Vec<FileRecord>>;
     fn resolve_file_ids(&self, paths: &[PathBuf]) -> EngineResult<Vec<FileId>>;
     fn replace_files(&self, writes: &[FileWrite<'_>]) -> EngineResult<()>;
-    fn mark_file_failed(&self, file: &FileRecord, error: &str) -> EngineResult<()>;
-    fn delete_file(&self, file_id: FileId) -> EngineResult<()>;
+    fn delete_files(&self, file_ids: &[FileId]) -> EngineResult<()>;
     fn finalize_writes(&self) -> EngineResult<()>;
 }
 
@@ -35,12 +34,8 @@ impl IndexStorage for IndexStore {
         self.replace_files(writes)
     }
 
-    fn mark_file_failed(&self, file: &FileRecord, error: &str) -> EngineResult<()> {
-        self.mark_file_failed(file, error)
-    }
-
-    fn delete_file(&self, file_id: FileId) -> EngineResult<()> {
-        self.delete_file(file_id)
+    fn delete_files(&self, file_ids: &[FileId]) -> EngineResult<()> {
+        self.delete_files(file_ids)
     }
 
     fn finalize_writes(&self) -> EngineResult<()> {

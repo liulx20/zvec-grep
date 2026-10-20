@@ -114,6 +114,8 @@ pub(crate) struct StoredSearchData {
 }
 
 /// Borrowed inputs for one file in a coordinated storage batch.
+/// A `Failed` file clears its content and graph and retains its failure reason;
+/// other file statuses publish a successful replacement as `Indexed`.
 #[derive(Clone, Copy)]
 pub(crate) struct FileWrite<'a> {
     pub file: &'a FileRecord,

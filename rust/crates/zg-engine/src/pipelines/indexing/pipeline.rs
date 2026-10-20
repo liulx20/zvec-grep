@@ -479,13 +479,11 @@ fn delete_stale_files(
     context: &IndexingContext<'_>,
     deleted: &[FileRecord],
 ) -> Result<(), EngineError> {
-    for file in deleted {
+    for batch in deleted.chunks(writes::MAX_FILES) {
         throw_if_cancelled(context.signal.as_ref())?;
-        context.storage.delete_file(file.id()).map_err(|error| {
-            EngineError::storage_failure(format!(
-                "delete stale file {}: {error}",
-                file.relative_path().display()
-            ))
+        let ids: Vec<_> = batch.iter().map(|file| file.id).collect();
+        context.storage.delete_files(&ids).map_err(|error| {
+            EngineError::storage_failure(format!("delete stale file batch: {error}"))
         })?;
     }
     Ok(())
@@ -689,17 +687,20 @@ async fn index_candidates(
             Ok(PreparedCandidate::File(prepared)) => *prepared,
             Err(error) => {
                 let file = candidate.scanned.to_record()?;
-                let reason = mark_file_failed(context.storage, &file, "prepare", &error)?;
-                record_file_failed(&mut stats, &file, &reason);
+                let reason = failure_reason("prepare", &error);
+                let detail =
+                    writes.push_failed(context.storage, file, reason, &mut stats, timings)?;
                 report_indexing(
                     context,
                     &stats,
                     diff,
                     progress_base,
-                    Some(format!(
-                        "failed {}",
-                        candidate.scanned.relative_path.display()
-                    )),
+                    detail.or_else(|| {
+                        Some(format!(
+                            "failed {}",
+                            candidate.scanned.relative_path.display()
+                        ))
+                    }),
                     None,
                 );
                 continue;
@@ -707,8 +708,11 @@ async fn index_candidates(
         };
 
         if prepared.fragments.is_empty() {
-            writes.push(context.storage, prepared, Vec::new(), &mut stats, timings)?;
-            report_indexing(context, &stats, diff, progress_base, None, None);
+            if let Some(detail) =
+                writes.push(context.storage, prepared, Vec::new(), &mut stats, timings)?
+            {
+                report_indexing(context, &stats, diff, progress_base, Some(detail), None);
+            }
             continue;
         }
 
@@ -793,8 +797,9 @@ async fn index_candidates(
         }
     }
     throw_if_cancelled(context.signal.as_ref())?;
-    writes.flush(context.storage, &mut stats, timings)?;
-    report_indexing(context, &stats, diff, progress_base, None, None);
+    if let Some(detail) = writes.flush(context.storage, &mut stats, timings)? {
+        report_indexing(context, &stats, diff, progress_base, Some(detail), None);
+    }
     Ok(stats)
 }
 
@@ -883,23 +888,24 @@ fn apply_embedding_files(
         throw_if_cancelled(context.signal.as_ref())?;
         match outcome {
             EmbeddedFileOutcome::Success { file, vectors } => {
-                writes.push(context.storage, file, vectors, stats, timings)?;
-                report_indexing(context, stats, diff, progress_base, None, None);
+                if let Some(detail) = writes.push(context.storage, file, vectors, stats, timings)? {
+                    report_indexing(context, stats, diff, progress_base, Some(detail), None);
+                }
             }
             EmbeddedFileOutcome::Failed { file, reason } => {
-                let reason = mark_file_failed(
-                    context.storage,
-                    &file.file,
+                let reason = failure_reason(
                     "embed",
                     &EngineError::internal(format!("embedding failed: {reason}")),
-                )?;
-                record_file_failed(stats, &file.file, &reason);
+                );
+                let path = file.file.relative_path.clone();
+                let detail =
+                    writes.push_failed(context.storage, file.file, reason, stats, timings)?;
                 report_indexing(
                     context,
                     stats,
                     diff,
                     progress_base,
-                    Some(format!("failed {}", file.file.relative_path().display())),
+                    detail.or_else(|| Some(format!("failed {}", path.display()))),
                     None,
                 );
             }
@@ -1135,22 +1141,8 @@ fn bind_entities(
         .collect()
 }
 
-fn mark_file_failed(
-    storage: &dyn IndexStorage,
-    file: &FileRecord,
-    stage: &str,
-    error: &EngineError,
-) -> Result<String, EngineError> {
-    let reason = collapse_whitespace(&format!("{stage}: {error}"));
-    storage
-        .mark_file_failed(file, &reason)
-        .map_err(|mark_error| {
-            EngineError::storage_failure(format!(
-                "record failure for {}: {mark_error}; original={reason}",
-                file.relative_path().display()
-            ))
-        })?;
-    Ok(reason)
+fn failure_reason(stage: &str, error: &EngineError) -> String {
+    collapse_whitespace(&format!("{stage}: {error}"))
 }
 
 fn record_file_failed(stats: &mut IndexWriteStats, file: &FileRecord, reason: &str) {
@@ -2428,6 +2420,7 @@ mod tests {
         failed_markers: AtomicUsize,
         fail_replacements_once: Mutex<HashSet<FileId>>,
         write_batches: Mutex<Vec<usize>>,
+        delete_batches: Mutex<Vec<usize>>,
     }
 
     #[test]
@@ -2604,10 +2597,14 @@ mod tests {
                     return Err(EngineError::storage_failure("injected replacement failure"));
                 }
                 let mut stored = file.clone();
-                stored.index_status = FileIndexStatus::Indexed {
-                    indexed_epoch_ms: 1,
-                    entity_count: entities.len() as u64,
-                };
+                if matches!(file.index_status, FileIndexStatus::Failed { .. }) {
+                    self.failed_markers.fetch_add(1, Ordering::AcqRel);
+                } else {
+                    stored.index_status = FileIndexStatus::Indexed {
+                        indexed_epoch_ms: 1,
+                        entity_count: entities.len() as u64,
+                    };
+                }
                 stored.validate()?;
                 self.graphs
                     .lock()
@@ -2627,37 +2624,23 @@ mod tests {
             Ok(())
         }
 
-        fn mark_file_failed(&self, file: &FileRecord, error: &str) -> EngineResult<()> {
-            self.failed_markers.fetch_add(1, Ordering::AcqRel);
+        fn delete_files(&self, file_ids: &[FileId]) -> EngineResult<()> {
+            self.delete_batches
+                .lock()
+                .expect("record deletion batch")
+                .push(file_ids.len());
             self.entries
                 .lock()
                 .expect("stored entries")
-                .remove(&file.id());
-            let mut stored = file.clone();
-            stored.set_index_status(FileIndexStatus::Failed {
-                error: error.to_owned(),
-            })?;
-            let mut files = self.files.lock().unwrap_or_else(PoisonError::into_inner);
-            if let Some(existing) = files
-                .iter_mut()
-                .find(|existing| existing.id() == stored.id())
-            {
-                *existing = stored;
-            } else {
-                files.push(stored);
-            }
-            Ok(())
-        }
-
-        fn delete_file(&self, file_id: FileId) -> EngineResult<()> {
-            self.entries
+                .retain(|id, _| !file_ids.contains(id));
+            self.graphs
                 .lock()
-                .expect("stored entries")
-                .remove(&file_id);
+                .expect("stored graphs")
+                .retain(|id, _| !file_ids.contains(id));
             self.files
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
-                .retain(|file| file.id() != file_id);
+                .retain(|file| !file_ids.contains(&file.id));
             Ok(())
         }
 
@@ -3064,7 +3047,73 @@ mod tests {
             );
             assert_eq!(storage.list_files().expect("stored files").len(), 65);
             assert_eq!(storage.finalized.load(Ordering::Acquire), 1);
+            for index in 0..65 {
+                std::fs::remove_file(directory.path().join(format!("file{index}.txt")))
+                    .expect("delete source");
+            }
+            let result = index_workspace(&IndexingContext {
+                workspace_index: &workspace,
+                storage: &storage,
+                scanner: &scanner,
+                embedding_models: &[&model],
+                embedding_concurrency: None,
+                on_progress: None,
+                signal: None,
+                changes: &[],
+            })
+            .await
+            .expect("delete stale batches");
+            assert_eq!(result.files_deleted, 65);
+            assert_eq!(
+                *storage.delete_batches.lock().expect("deletion batches"),
+                [64, 1]
+            );
+            assert!(storage.list_files().expect("remaining files").is_empty());
         }
+    }
+
+    #[tokio::test]
+    async fn failed_files_share_batches_and_retry_only_after_publication() {
+        let directory = tempdir().expect("workspace");
+        for index in 0..65 {
+            std::fs::write(
+                directory.path().join(format!("file{index}.txt")),
+                "indexable text",
+            )
+            .expect("source");
+        }
+        let workspace = workspace(directory.path());
+        let storage = MemoryStorage::default();
+        let scanner = RecordingScanner::new();
+        let mut model = ConcurrentModel::new();
+        model.fail_embeddings = true;
+        let result = index_workspace(&IndexingContext {
+            workspace_index: &workspace,
+            storage: &storage,
+            scanner: &scanner,
+            embedding_models: &[&model],
+            embedding_concurrency: None,
+            on_progress: None,
+            signal: None,
+            changes: &[],
+        })
+        .await
+        .expect("publish failed batches and retry once");
+        assert_eq!(result.files_failed, 65);
+        assert_eq!(result.entities_created, 0);
+        assert_eq!(
+            *storage.write_batches.lock().expect("write batches"),
+            [64, 1, 64, 1]
+        );
+        assert_eq!(storage.failed_markers.load(Ordering::Acquire), 130);
+        assert_eq!(scanner.requests.lock().expect("scan requests").len(), 2);
+        assert!(
+            storage
+                .list_files()
+                .expect("failed files")
+                .iter()
+                .all(|file| matches!(file.index_status, FileIndexStatus::Failed { .. }))
+        );
     }
 
     #[test]
@@ -3121,7 +3170,11 @@ mod tests {
     #[tokio::test]
     async fn replacement_errors_abort_without_file_retry_or_checkpoint() {
         // Zero-byte files are skipped by scanning; whitespace reaches the no-fragment commit.
-        for (source, embedding_calls) in [("indexable text", 1), (" \n", 0)] {
+        for (source, embedding_calls, fail_embeddings) in [
+            ("indexable text", 1, false),
+            (" \n", 0, false),
+            ("failed embedding", 2, true),
+        ] {
             let directory = tempdir().expect("workspace");
             std::fs::write(directory.path().join("file.txt"), source).expect("source");
             let workspace = workspace(directory.path());
@@ -3135,7 +3188,8 @@ mod tests {
                 .lock()
                 .expect("failure injection")
                 .insert(file_id);
-            let model = ConcurrentModel::new();
+            let mut model = ConcurrentModel::new();
+            model.fail_embeddings = fail_embeddings;
 
             let error = index_workspace(&IndexingContext {
                 workspace_index: &workspace,
@@ -3155,7 +3209,7 @@ mod tests {
             assert_eq!(scanner.requests.lock().expect("scan requests").len(), 1);
             assert_eq!(
                 model.prepare_calls.load(Ordering::Acquire),
-                embedding_calls,
+                usize::from(embedding_calls > 0),
                 "only a real embedding batch prepares the model"
             );
             assert_eq!(model.calls.load(Ordering::Acquire), embedding_calls);
@@ -3707,8 +3761,17 @@ mod tests {
         assert_eq!(files[0].snapshot().content_hash, Some(sha256_hex(b"bravo")));
         assert!(files[0].index_status().is_indexed());
 
+        let mut failed = files[0].clone();
+        failed.index_status = FileIndexStatus::Failed {
+            error: "test failure".into(),
+        };
         storage
-            .mark_file_failed(&files[0], "test failure")
+            .replace_files(&[FileWrite {
+                file: &failed,
+                entities: &[],
+                entries: &[],
+                graph: &FileGraphResult::default(),
+            }])
             .expect("failed state");
         let status = get_workspace_index_status(&workspace, &storage, &scanner, None)
             .await
