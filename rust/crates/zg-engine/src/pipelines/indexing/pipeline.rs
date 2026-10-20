@@ -483,7 +483,14 @@ fn delete_stale_files(
         throw_if_cancelled(context.signal.as_ref())?;
         let ids: Vec<_> = batch.iter().map(|file| file.id).collect();
         context.storage.delete_files(&ids).map_err(|error| {
-            EngineError::storage_failure(format!("delete stale file batch: {error}"))
+            EngineError::storage_failure(format!(
+                "delete stale file batch [{}]: {error}",
+                batch
+                    .iter()
+                    .map(|file| file.relative_path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))
         })?;
     }
     Ok(())
@@ -658,111 +665,147 @@ async fn index_candidates(
         Some(scheduler.snapshot()),
     );
 
-    let candidates = std::mem::take(&mut diff.candidates);
-    for mut candidate in candidates {
-        throw_if_cancelled(context.signal.as_ref())?;
-        report_indexing(
-            context,
-            &stats,
-            diff,
-            progress_base,
-            Some(format!(
-                "reading {}",
-                candidate.scanned.relative_path.display()
-            )),
-            None,
-        );
-        let prepare_started = Instant::now();
-        let prepared = if let Some(error) = candidate.scanned.detection_error.take() {
-            Err(error)
-        } else {
-            prepare_candidate(context, control, &candidate).await
-        };
-        timings.record("index_prepare", prepare_started.elapsed(), 1);
-        let prepared = match prepared {
-            Ok(PreparedCandidate::Unchanged) => {
-                diff.resolve_modified_as_unchanged();
-                continue;
-            }
-            Ok(PreparedCandidate::File(prepared)) => *prepared,
-            Err(error) => {
-                let file = candidate.scanned.to_record()?;
-                let reason = failure_reason("prepare", &error);
+    let mut result: Result<(), EngineError> = async {
+        let candidates = std::mem::take(&mut diff.candidates);
+        for mut candidate in candidates {
+            throw_if_cancelled(context.signal.as_ref())?;
+            report_indexing(
+                context,
+                &stats,
+                diff,
+                progress_base,
+                Some(format!(
+                    "reading {}",
+                    candidate.scanned.relative_path.display()
+                )),
+                None,
+            );
+            let prepare_started = Instant::now();
+            let prepared = if let Some(error) = candidate.scanned.detection_error.take() {
+                Err(error)
+            } else {
+                prepare_candidate(context, control, &candidate).await
+            };
+            timings.record("index_prepare", prepare_started.elapsed(), 1);
+            let prepared = match prepared {
+                Ok(PreparedCandidate::Unchanged) => {
+                    diff.resolve_modified_as_unchanged();
+                    continue;
+                }
+                Ok(PreparedCandidate::File(prepared)) => *prepared,
+                Err(error) if error.code() == EngineError::CANCELLED => return Err(error),
+                Err(error) => {
+                    let file = candidate.scanned.to_record()?;
+                    let reason = failure_reason("prepare", &error);
+                    let detail =
+                        writes.push_failed(context.storage, file, reason, &mut stats, timings)?;
+                    report_indexing(
+                        context,
+                        &stats,
+                        diff,
+                        progress_base,
+                        detail.or_else(|| writes.buffered_detail()),
+                        None,
+                    );
+                    continue;
+                }
+            };
+
+            if prepared.fragments.is_empty() {
                 let detail =
-                    writes.push_failed(context.storage, file, reason, &mut stats, timings)?;
+                    writes.push(context.storage, prepared, Vec::new(), &mut stats, timings)?;
                 report_indexing(
                     context,
                     &stats,
                     diff,
                     progress_base,
-                    detail.or_else(|| {
-                        Some(format!(
-                            "failed {}",
-                            candidate.scanned.relative_path.display()
-                        ))
-                    }),
+                    detail.or_else(|| writes.buffered_detail()),
                     None,
                 );
                 continue;
             }
-        };
 
-        if prepared.fragments.is_empty() {
-            if let Some(detail) =
-                writes.push(context.storage, prepared, Vec::new(), &mut stats, timings)?
-            {
-                report_indexing(context, &stats, diff, progress_base, Some(detail), None);
-            }
-            continue;
-        }
-
-        if prepared.fragments.len() > max_batch_size {
-            if !current_batch.is_empty() {
+            if prepared.fragments.len() > max_batch_size {
+                if !current_batch.is_empty() {
+                    ensure_model_prepared(context, model_prepared).await?;
+                    push_embedding(
+                        &mut running,
+                        std::mem::take(&mut current_batch),
+                        context,
+                        Arc::clone(&scheduler),
+                    );
+                    current_fragments = 0;
+                }
                 ensure_model_prepared(context, model_prepared).await?;
                 push_embedding(
                     &mut running,
-                    std::mem::take(&mut current_batch),
+                    vec![prepared],
                     context,
                     Arc::clone(&scheduler),
                 );
-                current_fragments = 0;
+            } else {
+                if current_fragments > 0
+                    && current_fragments + prepared.fragments.len() > max_batch_size
+                {
+                    ensure_model_prepared(context, model_prepared).await?;
+                    push_embedding(
+                        &mut running,
+                        std::mem::take(&mut current_batch),
+                        context,
+                        Arc::clone(&scheduler),
+                    );
+                    current_fragments = 0;
+                }
+                current_fragments += prepared.fragments.len();
+                current_batch.push(prepared);
+                if current_fragments == max_batch_size {
+                    ensure_model_prepared(context, model_prepared).await?;
+                    push_embedding(
+                        &mut running,
+                        std::mem::take(&mut current_batch),
+                        context,
+                        Arc::clone(&scheduler),
+                    );
+                    current_fragments = 0;
+                }
             }
+
+            if running.len() >= scheduler.task_concurrency()
+                && let Some(outcome) = running.next().await
+                && let Err(error) = apply_embedding_outcome(
+                    context,
+                    diff,
+                    progress_base,
+                    timings,
+                    &mut stats,
+                    &mut writes,
+                    outcome,
+                )
+            {
+                return Err(error);
+            }
+        }
+
+        if !current_batch.is_empty() {
             ensure_model_prepared(context, model_prepared).await?;
-            push_embedding(
-                &mut running,
-                vec![prepared],
-                context,
-                Arc::clone(&scheduler),
-            );
-        } else {
-            if current_fragments > 0
-                && current_fragments + prepared.fragments.len() > max_batch_size
-            {
-                ensure_model_prepared(context, model_prepared).await?;
-                push_embedding(
-                    &mut running,
-                    std::mem::take(&mut current_batch),
-                    context,
-                    Arc::clone(&scheduler),
-                );
-                current_fragments = 0;
-            }
-            current_fragments += prepared.fragments.len();
-            current_batch.push(prepared);
-            if current_fragments == max_batch_size {
-                ensure_model_prepared(context, model_prepared).await?;
-                push_embedding(
-                    &mut running,
-                    std::mem::take(&mut current_batch),
-                    context,
-                    Arc::clone(&scheduler),
-                );
-                current_fragments = 0;
-            }
+            push_embedding(&mut running, current_batch, context, Arc::clone(&scheduler));
         }
-
-        if running.len() >= scheduler.task_concurrency()
-            && let Some(outcome) = running.next().await
+        while let Some(outcome) = running.next().await {
+            apply_embedding_outcome(
+                context,
+                diff,
+                progress_base,
+                timings,
+                &mut stats,
+                &mut writes,
+                outcome,
+            )?;
+        }
+        Ok(())
+    }
+    .await;
+    while let Some(outcome) = running.next().await {
+        if !writes.commit_failed
             && let Err(error) = apply_embedding_outcome(
                 context,
                 diff,
@@ -773,33 +816,38 @@ async fn index_candidates(
                 outcome,
             )
         {
-            drain_embedding_futures(&mut running).await;
-            return Err(error);
+            if writes.commit_failed {
+                let mut report = error.into_report();
+                if let Err(original) = &result {
+                    report.message =
+                        format!("{}; while stopping after: {original}", report.message);
+                }
+                result = Err(EngineError::from_report(report));
+            } else if result.is_ok() {
+                result = Err(error);
+            }
         }
     }
-
-    if !current_batch.is_empty() {
-        ensure_model_prepared(context, model_prepared).await?;
-        push_embedding(&mut running, current_batch, context, Arc::clone(&scheduler));
-    }
-    while let Some(outcome) = running.next().await {
-        if let Err(error) = apply_embedding_outcome(
-            context,
-            diff,
-            progress_base,
-            timings,
-            &mut stats,
-            &mut writes,
-            outcome,
-        ) {
-            drain_embedding_futures(&mut running).await;
-            return Err(error);
+    // Do not retry a failed commit implicitly. Other errors and cancellation still
+    // publish complete buffered files, including successes from drained native work.
+    if !writes.commit_failed {
+        match writes.flush(context.storage, &mut stats, timings) {
+            Ok(Some(detail)) => {
+                report_indexing(context, &stats, diff, progress_base, Some(detail), None);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                let mut report = error.into_report();
+                if let Err(original) = result {
+                    report.message =
+                        format!("{}; while stopping after: {original}", report.message);
+                }
+                return Err(EngineError::from_report(report));
+            }
         }
     }
+    result?;
     throw_if_cancelled(context.signal.as_ref())?;
-    if let Some(detail) = writes.flush(context.storage, &mut stats, timings)? {
-        report_indexing(context, &stats, diff, progress_base, Some(detail), None);
-    }
     Ok(stats)
 }
 
@@ -849,10 +897,6 @@ fn push_embedding<'context>(
     )));
 }
 
-async fn drain_embedding_futures(running: &mut FuturesUnordered<EmbeddingFuture<'_>>) {
-    while running.next().await.is_some() {}
-}
-
 fn apply_embedding_outcome(
     context: &IndexingContext<'_>,
     diff: &DiffPlan,
@@ -885,19 +929,23 @@ fn apply_embedding_files(
     outcomes: Vec<EmbeddedFileOutcome>,
 ) -> Result<(), EngineError> {
     for outcome in outcomes {
-        throw_if_cancelled(context.signal.as_ref())?;
         match outcome {
             EmbeddedFileOutcome::Success { file, vectors } => {
-                if let Some(detail) = writes.push(context.storage, file, vectors, stats, timings)? {
-                    report_indexing(context, stats, diff, progress_base, Some(detail), None);
-                }
+                let detail = writes.push(context.storage, file, vectors, stats, timings)?;
+                report_indexing(
+                    context,
+                    stats,
+                    diff,
+                    progress_base,
+                    detail.or_else(|| writes.buffered_detail()),
+                    None,
+                );
             }
             EmbeddedFileOutcome::Failed { file, reason } => {
                 let reason = failure_reason(
                     "embed",
                     &EngineError::internal(format!("embedding failed: {reason}")),
                 );
-                let path = file.file.relative_path.clone();
                 let detail =
                     writes.push_failed(context.storage, file.file, reason, stats, timings)?;
                 report_indexing(
@@ -905,7 +953,7 @@ fn apply_embedding_files(
                     stats,
                     diff,
                     progress_base,
-                    detail.or_else(|| Some(format!("failed {}", path.display()))),
+                    detail.or_else(|| writes.buffered_detail()),
                     None,
                 );
             }
@@ -3205,6 +3253,11 @@ mod tests {
             .expect_err("a storage failure must abort indexing");
 
             assert_eq!(error.code(), EngineError::STORAGE_FAILURE);
+            assert!(error.message().contains("file.txt"));
+            if fail_embeddings {
+                assert!(error.message().contains("original failure"));
+                assert!(error.message().contains("injected embedding failure"));
+            }
             assert!(error.to_string().contains("injected replacement failure"));
             assert_eq!(scanner.requests.lock().expect("scan requests").len(), 1);
             assert_eq!(
@@ -3391,6 +3444,11 @@ mod tests {
         assert_eq!(error.code(), EngineError::STORAGE_FAILURE);
         assert_eq!(model.active.load(Ordering::Acquire), 0);
         assert_eq!(storage.finalized.load(Ordering::Acquire), 0);
+        let files = storage
+            .list_files()
+            .expect("completed native work persisted");
+        assert_eq!(files.len(), 1);
+        assert!(files[0].index_status.is_indexed());
     }
 
     #[tokio::test]
@@ -3509,6 +3567,62 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn cancellation_publishes_buffered_successes_and_failures_before_returning() {
+        for fail_embeddings in [false, true] {
+            let directory = tempdir().expect("workspace");
+            std::fs::write(directory.path().join("file.txt"), "indexable text").expect("source");
+            let workspace = workspace(directory.path());
+            let storage = MemoryStorage::default();
+            let scanner = RecordingScanner::new();
+            let mut model = ConcurrentModel::new();
+            model.fail_embeddings = fail_embeddings;
+            let signal = CancellationToken::new();
+            let cancel = signal.clone();
+            let progress = Arc::new(Mutex::new(Vec::new()));
+            let captured = Arc::clone(&progress);
+            let reporter = IndexProgressReporter::new(move |value| {
+                if value
+                    .detail
+                    .as_deref()
+                    .is_some_and(|detail| detail.contains("awaiting commit"))
+                {
+                    assert_eq!(value.files_indexed, Some(0));
+                    assert_eq!(value.files_failed, Some(0));
+                    cancel.cancel();
+                }
+                captured.lock().expect("progress").push(value);
+            });
+            let error = index_workspace(&IndexingContext {
+                workspace_index: &workspace,
+                storage: &storage,
+                scanner: &scanner,
+                embedding_models: &[&model],
+                embedding_concurrency: None,
+                on_progress: Some(reporter),
+                signal: Some(signal),
+                changes: &[],
+            })
+            .await
+            .expect_err("cancel after complete embedding");
+            assert_eq!(error.code(), EngineError::CANCELLED);
+            let files = storage.list_files().expect("persisted tail");
+            assert_eq!(files.len(), 1);
+            assert_eq!(files[0].index_status.is_indexed(), !fail_embeddings);
+            assert_eq!(*storage.write_batches.lock().expect("batches"), [1]);
+            assert!(progress.lock().expect("progress").iter().any(|value| {
+                value.files_indexed == Some(1)
+                    && value.detail.as_deref().is_some_and(|detail| {
+                        detail.starts_with(if fail_embeddings {
+                            "failed "
+                        } else {
+                            "indexed "
+                        })
+                    })
+            }));
+        }
     }
 
     #[tokio::test]

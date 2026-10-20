@@ -1489,3 +1489,28 @@ fn model_set_changes_require_rebuild_and_order_does_not() {
         );
     }
 }
+
+#[test]
+fn failed_periodic_maintenance_preserves_pending_maintenance_and_resets_retry_interval() {
+    let directory = tempfile::tempdir().expect("storage");
+    let store = open(directory.path(), false);
+    store
+        .write(|state| {
+            state.completed_write_batches = WRITE_BATCHES_BEFORE_OPTIMIZE - 1;
+            state.needs_optimize = true;
+            maintain_write_batch(state, |_| Err(EngineError::storage_failure("disk full")));
+            assert_eq!(state.completed_write_batches, 0);
+            assert!(
+                state.needs_optimize,
+                "finalization must still attempt maintenance"
+            );
+            for _ in 1..WRITE_BATCHES_BEFORE_OPTIMIZE {
+                maintain_write_batch(state, |_| panic!("must not retry on every batch"));
+            }
+            maintain_write_batch(state, |_| Ok(()));
+            assert_eq!(state.completed_write_batches, 0);
+            Ok(())
+        })
+        .expect("maintenance failure is not a write failure");
+    store.close().expect("close");
+}

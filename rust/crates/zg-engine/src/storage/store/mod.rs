@@ -473,12 +473,22 @@ impl IndexStore {
 // not files, because flush frequency determines the amplification.
 const WRITE_BATCHES_BEFORE_OPTIMIZE: usize = 16;
 
-fn finish_write_batch(state: &mut StoreState) -> EngineResult<()> {
+fn finish_write_batch(state: &mut StoreState) {
+    maintain_write_batch(state, optimize);
+}
+
+fn maintain_write_batch(
+    state: &mut StoreState,
+    maintenance: impl FnOnce(&mut StoreState) -> EngineResult<()>,
+) {
     state.completed_write_batches += 1;
     if state.completed_write_batches >= WRITE_BATCHES_BEFORE_OPTIMIZE {
-        optimize(state)?;
+        // The batch is already durable. Maintenance cannot turn it into a failed write.
+        state.completed_write_batches = 0;
+        if let Err(error) = maintenance(state) {
+            tracing::warn!(%error, "periodic index optimization failed; committed batch retained");
+        }
     }
-    Ok(())
 }
 
 fn optimize(state: &mut StoreState) -> EngineResult<()> {

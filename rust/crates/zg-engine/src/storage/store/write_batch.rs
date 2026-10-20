@@ -131,7 +131,8 @@ pub(super) fn replace(
         state.files.put(file, directories)?;
     }
     state.files.flush()?;
-    finish_write_batch(state)
+    finish_write_batch(state);
+    Ok(())
 }
 
 /// Keep all retry markers and old IDs until every graph invalidation commits.
@@ -168,5 +169,6 @@ pub(super) fn delete(state: &mut StoreState, file_ids: &[FileId]) -> EngineResul
         state.files.delete(*id)?;
     }
     state.files.flush()?;
-    finish_write_batch(state)
+    finish_write_batch(state);
+    Ok(())
 }

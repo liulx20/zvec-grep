@@ -20,9 +20,25 @@ struct PendingWrite {
 pub(super) struct WriteBatch {
     files: Vec<PendingWrite>,
     payload_bytes: usize,
+    pub(super) commit_failed: bool,
 }
 
 impl WriteBatch {
+    pub(super) fn buffered_detail(&self) -> Option<String> {
+        self.files.last().map(|write| {
+            let action = if matches!(write.file.index_status, FileIndexStatus::Failed { .. }) {
+                "failure buffered"
+            } else {
+                "prepared"
+            };
+            format!(
+                "{action} {} ({} files awaiting commit)",
+                write.file.relative_path.display(),
+                self.files.len()
+            )
+        })
+    }
+
     pub(super) fn push(
         &mut self,
         storage: &dyn IndexStorage,
@@ -140,7 +156,27 @@ impl WriteBatch {
             })
             .collect();
         let started = Instant::now();
-        storage.replace_files(&writes)?;
+        if let Err(error) = storage.replace_files(&writes) {
+            self.commit_failed = true;
+            let files = self
+                .files
+                .iter()
+                .map(|write| {
+                    let path = write.file.relative_path.display();
+                    match &write.file.index_status {
+                        FileIndexStatus::Failed { error } => {
+                            format!("{path} (original failure: {error})")
+                        }
+                        _ => path.to_string(),
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            let mut report = error.into_report();
+            report.message = format!("commit file batch [{files}]: {}", report.message);
+            return Err(EngineError::from_report(report));
+        }
+        self.commit_failed = false;
         timings.record("index_commit", started.elapsed(), self.files.len());
         for write in &self.files {
             if let FileIndexStatus::Failed { error } = &write.file.index_status {
