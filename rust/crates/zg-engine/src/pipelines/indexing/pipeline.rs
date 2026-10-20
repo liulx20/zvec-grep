@@ -47,11 +47,14 @@ use crate::{
         EmbeddingConcurrencyDefaults, EmbeddingOptions, EmbeddingPrepareOptions, ModelError,
         ModelRuntimeLease,
     },
-    storage::types::IndexedFragment,
+    storage::types::{FileWrite, IndexedFragment},
     utils::{collapse_whitespace, decode_index_text, sha256_hex},
 };
 
 use super::{input_budget::index_chunk_options, model_progress, storage::IndexStorage};
+
+mod writes;
+use writes::WriteBatch;
 
 const MAX_SKIPPED_FILE_SAMPLES: usize = 20;
 // All default file-size limits are at least this large.
@@ -643,6 +646,7 @@ async fn index_candidates(
     let scheduler = Arc::new(EmbeddingScheduler::new(policy));
     let max_batch_size = context.embedding_models[0].info().model().max_batch_size();
     let mut stats = IndexWriteStats::default();
+    let mut writes = WriteBatch::default();
     let mut current_batch = Vec::new();
     let mut current_fragments = 0;
     let mut running: FuturesUnordered<EmbeddingFuture<'_>> = FuturesUnordered::new();
@@ -703,9 +707,7 @@ async fn index_candidates(
         };
 
         if prepared.fragments.is_empty() {
-            let commit_started = Instant::now();
-            commit_file(context.storage, prepared, Vec::new(), &mut stats)?;
-            timings.record("index_commit", commit_started.elapsed(), 1);
+            writes.push(context.storage, prepared, Vec::new(), &mut stats, timings)?;
             report_indexing(context, &stats, diff, progress_base, None, None);
             continue;
         }
@@ -757,8 +759,15 @@ async fn index_candidates(
 
         if running.len() >= scheduler.task_concurrency()
             && let Some(outcome) = running.next().await
-            && let Err(error) =
-                apply_embedding_outcome(context, diff, progress_base, timings, &mut stats, outcome)
+            && let Err(error) = apply_embedding_outcome(
+                context,
+                diff,
+                progress_base,
+                timings,
+                &mut stats,
+                &mut writes,
+                outcome,
+            )
         {
             drain_embedding_futures(&mut running).await;
             return Err(error);
@@ -770,14 +779,22 @@ async fn index_candidates(
         push_embedding(&mut running, current_batch, context, Arc::clone(&scheduler));
     }
     while let Some(outcome) = running.next().await {
-        if let Err(error) =
-            apply_embedding_outcome(context, diff, progress_base, timings, &mut stats, outcome)
-        {
+        if let Err(error) = apply_embedding_outcome(
+            context,
+            diff,
+            progress_base,
+            timings,
+            &mut stats,
+            &mut writes,
+            outcome,
+        ) {
             drain_embedding_futures(&mut running).await;
             return Err(error);
         }
     }
     throw_if_cancelled(context.signal.as_ref())?;
+    writes.flush(context.storage, &mut stats, timings)?;
+    report_indexing(context, &stats, diff, progress_base, None, None);
     Ok(stats)
 }
 
@@ -837,6 +854,7 @@ fn apply_embedding_outcome(
     progress_base: Option<ProgressBase>,
     timings: &mut TimingCollector,
     stats: &mut IndexWriteStats,
+    writes: &mut WriteBatch,
     outcome: Result<EmbeddingBatchOutcome, ModelError>,
 ) -> Result<(), EngineError> {
     let outcome = outcome.map_err(ModelError::into_engine_error)?;
@@ -847,6 +865,7 @@ fn apply_embedding_outcome(
         progress_base,
         timings,
         stats,
+        writes,
         outcome.outcomes,
     )
 }
@@ -857,24 +876,15 @@ fn apply_embedding_files(
     progress_base: Option<ProgressBase>,
     timings: &mut TimingCollector,
     stats: &mut IndexWriteStats,
+    writes: &mut WriteBatch,
     outcomes: Vec<EmbeddedFileOutcome>,
 ) -> Result<(), EngineError> {
     for outcome in outcomes {
         throw_if_cancelled(context.signal.as_ref())?;
         match outcome {
             EmbeddedFileOutcome::Success { file, vectors } => {
-                let path = file.file.relative_path().clone();
-                let commit_started = Instant::now();
-                commit_file(context.storage, file, vectors, stats)?;
-                timings.record("index_commit", commit_started.elapsed(), 1);
-                report_indexing(
-                    context,
-                    stats,
-                    diff,
-                    progress_base,
-                    Some(format!("indexed {}", path.display())),
-                    None,
-                );
+                writes.push(context.storage, file, vectors, stats, timings)?;
+                report_indexing(context, stats, diff, progress_base, None, None);
             }
             EmbeddedFileOutcome::Failed { file, reason } => {
                 let reason = mark_file_failed(
@@ -895,38 +905,6 @@ fn apply_embedding_files(
             }
         }
     }
-    Ok(())
-}
-
-fn commit_file(
-    storage: &dyn IndexStorage,
-    file: PreparedFile,
-    vectors: Vec<Vec<f32>>,
-    stats: &mut IndexWriteStats,
-) -> Result<(), EngineError> {
-    if file.fragments.len() != vectors.len() {
-        return Err(EngineError::internal(format!(
-            "entity/vector count mismatch: fragments={} vectors={}",
-            file.fragments.len(),
-            vectors.len()
-        )));
-    }
-    let public_entities = file.entities.len();
-    let entries = file
-        .fragments
-        .into_iter()
-        .zip(vectors)
-        .map(|(fragment, vector)| IndexedFragment {
-            model: fragment.model,
-            entity_id: fragment.entity_id,
-            fragment_id: fragment.fragment_id,
-            fts_text: fragment.fts_text,
-            vector,
-        })
-        .collect::<Vec<_>>();
-    storage.replace_file(&file.file, &file.entities, &entries, &file.graph)?;
-    stats.files_indexed += 1;
-    stats.entities_created += public_entities;
     Ok(())
 }
 
@@ -2449,9 +2427,14 @@ mod tests {
         finalized: AtomicUsize,
         failed_markers: AtomicUsize,
         fail_replacements_once: Mutex<HashSet<FileId>>,
+        write_batches: Mutex<Vec<usize>>,
     }
 
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "verify canonical text, FTS and vectors together across batched publication"
+    )]
     fn prepared_content_and_fts_stay_with_their_fragment_vectors_at_commit() {
         use crate::domain::{ByteRange, MarkdownMetadata};
 
@@ -2524,13 +2507,28 @@ mod tests {
             graph: graph.clone(),
         };
         let vectors = vec![vec![1.0, 0.0], vec![0.0, 1.0]];
-        commit_file(
-            &storage,
-            prepared,
-            vectors.clone(),
-            &mut IndexWriteStats::default(),
-        )
-        .expect("commit prepared fragments");
+        let mut writes = WriteBatch::default();
+        let mut stats = IndexWriteStats::default();
+        let mut timings = TimingCollector::default();
+        writes
+            .push(
+                &storage,
+                prepared,
+                vectors.clone(),
+                &mut stats,
+                &mut timings,
+            )
+            .expect("buffer prepared fragments");
+        assert!(
+            storage
+                .entries
+                .lock()
+                .expect("fixture storage lock")
+                .is_empty()
+        );
+        writes
+            .flush(&storage, &mut stats, &mut timings)
+            .expect("commit prepared fragments");
         assert_eq!(
             storage.graphs.lock().expect("stored graph")[&file_id],
             graph
@@ -2585,42 +2583,46 @@ mod tests {
                 .clone())
         }
 
-        fn replace_file(
-            &self,
-            file: &FileRecord,
-            entities: &[Entity],
-            entries: &[IndexedFragment],
-            graph: &FileGraphResult,
-        ) -> EngineResult<()> {
-            if self
-                .fail_replacements_once
+        fn replace_files(&self, writes: &[FileWrite<'_>]) -> EngineResult<()> {
+            self.write_batches
                 .lock()
-                .expect("failure injection")
-                .remove(&file.id())
-            {
-                return Err(EngineError::storage_failure("injected replacement failure"));
-            }
-            let mut stored = file.clone();
-            stored.set_index_status(FileIndexStatus::Indexed {
-                indexed_epoch_ms: 1,
-                entity_count: entities.len() as u64,
-            })?;
-            self.graphs
-                .lock()
-                .expect("stored graphs")
-                .insert(file.id(), graph.clone());
-            self.entries
-                .lock()
-                .expect("stored entries")
-                .insert(file.id(), entries.to_vec());
-            let mut files = self.files.lock().unwrap_or_else(PoisonError::into_inner);
-            if let Some(existing) = files
-                .iter_mut()
-                .find(|existing| existing.id() == stored.id())
-            {
-                *existing = stored;
-            } else {
-                files.push(stored);
+                .expect("fixture storage lock")
+                .push(writes.len());
+            for write in writes {
+                let FileWrite {
+                    file,
+                    entities,
+                    entries,
+                    graph,
+                } = *write;
+                if self
+                    .fail_replacements_once
+                    .lock()
+                    .expect("failure injection")
+                    .remove(&file.id)
+                {
+                    return Err(EngineError::storage_failure("injected replacement failure"));
+                }
+                let mut stored = file.clone();
+                stored.index_status = FileIndexStatus::Indexed {
+                    indexed_epoch_ms: 1,
+                    entity_count: entities.len() as u64,
+                };
+                stored.validate()?;
+                self.graphs
+                    .lock()
+                    .expect("stored graphs")
+                    .insert(file.id, graph.clone());
+                self.entries
+                    .lock()
+                    .expect("stored entries")
+                    .insert(file.id, entries.to_vec());
+                let mut files = self.files.lock().unwrap_or_else(PoisonError::into_inner);
+                if let Some(existing) = files.iter_mut().find(|existing| existing.id == stored.id) {
+                    *existing = stored;
+                } else {
+                    files.push(stored);
+                }
             }
             Ok(())
         }
@@ -3030,6 +3032,90 @@ mod tests {
             created_epoch_ms: 1,
             updated_epoch_ms: 1,
         }
+    }
+
+    #[tokio::test]
+    async fn completed_files_are_persisted_in_bounded_batches_including_the_tail() {
+        for source in ["indexable text", " \n"] {
+            let directory = tempdir().expect("workspace");
+            for index in 0..65 {
+                std::fs::write(directory.path().join(format!("file{index}.txt")), source)
+                    .expect("write source");
+            }
+            let workspace = workspace(directory.path());
+            let scanner = RecordingScanner::new();
+            let storage = MemoryStorage::default();
+            let model = ConcurrentModel::new();
+            index_workspace(&IndexingContext {
+                workspace_index: &workspace,
+                storage: &storage,
+                scanner: &scanner,
+                embedding_models: &[&model],
+                embedding_concurrency: None,
+                on_progress: None,
+                signal: None,
+                changes: &[],
+            })
+            .await
+            .expect("index all batches");
+            assert_eq!(
+                *storage.write_batches.lock().expect("fixture storage lock"),
+                [64, 1]
+            );
+            assert_eq!(storage.list_files().expect("stored files").len(), 65);
+            assert_eq!(storage.finalized.load(Ordering::Acquire), 1);
+        }
+    }
+
+    #[test]
+    fn large_payload_flushes_earlier_and_failed_commits_do_not_count_as_indexed() {
+        let storage = MemoryStorage::default();
+        let mut writes = WriteBatch::default();
+        let mut stats = IndexWriteStats::default();
+        let mut timings = TimingCollector::default();
+        for id in 0..2 {
+            let fragment = prepared_fragment(&"x".repeat(9 * 1024 * 1024), 0);
+            let prepared = PreparedFile {
+                file: FileRecord {
+                    id: FileId::new(id),
+                    relative_path: SourcePath::new(format!("file{id}.txt")).expect("source path"),
+                    snapshot: FileSnapshot {
+                        size_bytes: 0,
+                        modified_epoch_ms: None,
+                        content_hash: Some(sha256_hex(b"fixture")),
+                    },
+                    index_status: FileIndexStatus::NotIndexed,
+                },
+                entities: Vec::new(),
+                fragments: vec![fragment],
+                graph: FileGraphResult::default(),
+            };
+            writes
+                .push(
+                    &storage,
+                    prepared,
+                    vec![vec![1.0, 0.0]],
+                    &mut stats,
+                    &mut timings,
+                )
+                .expect("buffer completed file");
+        }
+        assert_eq!(
+            *storage.write_batches.lock().expect("fixture storage lock"),
+            [1]
+        );
+        assert_eq!(stats.files_indexed, 1);
+        storage
+            .fail_replacements_once
+            .lock()
+            .expect("failure injection")
+            .insert(FileId::new(1));
+        assert!(writes.flush(&storage, &mut stats, &mut timings).is_err());
+        assert_eq!(stats.files_indexed, 1);
+        writes
+            .flush(&storage, &mut stats, &mut timings)
+            .expect("retry buffered file");
+        assert_eq!(stats.files_indexed, 2);
     }
 
     #[tokio::test]

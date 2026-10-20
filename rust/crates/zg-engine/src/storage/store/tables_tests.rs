@@ -54,12 +54,15 @@ impl IndexStore {
         let shared = self.shared()?;
         validate_batch(file, entities, entries, &shared.schema)?;
         self.write(|state| {
-            super::replace_file(
+            super::write_batch::replace(
                 state,
-                file,
-                entities,
-                entries,
-                &crate::domain::FileGraphResult::default(),
+                &[FileWrite {
+                    file,
+                    entities,
+                    entries,
+                    graph: &FileGraphResult::default(),
+                }],
+                std::slice::from_ref(file),
             )
         })
     }

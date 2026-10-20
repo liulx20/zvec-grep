@@ -23,8 +23,8 @@ use super::{
     fragments::{self, Fragments},
     graph::{self, OpenMode, SqliteGraphStorage},
     types::{
-        IndexedFragment, StorageSearchFilter, StorageSearchHit, StoredEntity, StoredFileAttributes,
-        StoredSearchData, WorkspaceIndexStorageOptions,
+        FileWrite, IndexedFragment, StorageSearchFilter, StorageSearchHit, StoredEntity,
+        StoredFileAttributes, StoredSearchData, WorkspaceIndexStorageOptions,
     },
     zvec::{corrupt, initialize},
 };
@@ -33,6 +33,7 @@ use crate::domain::model::EmbeddingModelInfo;
 // The resolver integration consumes this restricted interface in a follow-up PR.
 #[cfg_attr(not(test), allow(dead_code))]
 mod resolution;
+mod write_batch;
 pub(crate) use resolution::ResolutionSession;
 
 type StoreRegistry = Mutex<HashMap<PathBuf, Weak<SharedStore>>>;
@@ -53,6 +54,7 @@ struct StoreState {
     fragments: Fragments,
     graph: Option<SqliteGraphStorage>,
     needs_optimize: bool,
+    completed_write_batches: usize,
     closed: bool,
 }
 
@@ -198,6 +200,7 @@ impl IndexStore {
                 fragments,
                 graph,
                 needs_optimize: false,
+                completed_write_batches: 0,
                 closed: false,
             }),
             schema,
@@ -364,7 +367,7 @@ impl IndexStore {
         self.replace_file_with_graph(file, entities, entries, &FileGraphResult::default())
     }
 
-    /// Replace canonical content and relationships under the same store lock.
+    #[cfg(test)]
     pub(crate) fn replace_file_with_graph(
         &self,
         file: &FileRecord,
@@ -372,26 +375,20 @@ impl IndexStore {
         entries: &[IndexedFragment],
         graph: &FileGraphResult,
     ) -> EngineResult<()> {
+        self.replace_files(&[FileWrite {
+            file,
+            entities,
+            entries,
+            graph,
+        }])
+    }
+
+    /// Publish a batch only after its retry markers, graph and canonical content
+    /// are durable, in that order. Readers hold the same store lock.
+    pub(crate) fn replace_files(&self, writes: &[FileWrite<'_>]) -> EngineResult<()> {
         let shared = self.shared()?;
-        validate_batch(file, entities, entries, &shared.schema)?;
-        SqliteGraphStorage::validate_snapshot(file.id.get(), graph).map_err(graph_error)?;
-        let ids: HashSet<_> = entities.iter().map(|entity| entity.id.as_str()).collect();
-        if graph
-            .nodes
-            .iter()
-            .any(|node| !ids.contains(node.id.as_str()))
-        {
-            return Err(EngineError::invalid_argument(
-                "graph entity is absent from canonical file entities",
-            ));
-        }
-        let mut file = file.clone();
-        file.set_index_status(FileIndexStatus::Indexed {
-            indexed_epoch_ms: now_epoch_ms()?,
-            entity_count: u64::try_from(entities.len())
-                .map_err(|_| EngineError::invalid_argument("entity count exceeds u64"))?,
-        })?;
-        self.write(|state| replace_file(state, &file, entities, entries, graph))
+        let files = write_batch::validate(writes, &shared.schema)?;
+        self.write(|state| write_batch::replace(state, writes, &files))
     }
 
     pub(crate) fn mark_file_failed(&self, file: &FileRecord, error: &str) -> EngineResult<()> {
@@ -399,7 +396,14 @@ impl IndexStore {
         file.set_index_status(FileIndexStatus::Failed {
             error: error.to_owned(),
         })?;
-        self.write(|state| replace_file(state, &file, &[], &[], &FileGraphResult::default()))
+        let graph = FileGraphResult::default();
+        let write = FileWrite {
+            file: &file,
+            entities: &[],
+            entries: &[],
+            graph: &graph,
+        };
+        self.write(|state| write_batch::replace(state, &[write], std::slice::from_ref(&file)))
     }
 
     pub(crate) fn delete_file(&self, file_id: FileId) -> EngineResult<()> {
@@ -418,7 +422,8 @@ impl IndexStore {
             state.entities.delete_file(file_id)?;
             flush_content(state)?;
             state.files.delete(file_id)?;
-            state.files.flush()
+            state.files.flush()?;
+            finish_write_batch(state)
         })
     }
 
@@ -439,11 +444,7 @@ impl IndexStore {
         self.write(|state| {
             // Also finish indexes created by versions that only flushed writes.
             if state.needs_optimize || state.fragments.needs_optimize()? {
-                state.directories.optimize()?;
-                state.entities.optimize()?;
-                state.files.optimize()?;
-                state.fragments.optimize()?;
-                state.needs_optimize = false;
+                optimize(state)?;
             }
             Ok(())
         })
@@ -475,43 +476,28 @@ impl IndexStore {
     }
 }
 
-// Cross-table writes stay under the store's single writer lock.
-fn replace_file(
-    state: &mut StoreState,
-    file: &FileRecord,
-    entities: &[Entity],
-    entries: &[IndexedFragment],
-    graph: &FileGraphResult,
-) -> EngineResult<()> {
-    state.files.validate(file)?;
-    state.entities.validate_ownership(entities, file.id())?;
-    state.fragments.validate_ownership(entries, file.id())?;
-    state.needs_optimize = true;
-    let directories = state.directories.ensure(file.relative_path())?;
-    // Encode every projection before removing any of the previous file's data.
-    let entity_docs = Entities::prepare(entities)?;
-    let fragment_docs = Fragments::prepare(file, entities, entries, &directories)?;
-    let old_ids = state.entities.list_ids(file.id)?;
-    let mut unfinished = file.clone();
-    unfinished.set_index_status(FileIndexStatus::NotIndexed)?;
-    state.files.put(&unfinished, &directories)?;
-    // Persist retry intent before the graph advances or old canonical IDs disappear.
-    state.directories.flush()?;
-    state.files.flush()?;
-    state
-        .graph
-        .as_mut()
-        .expect("writable graph")
-        .write_file_graph(file.id.get(), graph, &old_ids)
-        .map_err(graph_error)?;
-    state.fragments.delete_file(file.id)?;
-    state.entities.delete_file(file.id)?;
-    state.entities.write(&entity_docs)?;
-    state.fragments.write(&fragment_docs)?;
-    // Indexed is the publication marker: all content must already be durable.
-    flush_content(state)?;
-    state.files.put(file, &directories)?;
-    state.files.flush()
+// Flushes create native segment/index files even for small writes. Compact
+// periodically so a long indexing run does not retain all of their handles
+// until finalization. Count batches (including single-file failure/deletion
+// writes), not files, because flush frequency determines the amplification.
+const WRITE_BATCHES_BEFORE_OPTIMIZE: usize = 16;
+
+fn finish_write_batch(state: &mut StoreState) -> EngineResult<()> {
+    state.completed_write_batches += 1;
+    if state.completed_write_batches >= WRITE_BATCHES_BEFORE_OPTIMIZE {
+        optimize(state)?;
+    }
+    Ok(())
+}
+
+fn optimize(state: &mut StoreState) -> EngineResult<()> {
+    state.directories.optimize()?;
+    state.entities.optimize()?;
+    state.files.optimize()?;
+    state.fragments.optimize()?;
+    state.needs_optimize = false;
+    state.completed_write_batches = 0;
+    Ok(())
 }
 
 fn graph_error(error: graph::Error) -> EngineError {

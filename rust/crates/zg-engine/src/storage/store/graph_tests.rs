@@ -726,3 +726,144 @@ fn process_exit_during_canonical_replacement_recovers_from_durable_status() {
 }
 
 mod resolution_tests;
+
+fn as_write(snapshot: &Snapshot) -> FileWrite<'_> {
+    FileWrite {
+        file: &snapshot.file,
+        entities: &snapshot.entities,
+        entries: &snapshot.fragments,
+        graph: &snapshot.graph,
+    }
+}
+
+#[test]
+fn invalid_batch_member_leaves_every_file_unchanged() {
+    let temporary = tempfile::tempdir().expect("workspace");
+    let store = open(temporary.path(), false);
+    let first = snapshot(&store, "first.rs", &["original"]);
+    write(&store, &first);
+    let replacement = snapshot(&store, "first.rs", &["replacement"]);
+    let mut invalid = snapshot(&store, "second.rs", &["second"]);
+    invalid.graph.nodes.push(node("absent canonical entity"));
+    let before = store.list_files().expect("file statuses");
+    let error = store
+        .replace_files(&[as_write(&replacement), as_write(&invalid)])
+        .expect_err("reject invalid batch");
+    assert!(
+        error
+            .to_string()
+            .contains("graph entity is absent from canonical file entities")
+    );
+    assert_eq!(store.list_files().expect("file statuses"), before);
+    assert_eq!(stored_entities(&store, &first.entities).len(), 1);
+    assert!(
+        store
+            .replace_files(&[as_write(&replacement), as_write(&replacement)])
+            .is_err()
+    );
+    assert_eq!(store.list_files().expect("file statuses"), before);
+    // Ownership checks must also cover two new records in the same batch.
+    invalid.entities[0].id = replacement.entities[0].id.clone();
+    invalid.entities[0].fragments = replacement.entities[0].fragments.clone();
+    invalid.fragments = replacement.fragments.clone();
+    invalid.graph = replacement.graph.clone();
+    let error = store
+        .replace_files(&[as_write(&replacement), as_write(&invalid)])
+        .expect_err("reject invalid batch");
+    assert!(
+        error
+            .to_string()
+            .contains("already owned by another file in this batch")
+    );
+    assert_eq!(store.list_files().expect("file statuses"), before);
+}
+
+#[test]
+fn process_exit_after_partial_batch_graph_commit_leaves_all_files_retryable() {
+    const CHILD_ROOT: &str = "ZG_TEST_BATCH_CRASH_ROOT";
+    if let Some(root) = std::env::var_os(CHILD_ROOT) {
+        let store = open(Path::new(&root), false);
+        let originals: Vec<_> = ["first.rs", "second.rs"]
+            .iter()
+            .map(|path| snapshot(&store, *path, &["old first", "old second"]))
+            .collect();
+        store
+            .replace_files(&originals.iter().map(as_write).collect::<Vec<_>>())
+            .expect("batch persistence fixture");
+        let mut replacements: Vec<_> = ["first.rs", "second.rs"]
+            .iter()
+            .map(|path| snapshot(&store, *path, &["new first", "new second"]))
+            .collect();
+        for replacement in &mut replacements {
+            replacement.graph.edges.push(local_call(
+                &replacement.entities[0],
+                &replacement.entities[1],
+            ));
+        }
+        Connection::open(Path::new(&root).join("graph/graph.sqlite")).expect("batch persistence fixture").execute_batch(&format!(
+            "CREATE TRIGGER reject_second BEFORE INSERT ON edges WHEN NEW.file_id = {} BEGIN SELECT RAISE(ABORT, 'batch interruption'); END;",
+            replacements[1].file.id.get()
+        )).expect("batch persistence fixture");
+        assert!(
+            store
+                .replace_files(&replacements.iter().map(as_write).collect::<Vec<_>>())
+                .is_err()
+        );
+        assert_eq!(callers(&store, &replacements[0].entities[1]).len(), 1);
+        // No close/checkpoint/destructors: only the batch's own flushes persist markers.
+        std::process::exit(77);
+    }
+    let temporary = tempfile::tempdir().expect("workspace");
+    let child = std::process::Command::new(std::env::current_exe().expect("test executable"))
+        .args(["--exact", "storage::store::graph_tests::process_exit_after_partial_batch_graph_commit_leaves_all_files_retryable", "--nocapture"])
+        .env(CHILD_ROOT, temporary.path()).output().expect("run interrupted batch writer");
+    assert_eq!(
+        child.status.code(),
+        Some(77),
+        "{}",
+        String::from_utf8_lossy(&child.stderr)
+    );
+    let store = open(temporary.path(), false);
+    let files = store.list_files().expect("file statuses");
+    assert_eq!(files.len(), 2);
+    assert!(
+        files
+            .iter()
+            .all(|file| file.index_status == FileIndexStatus::NotIndexed)
+    );
+    let mut replacements = Vec::new();
+    for path in ["first.rs", "second.rs"] {
+        let old = snapshot(&store, path, &["old first", "old second"]);
+        assert_eq!(stored_entities(&store, &old.entities).len(), 2);
+        let mut replacement = snapshot(&store, path, &["new first", "new second"]);
+        replacement.graph.edges.push(local_call(
+            &replacement.entities[0],
+            &replacement.entities[1],
+        ));
+        assert!(stored_entities(&store, &replacement.entities).is_empty());
+        replacements.push(replacement);
+    }
+    Connection::open(temporary.path().join("graph/graph.sqlite"))
+        .expect("batch persistence fixture")
+        .execute_batch("DROP TRIGGER reject_second")
+        .expect("batch persistence fixture");
+    store
+        .replace_files(&replacements.iter().map(as_write).collect::<Vec<_>>())
+        .expect("batch persistence fixture");
+    store.close().expect("close completed batch");
+    let store = open(temporary.path(), false);
+    assert!(
+        store
+            .list_files()
+            .expect("batch persistence fixture")
+            .iter()
+            .all(|file| file.index_status.is_indexed())
+    );
+    for replacement in replacements {
+        assert_eq!(stored_entities(&store, &replacement.entities).len(), 2);
+        assert_eq!(
+            callers(&store, &replacement.entities[1]),
+            replacement.graph.edges
+        );
+    }
+}
