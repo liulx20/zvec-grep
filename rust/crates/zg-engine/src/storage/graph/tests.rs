@@ -1131,6 +1131,7 @@ fn new_definitions_requeue_unique_and_failed_refs_atomically() {
         .neighborhood("owner", Direction::Out, None)
         .expect("before edges");
     definition.id = "second".into();
+    definition.qualified_name = "Other::run".into();
     definitions.nodes = vec![definition];
     definitions.edges = vec![edge(GraphEdgeKind::Calls, "second", "second", 1)];
     db.connection
@@ -1188,15 +1189,8 @@ fn new_definitions_requeue_unique_and_failed_refs_atomically() {
 }
 
 #[test]
-fn name_invalidation_index_is_added_on_reopen_and_used() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("graph.sqlite");
-    let db = open(&path);
-    db.connection
-        .execute_batch("DROP INDEX edges_reference_name")
-        .expect("older database");
-    db.close().expect("close");
-    let db = open(&path);
+fn name_invalidation_uses_the_schema_index() {
+    let db = SqliteGraphStorage::in_memory().expect("open");
     let mut statement = db.connection.prepare(
         "EXPLAIN QUERY PLAN UPDATE edges SET status = 'pending', target = NULL, provenance = NULL
          WHERE file_id <> ? AND reference_name IN (?, ?)
@@ -1214,4 +1208,200 @@ fn name_invalidation_index_is_added_on_reopen_and_used() {
             .any(|step| step.contains("SEARCH edges USING INDEX edges_reference_name")),
         "{plan:?}"
     );
+}
+
+#[test]
+fn unchanged_names_leave_failed_refs_alone_but_added_names_retry_them() {
+    let mut db = SqliteGraphStorage::in_memory().expect("open");
+    let mut definition = node("original");
+    definition.name = Some("run".into());
+    let mut definitions = FileGraphResult {
+        nodes: vec![definition],
+        ..Default::default()
+    };
+    db.write_file_graph(2, &definitions, &[])
+        .expect("original definition");
+    db.write_file_graph(
+        1,
+        &graph(
+            &["owner"],
+            vec![],
+            vec![reference("owner", "run"), reference("owner", "added")],
+        ),
+        &[],
+    )
+    .expect("references");
+    let refs = db.list_pending_refs(100, 0).expect("pending refs").refs;
+    db.apply_failures(&refs.iter().map(|r| r.id).collect::<Vec<_>>())
+        .expect("failed refs");
+
+    for id in ["original", "edited"] {
+        let old_id = definitions.nodes[0].id.clone();
+        definitions.nodes[0].id = id.into();
+        db.write_file_graph(2, &definitions, &[old_id])
+            .expect("save with the same name");
+        let failed: usize = db
+            .connection
+            .query_row(
+                "SELECT count(*) FROM edges WHERE file_id = 1 AND status = 'failed'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("failed references remain intact");
+        assert_eq!(
+            failed, 2,
+            "changing an entity ID does not introduce a new name"
+        );
+        assert!(
+            db.list_pending_refs(100, 0)
+                .expect("no retry")
+                .refs
+                .is_empty()
+        );
+    }
+
+    // A removed name can become newly introduced again on a later save.
+    for _ in 0..2 {
+        definitions.nodes.push(node("added"));
+        db.write_file_graph(2, &definitions, &["edited".into()])
+            .expect("add name");
+        let pending = db.list_pending_refs(100, 0).expect("new name retries").refs;
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, refs[1].id);
+        assert_eq!(pending[0].reference, refs[1].reference);
+        db.apply_failures(&[refs[1].id]).expect("still unresolved");
+        definitions.nodes.pop();
+        db.write_file_graph(2, &definitions, &["edited".into(), "added".into()])
+            .expect("remove name");
+        assert!(
+            db.list_pending_refs(100, 0)
+                .expect("removal does not retry failures")
+                .refs
+                .is_empty()
+        );
+    }
+}
+
+#[test]
+fn qualified_name_collisions_requeue_only_matching_targets_atomically() {
+    let mut db = SqliteGraphStorage::in_memory().expect("open");
+    for (file_id, id, scope) in [(2, "foo", "Foo"), (3, "bar", "Bar"), (4, "baz", "Baz")] {
+        let mut definition = node(id);
+        definition.name = Some("run".into());
+        definition.qualified_name = format!("{scope}::run");
+        db.write_file_graph(
+            file_id,
+            &FileGraphResult {
+                nodes: vec![definition],
+                ..Default::default()
+            },
+            &[],
+        )
+        .expect("scoped definition");
+    }
+    let references = ["run", "run", "run", "alias"]
+        .into_iter()
+        .map(|name| reference("owner", name))
+        .collect();
+    db.write_file_graph(1, &graph(&["owner"], vec![], references), &[])
+        .expect("references");
+    let refs = db.list_pending_refs(100, 0).expect("references").refs;
+    for (index, target, provenance) in [
+        (0, "foo", EdgeProvenance::QualifiedNameMatch),
+        (1, "bar", EdgeProvenance::QualifiedNameMatch),
+        (2, "foo", EdgeProvenance::ImportScoped),
+        (3, "foo", EdgeProvenance::QualifiedNameMatch),
+    ] {
+        db.apply_resolutions(&[Resolution {
+            ref_id: refs[index].id,
+            target_id: target.into(),
+            provenance,
+        }])
+        .expect("resolved reference");
+    }
+    let before = db
+        .neighborhood("owner", Direction::Out, None)
+        .expect("resolved edges");
+    let mut collision = node("collision");
+    collision.name = Some("run".into());
+    collision.qualified_name = "Foo::run".into();
+    // Exercise multiple parameter batches while changing scope without changing 'run'.
+    let mut definitions = graph(
+        &[],
+        vec![edge(GraphEdgeKind::Calls, "collision", "collision", 1)],
+        vec![],
+    );
+    definitions.nodes = (0..257)
+        .map(|index| node(&format!("padding{index}")))
+        .collect();
+    definitions.nodes.push(collision);
+    db.connection
+        .execute_batch(
+            "CREATE TRIGGER reject_collision BEFORE INSERT ON edges WHEN NEW.file_id = 4
+         BEGIN SELECT RAISE(ABORT, 'injected'); END;",
+        )
+        .expect("failure after requeue");
+    assert!(
+        db.write_file_graph(4, &definitions, &["baz".into()])
+            .is_err()
+    );
+    assert!(
+        db.list_pending_refs(100, 0)
+            .expect("rolled back pending refs")
+            .refs
+            .is_empty()
+    );
+    assert_eq!(
+        db.neighborhood("owner", Direction::Out, None)
+            .expect("rolled back edges"),
+        before
+    );
+    db.connection
+        .execute_batch("DROP TRIGGER reject_collision")
+        .expect("allow write");
+    db.write_file_graph(4, &definitions, &["baz".into()])
+        .expect("scope collision");
+    let pending = db
+        .list_pending_refs(100, 0)
+        .expect("requeued matching scopes")
+        .refs;
+    assert_eq!(pending, [refs[0].clone(), refs[3].clone()]);
+    assert_eq!(
+        db.neighborhood("owner", Direction::Out, None)
+            .expect("other scope and import"),
+        before[1..3]
+    );
+    assert_eq!(
+        db.lookup_by_name("run")
+            .expect("named definitions")
+            .iter()
+            .filter(|entry| entry.qualified_name == "Foo::run")
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn qualified_name_invalidation_uses_name_scope_and_target_indexes() {
+    let db = SqliteGraphStorage::in_memory().expect("open");
+    let mut statement = db.connection.prepare(
+        "EXPLAIN QUERY PLAN UPDATE edges SET status = 'pending', target = NULL, provenance = NULL
+         WHERE file_id <> ? AND provenance = 'qualified_name_match'
+           AND target IN (SELECT entity_id FROM entity_names
+               WHERE (name, qualified_name) IN (VALUES (?, ?), (?, ?)))"
+    ).expect("query plan");
+    let plan = statement
+        .query_map(
+            rusqlite::params![4, "run", "Foo::run", "get", "Bar::get"],
+            |row| row.get::<_, String>(3),
+        )
+        .expect("plan rows")
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .expect("plan");
+    for index in [
+        "SEARCH entity_names USING INDEX entity_names_name (name=? AND qualified_name=?)",
+        "SEARCH edges USING INDEX edges_target_kind",
+    ] {
+        assert!(plan.iter().any(|step| step.contains(index)), "{plan:?}");
+    }
 }

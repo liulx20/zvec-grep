@@ -1,6 +1,6 @@
 use crate::domain::{EdgeProvenance, FileGraphResult, PendingRefStatus};
 use rusqlite::{TransactionBehavior, params, params_from_iter};
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 
 use super::{Error, Result, SqliteGraphStorage, nonempty};
 
@@ -31,6 +31,8 @@ impl SqliteGraphStorage {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        // Compare names before replacing the derived index, in the same transaction.
+        requeue_name_dependent_refs(&tx, file_id, graph)?;
         let mut targets: Vec<&str> = old_entity_ids.iter().map(String::as_str).collect();
         targets.push(&file_node_id);
         targets.sort_unstable();
@@ -83,7 +85,6 @@ impl SqliteGraphStorage {
                 }
             }
         }
-        requeue_name_dependent_refs(&tx, file_id, graph)?;
         {
             let mut insert = tx.prepare(
                 "INSERT INTO edges
@@ -142,15 +143,36 @@ fn requeue_name_dependent_refs(
     file_id: u32,
     graph: &FileGraphResult,
 ) -> Result<()> {
-    let names: Vec<_> = graph
+    let definitions: BTreeSet<_> = graph
         .nodes
         .iter()
-        .filter_map(|node| node.name.as_deref())
-        .filter(|name| !name.trim().is_empty())
-        .collect::<std::collections::BTreeSet<_>>()
+        .filter_map(|node| {
+            let name = node.name.as_ref().filter(|name| !name.trim().is_empty())?;
+            Some((name.clone(), node.qualified_name.clone()))
+        })
+        .collect();
+    if definitions.is_empty() {
+        return Ok(());
+    }
+    let old_definitions = tx
+        .prepare("SELECT name, qualified_name FROM entity_names WHERE file_id = ?")?
+        .query_map([file_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<BTreeSet<_>>>()?;
+    let old_names: HashSet<_> = old_definitions
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect();
+    let names: Vec<_> = definitions
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .filter(|name| !old_names.contains(name))
+        .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
-    // New definitions can invalidate uniqueness or make failed refs resolvable.
+    // Only newly introduced names can requeue failed or name-dependent refs.
+    // Rewriting existing names still invalidates their inbound edges by target ID.
     // Ambiguous refs remain pending and the resolver refreshes their candidates.
     for chunk in names.chunks(TARGET_ID_BATCH_SIZE) {
         let placeholders = vec!["?"; chunk.len()].join(",");
@@ -165,6 +187,38 @@ fn requeue_name_dependent_refs(
                     chunk
                         .iter()
                         .map(|name| rusqlite::types::Value::Text((*name).into())),
+                ),
+            ),
+        )?;
+    }
+    let added: Vec<_> = definitions.difference(&old_definitions).collect();
+    requeue_qualified_name_refs(tx, file_id, &added)
+}
+
+fn requeue_qualified_name_refs(
+    tx: &rusqlite::Transaction<'_>,
+    file_id: u32,
+    definitions: &[&(String, String)],
+) -> Result<()> {
+    // Match the resolved target's name and scope, including aliased references.
+    // Two parameters per definition, plus the excluded owning file ID.
+    for chunk in definitions.chunks(TARGET_ID_BATCH_SIZE / 2) {
+        let placeholders = vec!["(?, ?)"; chunk.len()].join(",");
+        tx.execute(
+            &format!(
+                "UPDATE edges SET status = 'pending', target = NULL, provenance = NULL
+                 WHERE file_id <> ? AND provenance = 'qualified_name_match'
+                   AND target IN (SELECT entity_id FROM entity_names
+                       WHERE (name, qualified_name) IN (VALUES {placeholders}))"
+            ),
+            params_from_iter(
+                std::iter::once(rusqlite::types::Value::Integer(i64::from(file_id))).chain(
+                    chunk.iter().flat_map(|(name, qualified_name)| {
+                        [
+                            rusqlite::types::Value::Text(name.clone()),
+                            rusqlite::types::Value::Text(qualified_name.clone()),
+                        ]
+                    }),
                 ),
             ),
         )?;

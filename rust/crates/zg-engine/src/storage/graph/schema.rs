@@ -43,11 +43,6 @@ pub(crate) fn initialize(connection: &mut Connection) -> Result<()> {
     } else {
         validate(&tx)?;
     }
-    // Add the lookup index to existing writable databases as well.
-    tx.execute_batch(
-        "CREATE INDEX IF NOT EXISTS edges_reference_name ON edges(reference_name)
-        WHERE status = 'failed' OR provenance = 'workspace_unique';",
-    )?;
     tx.commit()?;
     Ok(())
 }
@@ -89,6 +84,8 @@ CREATE INDEX edges_pending_id ON edges(id) WHERE status = 'pending';
 ";
 
 const RESOLUTION_SCHEMA: &str = "
+CREATE INDEX edges_reference_name ON edges(reference_name)
+    WHERE status = 'failed' OR provenance = 'workspace_unique';
 CREATE TABLE entity_names (
     entity_id TEXT PRIMARY KEY,
     file_id INTEGER NOT NULL CHECK (file_id BETWEEN 0 AND 4294967295),
@@ -98,7 +95,7 @@ CREATE TABLE entity_names (
     arity INTEGER CHECK (arity >= 0)
 ) STRICT;
 CREATE INDEX entity_names_file ON entity_names(file_id);
-CREATE INDEX entity_names_name ON entity_names(name);
+CREATE INDEX entity_names_name ON entity_names(name, qualified_name);
 CREATE TABLE reference_candidates (
     ref_id INTEGER NOT NULL REFERENCES edges(id) ON DELETE CASCADE,
     target_id TEXT NOT NULL,
