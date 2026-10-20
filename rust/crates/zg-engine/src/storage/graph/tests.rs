@@ -1091,3 +1091,127 @@ fn graph_without_name_index_requires_rebuild_instead_of_incomplete_resolution() 
         .expect("unchanged schema");
     assert_eq!(count, 0);
 }
+
+#[test]
+fn new_definitions_requeue_unique_and_failed_refs_atomically() {
+    let mut db = SqliteGraphStorage::in_memory().expect("open");
+    let mut definition = node("first");
+    definition.name = Some("run".into());
+    let mut definitions = FileGraphResult {
+        nodes: vec![definition.clone()],
+        ..Default::default()
+    };
+    db.write_file_graph(2, &definitions, &[])
+        .expect("original definition");
+    let references = ["run", "run", "run", "run", "run", "other"]
+        .into_iter()
+        .map(|name| reference("owner", name))
+        .collect();
+    db.write_file_graph(1, &graph(&["owner"], vec![], references), &[])
+        .expect("references");
+    let original = db.list_pending_refs(100, 0).expect("refs").refs;
+    for (index, provenance) in [
+        (0, EdgeProvenance::WorkspaceUnique),
+        (3, EdgeProvenance::QualifiedNameMatch),
+        (4, EdgeProvenance::ImportScoped),
+    ] {
+        db.apply_resolutions(&[Resolution {
+            ref_id: original[index].id,
+            target_id: "first".into(),
+            provenance,
+        }])
+        .expect("resolve");
+    }
+    db.apply_failures(&[original[1].id, original[5].id])
+        .expect("failed refs");
+    db.record_candidates(&[(original[2].id, vec!["first".into()])])
+        .expect("ambiguity");
+    let before_pending = db.list_pending_refs(100, 0).expect("before pending").refs;
+    let before_edges = db
+        .neighborhood("owner", Direction::Out, None)
+        .expect("before edges");
+    definition.id = "second".into();
+    definitions.nodes = vec![definition];
+    definitions.edges = vec![edge(GraphEdgeKind::Calls, "second", "second", 1)];
+    db.connection
+        .execute_batch(
+            "CREATE TRIGGER reject_edge BEFORE INSERT ON edges
+        WHEN NEW.file_id = 3 BEGIN SELECT RAISE(ABORT, 'injected'); END;",
+        )
+        .expect("failure after invalidation");
+    assert!(db.write_file_graph(3, &definitions, &[]).is_err());
+    assert_eq!(
+        db.list_pending_refs(100, 0).expect("rollback pending").refs,
+        before_pending
+    );
+    assert_eq!(
+        db.neighborhood("owner", Direction::Out, None)
+            .expect("rollback edges"),
+        before_edges
+    );
+    assert_eq!(db.lookup_by_name("run").expect("rollback names").len(), 1);
+    db.connection
+        .execute_batch("DROP TRIGGER reject_edge")
+        .expect("remove fault");
+    db.write_file_graph(3, &definitions, &[])
+        .expect("new definition");
+    let pending = db.list_pending_refs(100, 0).expect("requeued").refs;
+    assert_eq!(
+        pending.iter().map(|r| r.id).collect::<Vec<_>>(),
+        original[..3].iter().map(|r| r.id).collect::<Vec<_>>()
+    );
+    for (actual, expected) in pending.iter().zip(&original) {
+        assert_eq!(
+            actual.reference, expected.reference,
+            "retain reference evidence and IDs"
+        );
+    }
+    assert_eq!(
+        pending[2], before_pending[0],
+        "ambiguity remains pending with its candidates"
+    );
+    assert_eq!(db.lookup_by_name("run").expect("both definitions").len(), 2);
+    assert_eq!(
+        db.neighborhood("owner", Direction::Out, None)
+            .expect("stable bindings"),
+        before_edges[1..]
+    );
+    let status: String = db
+        .connection
+        .query_row(
+            "SELECT status FROM edges WHERE id = ?",
+            [original[5].id],
+            |r| r.get(0),
+        )
+        .expect("unrelated status");
+    assert_eq!(status, "failed", "unrelated names remain failed");
+}
+
+#[test]
+fn name_invalidation_index_is_added_on_reopen_and_used() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("graph.sqlite");
+    let db = open(&path);
+    db.connection
+        .execute_batch("DROP INDEX edges_reference_name")
+        .expect("older database");
+    db.close().expect("close");
+    let db = open(&path);
+    let mut statement = db.connection.prepare(
+        "EXPLAIN QUERY PLAN UPDATE edges SET status = 'pending', target = NULL, provenance = NULL
+         WHERE file_id <> ? AND reference_name IN (?, ?)
+           AND (status = 'failed' OR provenance = 'workspace_unique')"
+    ).expect("query plan");
+    let plan = statement
+        .query_map(rusqlite::params![3, "run", "setup"], |row| {
+            row.get::<_, String>(3)
+        })
+        .expect("plan rows")
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .expect("plan");
+    assert!(
+        plan.iter()
+            .any(|step| step.contains("SEARCH edges USING INDEX edges_reference_name")),
+        "{plan:?}"
+    );
+}

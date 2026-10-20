@@ -83,6 +83,7 @@ impl SqliteGraphStorage {
                 }
             }
         }
+        requeue_name_dependent_refs(&tx, file_id, graph)?;
         {
             let mut insert = tx.prepare(
                 "INSERT INTO edges
@@ -134,6 +135,41 @@ impl SqliteGraphStorage {
     ) -> Result<()> {
         self.write_file_graph(file_id, &FileGraphResult::default(), old_entity_ids)
     }
+}
+
+fn requeue_name_dependent_refs(
+    tx: &rusqlite::Transaction<'_>,
+    file_id: u32,
+    graph: &FileGraphResult,
+) -> Result<()> {
+    let names: Vec<_> = graph
+        .nodes
+        .iter()
+        .filter_map(|node| node.name.as_deref())
+        .filter(|name| !name.trim().is_empty())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    // New definitions can invalidate uniqueness or make failed refs resolvable.
+    // Ambiguous refs remain pending and the resolver refreshes their candidates.
+    for chunk in names.chunks(TARGET_ID_BATCH_SIZE) {
+        let placeholders = vec!["?"; chunk.len()].join(",");
+        tx.execute(
+            &format!(
+                "UPDATE edges SET status = 'pending', target = NULL, provenance = NULL
+                 WHERE file_id <> ? AND reference_name IN ({placeholders})
+                   AND (status = 'failed' OR provenance = 'workspace_unique')"
+            ),
+            params_from_iter(
+                std::iter::once(rusqlite::types::Value::Integer(i64::from(file_id))).chain(
+                    chunk
+                        .iter()
+                        .map(|name| rusqlite::types::Value::Text((*name).into())),
+                ),
+            ),
+        )?;
+    }
+    Ok(())
 }
 
 pub(super) fn validate(

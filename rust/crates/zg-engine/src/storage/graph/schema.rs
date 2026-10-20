@@ -43,13 +43,18 @@ pub(crate) fn initialize(connection: &mut Connection) -> Result<()> {
     } else {
         validate(&tx)?;
     }
+    // Add the lookup index to existing writable databases as well.
+    tx.execute_batch(
+        "CREATE INDEX IF NOT EXISTS edges_reference_name ON edges(reference_name)
+        WHERE status = 'failed' OR provenance = 'workspace_unique';",
+    )?;
     tx.commit()?;
     Ok(())
 }
 
 // Direct local edges and references share one table. Resolution fills the target
 // on the existing reference row; invalidation clears it and retains the evidence.
-// Failed references leave the pending queue until their owning file is rewritten.
+// Failed references are retried when their file or matching definitions change.
 const SCHEMA: &str = "
 CREATE TABLE edges (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

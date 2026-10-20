@@ -154,7 +154,7 @@ impl SqliteGraphStorage {
         Ok(recorded)
     }
 
-    /// Failed references are retried when their owning file is rewritten.
+    /// Failed references are retried when their file or matching definitions change.
     pub(crate) fn apply_failures(&mut self, ids: &[i64]) -> Result<usize> {
         if ids.iter().any(|id| *id < 1) {
             return Err(Error::InvalidInput("failures require a positive ref ID"));
