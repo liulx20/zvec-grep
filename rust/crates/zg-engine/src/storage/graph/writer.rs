@@ -1,6 +1,6 @@
 use crate::domain::{EdgeProvenance, FileGraphResult, PendingRefStatus};
 use rusqlite::{TransactionBehavior, params, params_from_iter};
-use std::collections::{BTreeSet, HashSet};
+use std::collections::HashSet;
 
 use super::{Error, Result, SqliteGraphStorage, nonempty};
 
@@ -10,10 +10,9 @@ const TARGET_ID_BATCH_SIZE: usize = 512;
 impl SqliteGraphStorage {
     /// Atomically replaces one file's local graph and invalidates inbound edges.
     /// `old_entity_ids` must contain **all** pre-update entity IDs from zvec; pass
-    /// an empty slice for a new file. Snapshot node IDs validate ownership;
-    /// named nodes also supply the resolver's derived name index.
+    /// an empty slice for a new file. Snapshot node IDs validate ownership.
     /// The implicit file endpoint is `f{file_id}`, matching
-    /// the zvec file document key. Cross-file edges must use `apply_resolutions`.
+    /// the zvec file document key. Cross-file edges are written by the resolver.
     /// Read old IDs before mutating zvec, under the same workspace write lock.
     /// This transaction covers SQLite only; the coordinator owns cross-store recovery.
     ///
@@ -31,23 +30,12 @@ impl SqliteGraphStorage {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        // Compare names before replacing the derived index, in the same transaction.
-        requeue_name_dependent_refs(&tx, file_id, graph)?;
         let mut targets: Vec<&str> = old_entity_ids.iter().map(String::as_str).collect();
         targets.push(&file_node_id);
         targets.sort_unstable();
         targets.dedup();
         for chunk in targets.chunks(TARGET_ID_BATCH_SIZE) {
             let placeholders = vec!["?"; chunk.len()].join(",");
-            // Discard the complete candidate set if any member changes. Retaining
-            // only the survivors could turn ambiguity into false uniqueness.
-            tx.execute(
-                &format!(
-                    "DELETE FROM reference_candidates WHERE ref_id IN
-                    (SELECT ref_id FROM reference_candidates WHERE target_id IN ({placeholders}))"
-                ),
-                params_from_iter(chunk.iter().copied()),
-            )?;
             // Even unchanged target IDs require re-resolution. Preserve the row ID
             // and reference evidence for the next resolution pass.
             tx.execute(
@@ -66,25 +54,6 @@ impl SqliteGraphStorage {
             )?;
         }
         tx.execute("DELETE FROM edges WHERE file_id = ?", [file_id])?;
-        tx.execute("DELETE FROM entity_names WHERE file_id = ?", [file_id])?;
-        {
-            let mut insert = tx.prepare(
-                "INSERT INTO entity_names (entity_id, file_id, name, qualified_name, is_exported, arity)
-                 VALUES (?, ?, ?, ?, ?, ?)"
-            )?;
-            for node in &graph.nodes {
-                if let Some(name) = node.name.as_deref().filter(|name| !name.trim().is_empty()) {
-                    insert.execute(params![
-                        node.id,
-                        file_id,
-                        name,
-                        node.qualified_name,
-                        node.is_exported,
-                        node.arity
-                    ])?;
-                }
-            }
-        }
         {
             let mut insert = tx.prepare(
                 "INSERT INTO edges
@@ -138,94 +107,6 @@ impl SqliteGraphStorage {
     }
 }
 
-fn requeue_name_dependent_refs(
-    tx: &rusqlite::Transaction<'_>,
-    file_id: u32,
-    graph: &FileGraphResult,
-) -> Result<()> {
-    let definitions: BTreeSet<_> = graph
-        .nodes
-        .iter()
-        .filter_map(|node| {
-            let name = node.name.as_ref().filter(|name| !name.trim().is_empty())?;
-            Some((name.clone(), node.qualified_name.clone()))
-        })
-        .collect();
-    if definitions.is_empty() {
-        return Ok(());
-    }
-    let old_definitions = tx
-        .prepare("SELECT name, qualified_name FROM entity_names WHERE file_id = ?")?
-        .query_map([file_id], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?
-        .collect::<rusqlite::Result<BTreeSet<_>>>()?;
-    let old_names: HashSet<_> = old_definitions
-        .iter()
-        .map(|(name, _)| name.as_str())
-        .collect();
-    let names: Vec<_> = definitions
-        .iter()
-        .map(|(name, _)| name.as_str())
-        .filter(|name| !old_names.contains(name))
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect();
-    // Only newly introduced names can requeue failed or name-dependent refs.
-    // Rewriting existing names still invalidates their inbound edges by target ID.
-    // Ambiguous refs remain pending and the resolver refreshes their candidates.
-    for chunk in names.chunks(TARGET_ID_BATCH_SIZE) {
-        let placeholders = vec!["?"; chunk.len()].join(",");
-        tx.execute(
-            &format!(
-                "UPDATE edges SET status = 'pending', target = NULL, provenance = NULL
-                 WHERE file_id <> ? AND reference_name IN ({placeholders})
-                   AND (status = 'failed' OR provenance = 'workspace_unique')"
-            ),
-            params_from_iter(
-                std::iter::once(rusqlite::types::Value::Integer(i64::from(file_id))).chain(
-                    chunk
-                        .iter()
-                        .map(|name| rusqlite::types::Value::Text((*name).into())),
-                ),
-            ),
-        )?;
-    }
-    let added: Vec<_> = definitions.difference(&old_definitions).collect();
-    requeue_qualified_name_refs(tx, file_id, &added)
-}
-
-fn requeue_qualified_name_refs(
-    tx: &rusqlite::Transaction<'_>,
-    file_id: u32,
-    definitions: &[&(String, String)],
-) -> Result<()> {
-    // Match the resolved target's name and scope, including aliased references.
-    // Two parameters per definition, plus the excluded owning file ID.
-    for chunk in definitions.chunks(TARGET_ID_BATCH_SIZE / 2) {
-        let placeholders = vec!["(?, ?)"; chunk.len()].join(",");
-        tx.execute(
-            &format!(
-                "UPDATE edges SET status = 'pending', target = NULL, provenance = NULL
-                 WHERE file_id <> ? AND provenance = 'qualified_name_match'
-                   AND target IN (SELECT entity_id FROM entity_names
-                       WHERE (name, qualified_name) IN (VALUES {placeholders}))"
-            ),
-            params_from_iter(
-                std::iter::once(rusqlite::types::Value::Integer(i64::from(file_id))).chain(
-                    chunk.iter().flat_map(|(name, qualified_name)| {
-                        [
-                            rusqlite::types::Value::Text(name.clone()),
-                            rusqlite::types::Value::Text(qualified_name.clone()),
-                        ]
-                    }),
-                ),
-            ),
-        )?;
-    }
-    Ok(())
-}
-
 pub(super) fn validate(
     file_id: &str,
     graph: &FileGraphResult,
@@ -251,7 +132,7 @@ pub(super) fn validate(
             || !owns(&edge.target)
         {
             return Err(Error::InvalidInput(
-                "file snapshots require local edges; use apply_resolutions for cross-file edges",
+                "file snapshots require local edges; cross-file edges must be resolved separately",
             ));
         }
         if edge.line == Some(0) {

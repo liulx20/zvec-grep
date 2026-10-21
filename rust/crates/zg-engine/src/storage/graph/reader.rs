@@ -57,33 +57,3 @@ fn edge_from_row(row: &Row<'_>) -> rusqlite::Result<FileEdge> {
         metadata: decode_metadata(&row.get::<_, String>(6)?)?,
     })
 }
-
-impl SqliteGraphStorage {
-    pub(crate) fn lookup_by_name(&self, name: &str) -> Result<Vec<super::NameIndexEntry>> {
-        nonempty(name)?;
-        let mut statement = self.connection.prepare(
-            "SELECT entity_id, file_id, qualified_name, is_exported, arity
-             FROM entity_names WHERE name = ? ORDER BY entity_id",
-        )?;
-        Ok(statement
-            .query_map([name], |row| {
-                Ok(super::NameIndexEntry {
-                    entity_id: row.get(0)?,
-                    file_id: row.get(1)?,
-                    qualified_name: row.get(2)?,
-                    is_exported: row.get(3)?,
-                    arity: row.get(4)?,
-                })
-            })?
-            .collect::<rusqlite::Result<_>>()?)
-    }
-
-    pub(crate) fn import_targets(&self, file_id: u32) -> Result<Vec<String>> {
-        let mut statement = self.connection.prepare(
-            "SELECT DISTINCT target FROM edges WHERE file_id = ? AND kind = 'imports' AND status = 'resolved' ORDER BY target"
-        )?;
-        Ok(statement
-            .query_map([file_id], |row| row.get(0))?
-            .collect::<rusqlite::Result<_>>()?)
-    }
-}

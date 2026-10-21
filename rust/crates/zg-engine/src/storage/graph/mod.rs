@@ -1,20 +1,24 @@
 //! SQLite persistence for directed code relationships and pending references.
 //!
 //! Canonical nodes and file metadata remain in zvec; SQLite holds relationships,
-//! a derived name index, and resolver candidate evidence. Each file replacement is
-//! atomic within SQLite; the indexing coordinator owns consistency with zvec.
+//! including pending references. Each file replacement is atomic within SQLite;
+//! the indexing coordinator owns consistency with zvec.
 //! Callers must serialize reference reads, resolution and writeback with file updates.
 //! This module does not resolve names, run FTS, or manage workspace locks.
 //! `IndexStore` owns the writable connection and coordinates file replacement.
 
+#[cfg(test)]
 mod pending;
+#[cfg(test)]
 mod reader;
 mod schema;
+#[cfg(test)]
 mod types;
 mod writer;
 
 use rusqlite::{Connection, OpenFlags};
 use std::{path::Path, time::Duration};
+#[cfg(test)]
 pub(crate) use types::*;
 
 /// Errors at the graph persistence boundary.
@@ -42,6 +46,7 @@ pub(crate) type Result<T> = std::result::Result<T, Error>;
 /// Read-only opening never creates a database or modifies its schema.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum OpenMode {
+    #[cfg(test)]
     ReadOnly,
     ReadWrite,
 }
@@ -70,6 +75,7 @@ impl SqliteGraphStorage {
             return Err(Error::InvalidInput("database path is empty"));
         }
         let flags = match mode {
+            #[cfg(test)]
             OpenMode::ReadOnly => OpenFlags::SQLITE_OPEN_READ_ONLY,
             OpenMode::ReadWrite => {
                 if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
@@ -85,6 +91,7 @@ impl SqliteGraphStorage {
     ///
     /// # Errors
     /// Returns SQLite initialization errors.
+    #[cfg(test)]
     pub(crate) fn in_memory() -> Result<Self> {
         Self::configure(Connection::open_in_memory()?, OpenMode::ReadWrite)
     }
@@ -93,6 +100,7 @@ impl SqliteGraphStorage {
         connection.busy_timeout(Duration::from_secs(5))?;
         connection.pragma_update(None, "foreign_keys", true)?;
         match mode {
+            #[cfg(test)]
             OpenMode::ReadOnly => schema::validate(&connection)?,
             OpenMode::ReadWrite => {
                 schema::initialize(&mut connection)?;
@@ -120,12 +128,14 @@ fn nonempty(value: &str) -> Result<()> {
     }
 }
 
+#[cfg(test)]
 fn decode_enum<T: serde::de::DeserializeOwned>(value: String) -> rusqlite::Result<T> {
     serde_json::from_value(serde_json::Value::String(value)).map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(error))
     })
 }
 
+#[cfg(test)]
 fn decode_metadata(value: &str) -> rusqlite::Result<Metadata> {
     serde_json::from_str(value).map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(error))

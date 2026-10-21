@@ -186,7 +186,8 @@ fn callers(store: &IndexStore, target: &Entity) -> Vec<FileEdge> {
 
 fn resolve(store: &IndexStore, target: &Entity) -> i64 {
     store
-        .with_resolution_session(|graph| {
+        .write(|state| {
+            let graph = state.graph.as_mut().expect("graph is open");
             let refs = graph.list_pending_refs(100, 0).expect("pending refs");
             assert_eq!(refs.refs.len(), 1);
             let id = refs.refs[0].id;
@@ -740,8 +741,6 @@ fn process_exit_during_canonical_replacement_recovers_from_durable_status() {
     );
 }
 
-mod resolution_tests;
-
 fn as_write(snapshot: &Snapshot) -> FileWrite<'_> {
     FileWrite {
         file: &snapshot.file,
@@ -862,14 +861,21 @@ fn process_exit_after_partial_batch_graph_commit_leaves_all_files_retryable() {
         let store = open(Path::new(&root), false);
         let originals: Vec<_> = ["first.rs", "second.rs"]
             .iter()
-            .map(|path| snapshot(&store, *path, &["old first", "old second"]))
+            .map(|path| {
+                let mut original = snapshot(&store, *path, &["old first", "old second"]);
+                original
+                    .graph
+                    .edges
+                    .push(local_call(&original.entities[0], &original.entities[1]));
+                original
+            })
             .collect();
         store
             .replace_files(&originals.iter().map(as_write).collect::<Vec<_>>())
             .expect("original batch");
         let replacements = replacement_snapshots(&store);
         Connection::open(Path::new(&root).join("graph/graph.sqlite")).expect("graph database").execute_batch(&format!(
-            "CREATE TRIGGER reject_second BEFORE DELETE ON entity_names WHEN OLD.file_id = {} BEGIN SELECT RAISE(ABORT, 'batch interruption'); END;",
+            "CREATE TRIGGER reject_second BEFORE DELETE ON edges WHEN OLD.file_id = {} BEGIN SELECT RAISE(ABORT, 'batch interruption'); END;",
             replacements[1].file.id.get()
         )).expect("inject second file failure");
         let operation = std::env::var(CHILD_OPERATION).expect("batch operation");
@@ -900,30 +906,25 @@ fn process_exit_after_partial_batch_graph_commit_leaves_all_files_retryable() {
         assert!(files.iter().all(|file| file.index_status == expected));
         let replacements = replacement_snapshots(&store);
         // The first graph transaction committed; the second rolled back.
-        let names = store
-            .read(|state| {
-                state
-                    .graph
-                    .as_ref()
-                    .expect("graph")
-                    .lookup_by_name(&replacements[0].graph.nodes[0].qualified_name)
-                    .map_err(graph_error)
-            })
-            .expect("first graph outcome");
-        assert_eq!(names.len(), usize::from(operation == "replace"));
+        assert_eq!(
+            callers(&store, &replacements[0].entities[1]).len(),
+            usize::from(operation == "replace")
+        );
         let originals: Vec<_> = ["first.rs", "second.rs"]
             .iter()
-            .map(|path| snapshot(&store, *path, &["old first", "old second"]))
+            .map(|path| {
+                let mut original = snapshot(&store, *path, &["old first", "old second"]);
+                original
+                    .graph
+                    .edges
+                    .push(local_call(&original.entities[0], &original.entities[1]));
+                original
+            })
             .collect();
         for (index, old) in originals.iter().enumerate() {
             assert_eq!(stored_entities(&store, &old.entities).len(), 2);
-            let names = read_graph(&store, |graph| {
-                graph
-                    .lookup_by_name(&old.graph.nodes[0].qualified_name)
-                    .expect("old graph names")
-            });
             assert_eq!(
-                names.len(),
+                callers(&store, &old.entities[1]).len(),
                 index,
                 "only the first graph transaction committed"
             );
