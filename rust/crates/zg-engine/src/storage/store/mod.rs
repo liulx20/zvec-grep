@@ -168,7 +168,7 @@ impl IndexStore {
                 && files
                     .list()?
                     .iter()
-                    .any(|file| file.index_status.is_indexed())
+                    .any(|file| file.index_status().is_indexed())
             {
                 return Err(EngineError::storage_failure(
                     "graph database is missing for indexed files; rebuild the index with `zg --index --rebuild`",

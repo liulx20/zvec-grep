@@ -481,13 +481,13 @@ fn delete_stale_files(
 ) -> Result<(), EngineError> {
     for batch in deleted.chunks(writes::MAX_FILES) {
         throw_if_cancelled(context.signal.as_ref())?;
-        let ids: Vec<_> = batch.iter().map(|file| file.id).collect();
+        let ids: Vec<_> = batch.iter().map(FileRecord::id).collect();
         context.storage.delete_files(&ids).map_err(|error| {
             EngineError::storage_failure(format!(
                 "delete stale file batch [{}]: {error}",
                 batch
                     .iter()
-                    .map(|file| file.relative_path.display().to_string())
+                    .map(|file| file.relative_path().display().to_string())
                     .collect::<Vec<_>>()
                     .join(", ")
             ))
@@ -2640,30 +2640,33 @@ mod tests {
                     .fail_replacements_once
                     .lock()
                     .expect("failure injection")
-                    .remove(&file.id)
+                    .remove(&file.id())
                 {
                     return Err(EngineError::storage_failure("injected replacement failure"));
                 }
                 let mut stored = file.clone();
-                if matches!(file.index_status, FileIndexStatus::Failed { .. }) {
+                if matches!(file.index_status(), FileIndexStatus::Failed { .. }) {
                     self.failed_markers.fetch_add(1, Ordering::AcqRel);
                 } else {
-                    stored.index_status = FileIndexStatus::Indexed {
+                    stored.set_index_status(FileIndexStatus::Indexed {
                         indexed_epoch_ms: 1,
                         entity_count: entities.len() as u64,
-                    };
+                    })?;
                 }
-                stored.validate()?;
+
                 self.graphs
                     .lock()
                     .expect("stored graphs")
-                    .insert(file.id, graph.clone());
+                    .insert(file.id(), graph.clone());
                 self.entries
                     .lock()
                     .expect("stored entries")
-                    .insert(file.id, entries.to_vec());
+                    .insert(file.id(), entries.to_vec());
                 let mut files = self.files.lock().unwrap_or_else(PoisonError::into_inner);
-                if let Some(existing) = files.iter_mut().find(|existing| existing.id == stored.id) {
+                if let Some(existing) = files
+                    .iter_mut()
+                    .find(|existing| existing.id() == stored.id())
+                {
                     *existing = stored;
                 } else {
                     files.push(stored);
@@ -2688,7 +2691,7 @@ mod tests {
             self.files
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
-                .retain(|file| !file_ids.contains(&file.id));
+                .retain(|file| !file_ids.contains(&file.id()));
             Ok(())
         }
 
@@ -3160,7 +3163,7 @@ mod tests {
                 .list_files()
                 .expect("failed files")
                 .iter()
-                .all(|file| matches!(file.index_status, FileIndexStatus::Failed { .. }))
+                .all(|file| matches!(file.index_status(), FileIndexStatus::Failed { .. }))
         );
     }
 
@@ -3173,16 +3176,17 @@ mod tests {
         for id in 0..2 {
             let fragment = prepared_fragment(&"x".repeat(9 * 1024 * 1024), 0);
             let prepared = PreparedFile {
-                file: FileRecord {
-                    id: FileId::new(id),
-                    relative_path: SourcePath::new(format!("file{id}.txt")).expect("source path"),
-                    snapshot: FileSnapshot {
+                file: FileRecord::new(
+                    FileId::new(id),
+                    SourcePath::new(format!("file{id}.txt")).expect("source path"),
+                    FileSnapshot {
                         size_bytes: 0,
                         modified_epoch_ms: None,
                         content_hash: Some(sha256_hex(b"fixture")),
                     },
-                    index_status: FileIndexStatus::NotIndexed,
-                },
+                    FileIndexStatus::NotIndexed,
+                )
+                .expect("fixture file"),
                 entities: Vec::new(),
                 fragments: vec![fragment],
                 graph: FileGraphResult::default(),
@@ -3448,7 +3452,7 @@ mod tests {
             .list_files()
             .expect("completed native work persisted");
         assert_eq!(files.len(), 1);
-        assert!(files[0].index_status.is_indexed());
+        assert!(files[0].index_status().is_indexed());
     }
 
     #[tokio::test]
@@ -3610,7 +3614,7 @@ mod tests {
             assert_eq!(error.code(), EngineError::CANCELLED);
             let files = storage.list_files().expect("persisted tail");
             assert_eq!(files.len(), 1);
-            assert_eq!(files[0].index_status.is_indexed(), !fail_embeddings);
+            assert_eq!(files[0].index_status().is_indexed(), !fail_embeddings);
             assert_eq!(*storage.write_batches.lock().expect("batches"), [1]);
             assert!(progress.lock().expect("progress").iter().any(|value| {
                 value.files_indexed == Some(1)
@@ -3876,9 +3880,11 @@ mod tests {
         assert!(files[0].index_status().is_indexed());
 
         let mut failed = files[0].clone();
-        failed.index_status = FileIndexStatus::Failed {
-            error: "test failure".into(),
-        };
+        failed
+            .set_index_status(FileIndexStatus::Failed {
+                error: "test failure".into(),
+            })
+            .expect("valid fixture status");
         storage
             .replace_files(&[FileWrite {
                 file: &failed,

@@ -112,8 +112,20 @@ fn canonical_columns_reject_mismatched_identity_and_corrupt_metadata() {
 
 fn indexed_entity(id: &str, file_id: u32) -> Doc {
     let mut entity = entity(file_id, false);
-    entity.id = EntityId::from_string(id.to_owned());
-    entity.fragments[0].id = FragmentId::new(&entity.id, 0);
+    let id = EntityId::from_string(id.to_owned());
+    let fragments = vec![EntityFragment {
+        id: FragmentId::new(&id, 0),
+        range: entity.fragments()[0].range,
+    }];
+    entity = Entity::new(
+        id,
+        entity.file_id(),
+        entity.source_range(),
+        entity.content().clone(),
+        entity.metadata().cloned(),
+        fragments,
+    )
+    .expect("fixture identity");
     encode_doc(&entity).expect("canonical entity")
 }
 

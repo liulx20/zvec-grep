@@ -26,14 +26,14 @@ pub(super) struct WriteBatch {
 impl WriteBatch {
     pub(super) fn buffered_detail(&self) -> Option<String> {
         self.files.last().map(|write| {
-            let action = if matches!(write.file.index_status, FileIndexStatus::Failed { .. }) {
+            let action = if matches!(write.file.index_status(), FileIndexStatus::Failed { .. }) {
                 "failure buffered"
             } else {
                 "prepared"
             };
             format!(
                 "{action} {} ({} files awaiting commit)",
-                write.file.relative_path.display(),
+                write.file.relative_path().display(),
                 self.files.len()
             )
         })
@@ -69,14 +69,14 @@ impl WriteBatch {
         let bytes = file
             .entities
             .iter()
-            .map(|entity| content_bytes(&entity.content))
+            .map(|entity| content_bytes(entity.content()))
             .sum::<usize>()
             + entries
                 .iter()
                 .map(|entry| entry.fts_text.len() + entry.vector.len() * size_of::<f32>())
                 .sum::<usize>();
         let mut file_record = file.file;
-        file_record.index_status = FileIndexStatus::NotIndexed;
+        file_record.set_index_status(FileIndexStatus::NotIndexed)?;
         self.enqueue(
             storage,
             PendingWrite {
@@ -100,7 +100,7 @@ impl WriteBatch {
         timings: &mut TimingCollector,
     ) -> Result<Option<String>, EngineError> {
         let bytes = reason.len();
-        file.index_status = FileIndexStatus::Failed { error: reason };
+        file.set_index_status(FileIndexStatus::Failed { error: reason })?;
         self.enqueue(
             storage,
             PendingWrite {
@@ -162,8 +162,8 @@ impl WriteBatch {
                 .files
                 .iter()
                 .map(|write| {
-                    let path = write.file.relative_path.display();
-                    match &write.file.index_status {
+                    let path = write.file.relative_path().display();
+                    match write.file.index_status() {
                         FileIndexStatus::Failed { error } => {
                             format!("{path} (original failure: {error})")
                         }
@@ -179,7 +179,7 @@ impl WriteBatch {
         self.commit_failed = false;
         timings.record("index_commit", started.elapsed(), self.files.len());
         for write in &self.files {
-            if let FileIndexStatus::Failed { error } = &write.file.index_status {
+            if let FileIndexStatus::Failed { error } = write.file.index_status() {
                 record_file_failed(stats, &write.file, error);
             } else {
                 stats.files_indexed += 1;
@@ -189,12 +189,12 @@ impl WriteBatch {
         // Report a path only after the batch is durable, including tail batches
         // and a previous batch flushed before buffering an oversized file.
         let detail = self.files.last().map(|write| {
-            let action = if matches!(write.file.index_status, FileIndexStatus::Failed { .. }) {
+            let action = if matches!(write.file.index_status(), FileIndexStatus::Failed { .. }) {
                 "failed"
             } else {
                 "indexed"
             };
-            format!("{action} {}", write.file.relative_path.display())
+            format!("{action} {}", write.file.relative_path().display())
         });
         self.files.clear();
         self.payload_bytes = 0;
@@ -204,13 +204,7 @@ impl WriteBatch {
 
 fn content_bytes(content: &Content) -> usize {
     match content {
-        Content::Text(text) => text.len(),
+        Content::Text(text) | Content::Code(text) => text.len(),
         Content::Image(image) => image.data().len(),
-        Content::Table(table) => table
-            .cells
-            .iter()
-            .flat_map(|cell| &cell.contents)
-            .map(content_bytes)
-            .sum(),
     }
 }

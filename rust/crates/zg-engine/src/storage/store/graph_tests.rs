@@ -1,7 +1,7 @@
 use super::*;
-use crate::domain::model::{Metric, ModelInfo};
+use crate::domain::model::{EmbeddingMetric, ModelInfo};
 use crate::domain::{
-    Content, EntityFragment, EntityId, FileSnapshot, FragmentId, Range, SourcePath,
+    Content, ContentKind, EntityFragment, EntityId, FileSnapshot, FragmentId, Range, SourcePath,
 };
 use crate::domain::{
     EdgeProvenance, FileEdge, FileGraphNode, FileGraphResult, GraphEdgeKind, PendingRef,
@@ -27,18 +27,22 @@ fn open(path: &Path, read_only: bool) -> IndexStore {
     } else {
         WorkspaceIndexStorageOptions::ReadWrite {
             storage_path: path.to_owned(),
-            embeddings: vec![EmbeddingModelInfo {
-                model: ModelInfo {
-                    provider: "fixture".into(),
-                    name: "graph".into(),
-                    endpoint: None,
-                },
-                dimension: 3,
-                metric: Metric::Cosine,
-                max_batch_size: 32,
-                max_input_tokens: None,
-                max_image_bytes: None,
-            }],
+            embeddings: vec![
+                EmbeddingModelInfo::new(
+                    ModelInfo::new(
+                        "fixture",
+                        "graph",
+                        [ContentKind::Text, ContentKind::Code],
+                        32,
+                    )
+                    .expect("model"),
+                    3,
+                    EmbeddingMetric::Cosine,
+                    None,
+                    None,
+                )
+                .expect("embedding model"),
+            ],
         }
     };
     IndexStore::open(options).expect("open combined storage")
@@ -50,40 +54,42 @@ fn snapshot(store: &IndexStore, path: impl Into<PathBuf>, symbols: &[&str]) -> S
         .resolve_file_ids(&[relative_path.to_path_buf()])
         .expect("reserve file ID")[0];
     let text = symbols.join("\n");
-    let file = FileRecord {
+    let file = FileRecord::new(
         id,
         relative_path,
-        snapshot: FileSnapshot {
+        FileSnapshot {
             size_bytes: text.len() as u64,
             modified_epoch_ms: Some(1),
             content_hash: Some(crate::utils::sha256_hex(text.as_bytes())),
         },
-        index_status: FileIndexStatus::NotIndexed,
-    };
+        FileIndexStatus::NotIndexed,
+    )
+    .expect("fixture file");
     let entities = symbols
         .iter()
         .map(|symbol| {
             let content = Content::Text((*symbol).into());
             let entity_id = EntityId::new(id, &content, Range::Full).expect("entity identity");
-            Entity {
-                id: entity_id.clone(),
-                file_id: id,
-                source_range: Range::Full,
+            Entity::new(
+                entity_id.clone(),
+                id,
+                Range::Full,
                 content,
-                metadata: None,
-                fragments: vec![EntityFragment {
+                None,
+                vec![EntityFragment {
                     id: FragmentId::new(&entity_id, 0),
                     range: Range::Full,
                 }],
-            }
+            )
+            .expect("fixture entity")
         })
         .collect::<Vec<_>>();
     let fragments = entities
         .iter()
         .zip(symbols)
         .map(|(entity, symbol)| IndexedFragment {
-            entity_id: entity.id.clone(),
-            fragment_id: entity.fragments[0].id.clone(),
+            entity_id: entity.id().clone(),
+            fragment_id: entity.fragments()[0].id.clone(),
             model: "fixture/graph".into(),
             vector: vec![1.0, 0.0, 0.0],
             fts_text: (*symbol).into(),
@@ -92,7 +98,7 @@ fn snapshot(store: &IndexStore, path: impl Into<PathBuf>, symbols: &[&str]) -> S
     let graph = FileGraphResult {
         nodes: entities
             .iter()
-            .map(|entity| node(entity.id.as_str()))
+            .map(|entity| node(entity.id().as_str()))
             .collect(),
         ..FileGraphResult::default()
     };
@@ -137,8 +143,8 @@ fn write(store: &IndexStore, snapshot: &Snapshot) {
 fn local_call(source: &Entity, target: &Entity) -> FileEdge {
     FileEdge {
         kind: GraphEdgeKind::Calls,
-        source: source.id.as_str().into(),
-        target: target.id.as_str().into(),
+        source: source.id().as_str().into(),
+        target: target.id().as_str().into(),
         line: Some(1),
         column: Some(0),
         provenance: EdgeProvenance::FileLocal,
@@ -148,7 +154,7 @@ fn local_call(source: &Entity, target: &Entity) -> FileEdge {
 
 fn reference(source: &Entity) -> PendingRef {
     PendingRef {
-        owner_id: source.id.as_str().into(),
+        owner_id: source.id().as_str().into(),
         ref_name: "module::target".into(),
         receiver_name: Some("module".into()),
         ref_kind: GraphEdgeKind::Calls,
@@ -176,7 +182,7 @@ fn callers(store: &IndexStore, target: &Entity) -> Vec<FileEdge> {
     read_graph(store, |graph| {
         graph
             .neighborhood(
-                target.id.as_str(),
+                target.id().as_str(),
                 Direction::In,
                 Some(&[GraphEdgeKind::Calls]),
             )
@@ -194,7 +200,7 @@ fn resolve(store: &IndexStore, target: &Entity) -> i64 {
             let stats = graph
                 .apply_resolutions(&[Resolution {
                     ref_id: id,
-                    target_id: target.id.as_str().into(),
+                    target_id: target.id().as_str().into(),
                     provenance: EdgeProvenance::ImportScoped,
                 }])
                 .expect("resolve reference under storage lock");
@@ -207,7 +213,7 @@ fn resolve(store: &IndexStore, target: &Entity) -> i64 {
 fn stored_entities(store: &IndexStore, entities: &[Entity]) -> HashMap<EntityId, Entity> {
     let ids = entities
         .iter()
-        .map(|entity| entity.id.clone())
+        .map(|entity| entity.id().clone())
         .collect::<Vec<_>>();
     store
         .read(|state| state.entities.fetch(&ids))
@@ -244,7 +250,7 @@ fn replacement_reads_old_ids_and_invalidates_cross_file_references() {
     let refs = pending(&store);
     assert_eq!(refs.len(), 1);
     assert_eq!(refs[0].id, ref_id);
-    assert_eq!(refs[0].file_id, source.file.id.get());
+    assert_eq!(refs[0].file_id, source.file.id().get());
     assert_eq!(refs[0].reference, source.graph.pending_refs[0]);
 }
 
@@ -266,19 +272,21 @@ fn unchanged_ids_and_deletion_both_invalidate_incoming_edges() {
     assert!(callers(&store, &target.entities[0]).is_empty());
     assert_eq!(pending(&store)[0].id, ref_id);
     resolve(&store, &target.entities[0]);
-    store.delete_file(target.file.id).expect("delete target");
+    store.delete_file(target.file.id()).expect("delete target");
     assert!(stored_entities(&store, &target.entities).is_empty());
     assert!(callers(&store, &target.entities[0]).is_empty());
     assert_eq!(pending(&store)[0].id, ref_id);
     assert_eq!(
-        store.list_files().expect("remaining file")[0].id,
-        source.file.id
+        store.list_files().expect("remaining file")[0].id(),
+        source.file.id()
     );
 
     store
-        .delete_file(source.file.id)
+        .delete_file(source.file.id())
         .expect("delete reference owner");
-    store.delete_file(source.file.id).expect("repeat deletion");
+    store
+        .delete_file(source.file.id())
+        .expect("repeat deletion");
     assert!(pending(&store).is_empty());
     assert!(store.list_files().expect("files removed").is_empty());
 }
@@ -330,9 +338,11 @@ fn failed_files_clear_their_graph_and_invalidate_incoming_references() {
 
     let successful = snapshot(&store, "successful.rs", &["successful"]);
     let mut failed = target.file.clone();
-    failed.index_status = FileIndexStatus::Failed {
-        error: "extraction failed".into(),
-    };
+    failed
+        .set_index_status(FileIndexStatus::Failed {
+            error: "extraction failed".into(),
+        })
+        .expect("valid fixture status");
     let empty_graph = FileGraphResult::default();
     store
         .replace_files(&[
@@ -351,7 +361,7 @@ fn failed_files_clear_their_graph_and_invalidate_incoming_references() {
     assert_eq!(pending(&store)[0].id, ref_id);
     let files = store.list_files().expect("file states");
     assert!(matches!(
-        &files.iter().find(|file| file.id == target.file.id).expect("failed file").index_status,
+        &files.iter().find(|file| file.id() == target.file.id()).expect("failed file").index_status(),
         FileIndexStatus::Failed { error } if error == "extraction failed"
     ));
 }
@@ -377,7 +387,7 @@ fn graph_and_entities_reopen_together_and_read_only_handles_reject_writes() {
     assert_eq!(stored_entities(&reader, &source.entities).len(), 2);
     assert_eq!(
         graph_reader
-            .neighborhood(source.entities[1].id.as_str(), Direction::In, None)
+            .neighborhood(source.entities[1].id().as_str(), Direction::In, None)
             .expect("persisted edges"),
         source.graph.edges
     );
@@ -391,10 +401,10 @@ fn graph_and_entities_reopen_together_and_read_only_handles_reject_writes() {
             )
             .is_err()
     );
-    assert!(reader.delete_file(source.file.id).is_err());
+    assert!(reader.delete_file(source.file.id()).is_err());
     assert_eq!(
         graph_reader
-            .neighborhood(source.entities[1].id.as_str(), Direction::In, None)
+            .neighborhood(source.entities[1].id().as_str(), Direction::In, None)
             .expect("persisted edges"),
         source.graph.edges
     );
@@ -438,7 +448,7 @@ fn missing_graph_rejects_indexed_writers_but_preserves_read_only_access() {
     assert_eq!(stored_entities(&reader, &source.entities).len(), 1);
     assert!(
         reader.list_files().expect("canonical records")[0]
-            .index_status
+            .index_status()
             .is_indexed()
     );
     assert!(!path.exists());
@@ -525,8 +535,8 @@ fn sqlite_insert_failure_preserves_entities_and_retries_after_reopen() {
 
     let reopened = open(temporary.path(), false);
     assert_eq!(
-        reopened.list_files().expect("interrupted file")[0].index_status,
-        FileIndexStatus::NotIndexed
+        reopened.list_files().expect("interrupted file")[0].index_status(),
+        &FileIndexStatus::NotIndexed
     );
     Connection::open(&path)
         .expect("remove failure")
@@ -541,7 +551,7 @@ fn sqlite_insert_failure_preserves_entities_and_retries_after_reopen() {
     );
     assert!(
         reopened.list_files().expect("completed retry")[0]
-            .index_status
+            .index_status()
             .is_indexed()
     );
 }
@@ -565,7 +575,7 @@ fn sqlite_invalidation_failure_keeps_old_ids_available_for_delete_retry() {
         "CREATE TRIGGER reject_invalidation BEFORE UPDATE OF target ON edges BEGIN SELECT RAISE(ABORT, 'test update failure'); END;",
     ).expect("create failure trigger");
 
-    assert!(store.delete_file(target.file.id).is_err());
+    assert!(store.delete_file(target.file.id()).is_err());
     assert_eq!(stored_entities(&store, &target.entities).len(), 1);
     assert_eq!(callers(&store, &target.entities[0]).len(), 1);
     assert!(pending(&store).is_empty());
@@ -577,17 +587,17 @@ fn sqlite_invalidation_failure_keeps_old_ids_available_for_delete_retry() {
     assert_eq!(
         files
             .iter()
-            .find(|file| file.id == target.file.id)
+            .find(|file| file.id() == target.file.id())
             .expect("target retained")
-            .index_status,
-        FileIndexStatus::Deleting
+            .index_status(),
+        &FileIndexStatus::Deleting
     );
     Connection::open(&path)
         .expect("remove failure")
         .execute_batch("DROP TRIGGER reject_invalidation;")
         .expect("drop trigger");
     reopened
-        .delete_file(target.file.id)
+        .delete_file(target.file.id())
         .expect("retry deletion");
     assert!(stored_entities(&reopened, &target.entities).is_empty());
     assert!(callers(&reopened, &target.entities[0]).is_empty());
@@ -620,7 +630,7 @@ fn retry_replaces_a_committed_graph_when_canonical_entities_are_still_old() {
     // Persist exactly the state before zvec replacement, then release every handle.
     store
         .write(|state| {
-            let directories = state.directories.ensure(&interrupted.file.relative_path)?;
+            let directories = state.directories.ensure(interrupted.file.relative_path())?;
             state.files.put(&interrupted.file, &directories)?;
             state.files.flush()?;
             state
@@ -628,9 +638,9 @@ fn retry_replaces_a_committed_graph_when_canonical_entities_are_still_old() {
                 .as_mut()
                 .expect("graph is open")
                 .write_file_graph(
-                    original.file.id.get(),
+                    original.file.id().get(),
                     &interrupted.graph,
-                    &state.entities.list_ids(original.file.id)?,
+                    &state.entities.list_ids(original.file.id())?,
                 )
                 .map_err(graph_error)
         })
@@ -682,13 +692,13 @@ fn process_exit_during_canonical_replacement_recovers_from_durable_status() {
         ));
         store
             .write(|state| {
-                let directories = state.directories.ensure(&interrupted.file.relative_path)?;
+                let directories = state.directories.ensure(interrupted.file.relative_path())?;
                 state.files.put(&interrupted.file, &directories)?;
                 state.directories.flush()?;
                 state.files.flush()?;
                 let old_ids = state
                     .entities
-                    .list_ids(original.file.id)?
+                    .list_ids(original.file.id())?
                     .into_iter()
                     .map(|id| id.as_str().to_owned())
                     .collect::<Vec<_>>();
@@ -696,9 +706,9 @@ fn process_exit_during_canonical_replacement_recovers_from_durable_status() {
                     .graph
                     .as_mut()
                     .expect("test state")
-                    .write_file_graph(original.file.id.get(), &interrupted.graph, &old_ids)
+                    .write_file_graph(original.file.id().get(), &interrupted.graph, &old_ids)
                     .map_err(graph_error)?;
-                state.entities.delete_file(original.file.id)?;
+                state.entities.delete_file(original.file.id())?;
                 state
                     .entities
                     .write(&Entities::prepare(&interrupted.entities[..1])?)?;
@@ -725,9 +735,9 @@ fn process_exit_during_canonical_replacement_recovers_from_durable_status() {
         .list_files()
         .expect("durable status")
         .into_iter()
-        .find(|file| file.relative_path.as_path() == Path::new("target.rs"))
+        .find(|file| file.relative_path().as_path() == Path::new("target.rs"))
         .expect("test state");
-    assert_eq!(target.index_status, FileIndexStatus::NotIndexed);
+    assert_eq!(target.index_status(), &FileIndexStatus::NotIndexed);
     let interrupted = snapshot(&store, "target.rs", &["partial first", "partial second"]);
     assert_eq!(stored_entities(&store, &interrupted.entities).len(), 1);
     let replacement = snapshot(&store, "target.rs", &["final target"]);
@@ -777,8 +787,16 @@ fn invalid_batch_member_leaves_every_file_unchanged() {
     );
     assert_eq!(store.list_files().expect("file statuses"), before);
     // Ownership checks must also cover two new records in the same batch.
-    invalid.entities[0].id = replacement.entities[0].id.clone();
-    invalid.entities[0].fragments = replacement.entities[0].fragments.clone();
+    let entity = &invalid.entities[0];
+    invalid.entities[0] = Entity::new(
+        replacement.entities[0].id().clone(),
+        entity.file_id(),
+        entity.source_range(),
+        entity.content().clone(),
+        entity.metadata().cloned(),
+        replacement.entities[0].fragments().to_vec(),
+    )
+    .expect("duplicate fixture entity");
     invalid.fragments = replacement.fragments.clone();
     invalid.graph = replacement.graph.clone();
     let error = store
@@ -791,9 +809,11 @@ fn invalid_batch_member_leaves_every_file_unchanged() {
     );
     assert_eq!(store.list_files().expect("file statuses"), before);
     let mut failed = replacement.file.clone();
-    failed.index_status = FileIndexStatus::Failed {
-        error: "failed".into(),
-    };
+    failed
+        .set_index_status(FileIndexStatus::Failed {
+            error: "failed".into(),
+        })
+        .expect("valid fixture status");
     let error = store
         .replace_files(&[FileWrite {
             file: &failed,
@@ -817,7 +837,7 @@ fn apply_crash_batch(
         return store.delete_files(
             &snapshots
                 .iter()
-                .map(|snapshot| snapshot.file.id)
+                .map(|snapshot| snapshot.file.id())
                 .collect::<Vec<_>>(),
         );
     }
@@ -826,9 +846,10 @@ fn apply_crash_batch(
         .map(|snapshot| {
             let mut file = snapshot.file.clone();
             if operation == "fail" {
-                file.index_status = FileIndexStatus::Failed {
+                file.set_index_status(FileIndexStatus::Failed {
                     error: "extraction failed".into(),
-                };
+                })
+                .expect("valid fixture status");
             }
             file
         })
@@ -876,7 +897,7 @@ fn process_exit_after_partial_batch_graph_commit_leaves_all_files_retryable() {
         let replacements = replacement_snapshots(&store);
         Connection::open(Path::new(&root).join("graph/graph.sqlite")).expect("graph database").execute_batch(&format!(
             "CREATE TRIGGER reject_second BEFORE DELETE ON edges WHEN OLD.file_id = {} BEGIN SELECT RAISE(ABORT, 'batch interruption'); END;",
-            replacements[1].file.id.get()
+            replacements[1].file.id().get()
         )).expect("inject second file failure");
         let operation = std::env::var(CHILD_OPERATION).expect("batch operation");
         assert!(apply_crash_batch(&store, &replacements, &operation).is_err());
@@ -903,7 +924,7 @@ fn process_exit_after_partial_batch_graph_commit_leaves_all_files_retryable() {
         } else {
             FileIndexStatus::NotIndexed
         };
-        assert!(files.iter().all(|file| file.index_status == expected));
+        assert!(files.iter().all(|file| file.index_status() == &expected));
         let replacements = replacement_snapshots(&store);
         // The first graph transaction committed; the second rolled back.
         assert_eq!(
@@ -948,8 +969,8 @@ fn process_exit_after_partial_batch_graph_commit_leaves_all_files_retryable() {
             assert!(stored_entities(&store, &old.entities).is_empty());
         }
         assert!(files.iter().all(|file| if operation == "fail" {
-            matches!(&file.index_status, FileIndexStatus::Failed { error } if error == "extraction failed")
-        } else { file.index_status.is_indexed() }));
+            matches!(&file.index_status(), FileIndexStatus::Failed { error } if error == "extraction failed")
+        } else { file.index_status().is_indexed() }));
     }
 }
 
