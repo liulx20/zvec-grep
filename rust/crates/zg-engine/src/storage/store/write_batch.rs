@@ -3,8 +3,8 @@ use crate::domain::FileGraphResult;
 
 use super::{
     EmbeddingModelInfo, EngineError, EngineResult, Entities, FileId, FileIndexStatus, FileRecord,
-    FileWrite, Fragments, HashSet, SqliteGraphStorage, StoreState, finish_write_batch, graph_error,
-    now_epoch_ms, validate_batch,
+    FileWrite, Fragments, HashSet, SqliteGraphStorage, StoreState, graph_error, now_epoch_ms,
+    validate_batch,
 };
 
 pub(super) fn validate(
@@ -132,7 +132,6 @@ pub(super) fn replace(
         state.files.put(file, directories)?;
     }
     state.files.flush()?;
-    finish_write_batch(state);
     Ok(())
 }
 
@@ -170,6 +169,5 @@ pub(super) fn delete(state: &mut StoreState, file_ids: &[FileId]) -> EngineResul
         state.files.delete(*id)?;
     }
     state.files.flush()?;
-    finish_write_batch(state);
     Ok(())
 }

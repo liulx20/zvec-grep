@@ -52,7 +52,6 @@ struct StoreState {
     fragments: Fragments,
     graph: Option<SqliteGraphStorage>,
     needs_optimize: bool,
-    completed_write_batches: usize,
     closed: bool,
 }
 
@@ -198,7 +197,6 @@ impl IndexStore {
                 fragments,
                 graph,
                 needs_optimize: false,
-                completed_write_batches: 0,
                 closed: false,
             }),
             schema,
@@ -452,37 +450,12 @@ impl IndexStore {
     }
 }
 
-// Flushes create native segment/index files even for small writes. Compact
-// periodically so a long indexing run does not retain all of their handles
-// until finalization. Count batches (including failures and deletions),
-// not files, because flush frequency determines the amplification.
-const WRITE_BATCHES_BEFORE_OPTIMIZE: usize = 16;
-
-fn finish_write_batch(state: &mut StoreState) {
-    maintain_write_batch(state, optimize);
-}
-
-fn maintain_write_batch(
-    state: &mut StoreState,
-    maintenance: impl FnOnce(&mut StoreState) -> EngineResult<()>,
-) {
-    state.completed_write_batches += 1;
-    if state.completed_write_batches >= WRITE_BATCHES_BEFORE_OPTIMIZE {
-        // The batch is already durable. Maintenance cannot turn it into a failed write.
-        state.completed_write_batches = 0;
-        if let Err(error) = maintenance(state) {
-            tracing::warn!(%error, "periodic index optimization failed; committed batch retained");
-        }
-    }
-}
-
 fn optimize(state: &mut StoreState) -> EngineResult<()> {
     state.directories.optimize()?;
     state.entities.optimize()?;
     state.files.optimize()?;
     state.fragments.optimize()?;
     state.needs_optimize = false;
-    state.completed_write_batches = 0;
     Ok(())
 }
 
