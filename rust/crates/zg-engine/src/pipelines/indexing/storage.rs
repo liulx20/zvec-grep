@@ -4,16 +4,23 @@ use std::path::PathBuf;
 
 use crate::{
     EngineResult,
-    domain::{FileId, FileRecord},
-    storage::{IndexStore, types::FileWrite},
+    domain::{Entity, FileGraphResult, FileId, FileRecord},
+    storage::{IndexStore, types::IndexedFragment},
 };
 
 pub(crate) trait IndexStorage: Send + Sync {
     fn is_read_only(&self) -> bool;
     fn list_files(&self) -> EngineResult<Vec<FileRecord>>;
     fn resolve_file_ids(&self, paths: &[PathBuf]) -> EngineResult<Vec<FileId>>;
-    fn replace_files(&self, writes: &[FileWrite<'_>]) -> EngineResult<()>;
-    fn delete_files(&self, file_ids: &[FileId]) -> EngineResult<()>;
+    fn replace_file(
+        &self,
+        file: &FileRecord,
+        entities: &[Entity],
+        entries: &[IndexedFragment],
+        graph: &FileGraphResult,
+    ) -> EngineResult<()>;
+    fn mark_file_failed(&self, file: &FileRecord, error: &str) -> EngineResult<()>;
+    fn delete_file(&self, file_id: FileId) -> EngineResult<()>;
     fn finalize_writes(&self) -> EngineResult<()>;
 }
 
@@ -30,12 +37,22 @@ impl IndexStorage for IndexStore {
         self.resolve_file_ids(paths)
     }
 
-    fn replace_files(&self, writes: &[FileWrite<'_>]) -> EngineResult<()> {
-        self.replace_files(writes)
+    fn replace_file(
+        &self,
+        file: &FileRecord,
+        entities: &[Entity],
+        entries: &[IndexedFragment],
+        graph: &FileGraphResult,
+    ) -> EngineResult<()> {
+        self.replace_file_with_graph(file, entities, entries, graph)
     }
 
-    fn delete_files(&self, file_ids: &[FileId]) -> EngineResult<()> {
-        self.delete_files(file_ids)
+    fn mark_file_failed(&self, file: &FileRecord, error: &str) -> EngineResult<()> {
+        self.mark_file_failed(file, error)
+    }
+
+    fn delete_file(&self, file_id: FileId) -> EngineResult<()> {
+        self.delete_file(file_id)
     }
 
     fn finalize_writes(&self) -> EngineResult<()> {

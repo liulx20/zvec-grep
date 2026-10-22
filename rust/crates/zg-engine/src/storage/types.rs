@@ -6,8 +6,8 @@ use std::{
 };
 
 use crate::domain::{
-    Entity, EntityFragment, EntityId, FileGraphResult, FileId, FileRecord, FragmentId, SourcePath,
-    SymbolType, model::EmbeddingModelInfo,
+    Entity, EntityFragment, EntityId, FileId, FileRecord, FragmentId, SourcePath, SymbolType,
+    model::EmbeddingModelInfo,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -111,17 +111,6 @@ pub(crate) struct StorageSearchHit {
 pub(crate) struct StoredSearchData {
     pub entities: HashMap<EntityId, StoredEntity>,
     pub fragments: HashMap<String, EntityFragment>,
-}
-
-/// Borrowed inputs for one file in a coordinated storage batch.
-/// A `Failed` file clears its content and graph and retains its failure reason;
-/// other file statuses publish a successful replacement as `Indexed`.
-#[derive(Clone, Copy)]
-pub(crate) struct FileWrite<'a> {
-    pub file: &'a FileRecord,
-    pub entities: &'a [Entity],
-    pub entries: &'a [IndexedFragment],
-    pub graph: &'a FileGraphResult,
 }
 
 #[cfg(test)]

@@ -157,6 +157,7 @@ impl Fragments {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(super) fn flush(&self) -> EngineResult<()> {
         for index in self.indexes.values() {
             native(index.flush(), "flush fragment collection")?;

@@ -573,7 +573,7 @@ fn schemas_reject_foreign_and_newer_databases_without_rewriting_versions() {
 }
 
 #[test]
-fn schema_contains_only_relationship_tables_and_enforces_json_objects() {
+fn schema_contains_only_edges_and_enforces_json_objects() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("graph.sqlite");
     open(&path).close().expect("init");
