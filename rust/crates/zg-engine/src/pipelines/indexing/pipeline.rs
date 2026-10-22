@@ -704,9 +704,9 @@ async fn index_candidates(
 
         if prepared.fragments.is_empty() {
             let commit_started = Instant::now();
-            commit_file(context.storage, prepared, Vec::new(), &mut stats)?;
+            let detail = commit_file(context.storage, prepared, Vec::new(), &mut stats)?;
             timings.record("index_commit", commit_started.elapsed(), 1);
-            report_indexing(context, &stats, diff, progress_base, None, None);
+            report_indexing(context, &stats, diff, progress_base, Some(detail), None);
             continue;
         }
 
@@ -863,18 +863,10 @@ fn apply_embedding_files(
         throw_if_cancelled(context.signal.as_ref())?;
         match outcome {
             EmbeddedFileOutcome::Success { file, vectors } => {
-                let path = file.file.relative_path().clone();
                 let commit_started = Instant::now();
-                commit_file(context.storage, file, vectors, stats)?;
+                let detail = commit_file(context.storage, file, vectors, stats)?;
                 timings.record("index_commit", commit_started.elapsed(), 1);
-                report_indexing(
-                    context,
-                    stats,
-                    diff,
-                    progress_base,
-                    Some(format!("indexed {}", path.display())),
-                    None,
-                );
+                report_indexing(context, stats, diff, progress_base, Some(detail), None);
             }
             EmbeddedFileOutcome::Failed { file, reason } => {
                 let reason = mark_file_failed(
@@ -903,7 +895,7 @@ fn commit_file(
     file: PreparedFile,
     vectors: Vec<Vec<f32>>,
     stats: &mut IndexWriteStats,
-) -> Result<(), EngineError> {
+) -> Result<String, EngineError> {
     if file.fragments.len() != vectors.len() {
         return Err(EngineError::internal(format!(
             "entity/vector count mismatch: fragments={} vectors={}",
@@ -924,17 +916,22 @@ fn commit_file(
             vector,
         })
         .collect::<Vec<_>>();
-    storage
-        .replace_file(&file.file, &file.entities, &entries, &file.graph)
-        .map_err(|error| {
-            EngineError::storage_failure(format!(
-                "replace file {}: {error}",
-                file.file.relative_path().display()
-            ))
-        })?;
+    if let Err(error) = storage.replace_file(&file.file, &file.entities, &entries, &file.graph) {
+        // Invalid file content or graph data is local to this file. Native write
+        // failures must still abort the pass, including failure to record Failed.
+        if error.code() == EngineError::INVALID_ARGUMENT {
+            let reason = mark_file_failed(storage, &file.file, "validate", &error)?;
+            record_file_failed(stats, &file.file, &reason);
+            return Ok(format!("failed {}", file.file.relative_path().display()));
+        }
+        return Err(EngineError::storage_failure(format!(
+            "replace file {}: {error}",
+            file.file.relative_path().display()
+        )));
+    }
     stats.files_indexed += 1;
     stats.entities_created += public_entities;
-    Ok(())
+    Ok(format!("indexed {}", file.file.relative_path().display()))
 }
 
 async fn prepare_candidate(
@@ -3041,6 +3038,197 @@ mod tests {
             )),
             created_epoch_ms: 1,
             updated_epoch_ms: 1,
+        }
+    }
+
+    fn prepared_commit_fixture(
+        storage: &crate::storage::IndexStore,
+        path: &str,
+        text: &str,
+    ) -> PreparedFile {
+        let id = storage.resolve_file_ids(&[path.into()]).expect("file ID")[0];
+        let file = FileRecord::new(
+            id,
+            SourcePath::new(path).expect("source path"),
+            FileSnapshot {
+                size_bytes: text.len() as u64,
+                modified_epoch_ms: Some(1),
+                content_hash: Some(sha256_hex(text.as_bytes())),
+            },
+            FileIndexStatus::NotIndexed,
+        )
+        .expect("file record");
+        let entities = if text.is_empty() {
+            Vec::new()
+        } else {
+            let content = Content::Text(text.into());
+            let entity_id = EntityId::new(id, &content, Range::Full).expect("entity ID");
+            vec![
+                Entity::new(
+                    entity_id.clone(),
+                    id,
+                    Range::Full,
+                    content,
+                    None,
+                    vec![EntityFragment {
+                        id: FragmentId::new(&entity_id, 0),
+                        range: Range::Full,
+                    }],
+                )
+                .expect("entity"),
+            ]
+        };
+        let mut fragments = prepare_fragments(&entities, Some(64)).expect("fragments");
+        for fragment in &mut fragments {
+            fragment.model = "local/test".into();
+        }
+        PreparedFile {
+            file,
+            entities,
+            fragments,
+            graph: FileGraphResult::default(),
+        }
+    }
+
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "verify validation, old-data cleanup, progress and subsequent files with real storage"
+    )]
+    fn invalid_graphs_clear_old_content_and_do_not_block_other_files() {
+        use crate::domain::{GraphEdgeKind, PendingRef, PendingRefStatus};
+        use crate::storage::{IndexStore, types::WorkspaceIndexStorageOptions};
+
+        for text in ["replacement", ""] {
+            let directory = tempdir().expect("workspace");
+            let workspace = workspace(directory.path());
+            let model = ConcurrentModel::new();
+            let storage = IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
+                storage_path: directory.path().join("index"),
+                embeddings: vec![model.info().clone()],
+            })
+            .expect("storage");
+            let mut original = prepared_commit_fixture(&storage, "bad.txt", "obsolete");
+            let reference = PendingRef {
+                owner_id: format!("f{}", original.file.id().get()),
+                ref_name: "target".into(),
+                receiver_name: None,
+                ref_kind: GraphEdgeKind::Calls,
+                arity: None,
+                line: 1,
+                column: 0,
+                status: PendingRefStatus::Pending,
+                metadata: std::collections::BTreeMap::new(),
+            };
+            original.graph.pending_refs.push(reference.clone());
+            commit_file(
+                &storage,
+                original,
+                vec![vec![1.0, 0.0]],
+                &mut IndexWriteStats::default(),
+            )
+            .expect("old indexed content and graph");
+            assert!(
+                storage.list_files().expect("files")[0]
+                    .index_status()
+                    .is_indexed()
+            );
+            let mut invalid = prepared_commit_fixture(&storage, "bad.txt", text);
+            invalid.graph.pending_refs.push(PendingRef {
+                owner_id: "foreign owner".into(),
+                ..reference
+            });
+            let vectors = vec![vec![1.0, 0.0]; invalid.fragments.len()];
+            let good = prepared_commit_fixture(&storage, "good.txt", "healthy");
+            let progress = Arc::new(Mutex::new(Vec::new()));
+            let captured = Arc::clone(&progress);
+            let context = IndexingContext {
+                workspace_index: &workspace,
+                storage: &storage,
+                scanner: &RecordingScanner::new(),
+                embedding_models: &[&model],
+                embedding_concurrency: None,
+                signal: None,
+                changes: &[],
+                on_progress: Some(IndexProgressReporter::new(move |value| {
+                    captured.lock().expect("progress").push(value.detail);
+                })),
+            };
+            let mut stats = IndexWriteStats::default();
+            apply_embedding_files(
+                &context,
+                &DiffPlan {
+                    added: 2,
+                    ..Default::default()
+                },
+                None,
+                &mut TimingCollector::default(),
+                &mut stats,
+                vec![
+                    EmbeddedFileOutcome::Success {
+                        file: invalid,
+                        vectors,
+                    },
+                    EmbeddedFileOutcome::Success {
+                        file: good,
+                        vectors: vec![vec![0.0, 1.0]],
+                    },
+                ],
+            )
+            .expect("continue past invalid graph");
+            assert_eq!(
+                (
+                    stats.files_indexed,
+                    stats.files_failed,
+                    stats.entities_created
+                ),
+                (1, 1, 1)
+            );
+            assert_eq!(stats.failed_files, [PathBuf::from("bad.txt")]);
+            let files = storage.list_files().expect("files");
+            assert!(matches!(
+                files.iter().find(|file| file.relative_path().as_path() == Path::new("bad.txt")).expect("failed file").index_status(),
+                FileIndexStatus::Failed { error } if error.starts_with("validate:")
+            ));
+            assert!(
+                files
+                    .iter()
+                    .find(|file| file.relative_path().as_path() == Path::new("good.txt"))
+                    .expect("good file")
+                    .index_status()
+                    .is_indexed()
+            );
+            assert!(
+                storage
+                    .search_fts("obsolete", 10, None)
+                    .expect("old content cleared")
+                    .is_empty()
+            );
+            assert_eq!(
+                storage
+                    .search_fts("healthy", 10, None)
+                    .expect("good content")
+                    .len(),
+                1
+            );
+            let graph =
+                rusqlite::Connection::open(directory.path().join("index/graph/graph.sqlite"))
+                    .expect("graph");
+            assert_eq!(
+                graph
+                    .query_row("SELECT COUNT(*) FROM edges", [], |row| row
+                        .get::<_, usize>(0))
+                    .expect("old graph cleared"),
+                0
+            );
+            assert_eq!(
+                *progress.lock().expect("progress"),
+                [
+                    Some("failed bad.txt".into()),
+                    Some("indexed good.txt".into())
+                ]
+            );
+            storage.close().expect("close storage");
         }
     }
 
