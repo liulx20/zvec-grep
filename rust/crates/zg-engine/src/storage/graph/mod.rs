@@ -7,15 +7,18 @@
 //! This module does not resolve names, run FTS, or manage workspace locks.
 //! `IndexStore` owns the writable connection and coordinates file replacement.
 
+#[cfg(test)]
 mod pending;
 #[cfg(test)]
 mod reader;
 mod schema;
+#[cfg(test)]
 mod types;
 mod writer;
 
 use rusqlite::{Connection, OpenFlags};
 use std::{path::Path, time::Duration};
+#[cfg(test)]
 pub(crate) use types::*;
 
 /// Errors at the graph persistence boundary.
@@ -133,12 +136,14 @@ fn nonempty(value: &str) -> Result<()> {
     }
 }
 
+#[cfg(test)]
 fn decode_enum<T: serde::de::DeserializeOwned>(value: String) -> rusqlite::Result<T> {
     serde_json::from_value(serde_json::Value::String(value)).map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(error))
     })
 }
 
+#[cfg(test)]
 fn decode_metadata(value: &str) -> rusqlite::Result<Metadata> {
     serde_json::from_str(value).map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(error))

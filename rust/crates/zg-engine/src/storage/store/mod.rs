@@ -31,8 +31,6 @@ use super::{
 use crate::domain::FileGraphResult;
 use crate::domain::model::EmbeddingModelInfo;
 
-pub(crate) mod resolution;
-
 type StoreRegistry = Mutex<HashMap<PathBuf, Weak<SharedStore>>>;
 static STORES: OnceLock<StoreRegistry> = OnceLock::new();
 
@@ -263,17 +261,6 @@ impl IndexStore {
         let mut state = lock_state(&shared)?;
         assert_usable(&state)?;
         operation(&mut state)
-    }
-
-    /// Holds the store lock across reference reads and resolution writeback.
-    /// Each writeback batch commits independently; a later error does not undo it.
-    // The production resolver will consume this boundary in a follow-up PR.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn with_resolution_session<T>(
-        &self,
-        operation: impl FnOnce(&mut dyn super::ResolutionSession) -> EngineResult<T>,
-    ) -> EngineResult<T> {
-        self.write(|state| operation(&mut resolution::StoreResolutionSession::new(state)?))
     }
 
     pub(crate) fn is_read_only(&self) -> bool {

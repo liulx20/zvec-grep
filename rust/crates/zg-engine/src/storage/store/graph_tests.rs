@@ -192,11 +192,12 @@ fn callers(store: &IndexStore, target: &Entity) -> Vec<FileEdge> {
 
 fn resolve(store: &IndexStore, target: &Entity) -> i64 {
     store
-        .with_resolution_session(|session| {
-            let refs = session.list_pending_refs(100, 0)?;
+        .write(|state| {
+            let graph = state.graph.as_mut().expect("graph is open");
+            let refs = graph.list_pending_refs(100, 0).expect("pending refs");
             assert_eq!(refs.refs.len(), 1);
             let id = refs.refs[0].id;
-            let stats = session
+            let stats = graph
                 .apply_resolutions(&[Resolution {
                     ref_id: id,
                     target_id: target.id().as_str().into(),
@@ -207,116 +208,6 @@ fn resolve(store: &IndexStore, target: &Entity) -> i64 {
             Ok(id)
         })
         .expect("write graph under storage lock")
-}
-
-#[test]
-fn resolution_session_filters_unfinished_files_and_preserves_pagination() {
-    let temporary = tempfile::tempdir().expect("workspace");
-    let store = open(temporary.path(), false);
-    let mut hidden = snapshot(&store, "hidden.rs", &["hidden"]);
-    hidden
-        .graph
-        .pending_refs
-        .push(reference(&hidden.entities[0]));
-    let mut source = snapshot(&store, "source.rs", &["caller"]);
-    source
-        .graph
-        .pending_refs
-        .push(reference(&source.entities[0]));
-    write(&store, &hidden);
-    write(&store, &source);
-    // Leave canonical content and graph behind, as an interrupted write would.
-    store
-        .write(|state| state.files.put(&hidden.file, &[]))
-        .expect("unfinished file");
-    store
-        .with_resolution_session(|session| {
-            assert_eq!(session.file_path(hidden.file.id().get())?, None);
-            assert_eq!(session.file_id_by_path("hidden.rs")?, None);
-            assert_eq!(
-                session.file_path(source.file.id().get())?.as_deref(),
-                Some("source.rs")
-            );
-            assert_eq!(
-                session.file_id_by_path("source.rs")?,
-                Some(source.file.id().get())
-            );
-            let page = session.list_pending_refs(1, 0)?;
-            assert!(page.refs.is_empty());
-            let page =
-                session.list_pending_refs(1, page.next_cursor.expect("advance past hidden ref"))?;
-            assert_eq!(page.refs.len(), 1);
-            assert!(page.next_cursor.is_none());
-            let proposal = Resolution {
-                ref_id: page.refs[0].id,
-                target_id: hidden.entities[0].id().as_str().into(),
-                provenance: EdgeProvenance::ImportScoped,
-            };
-            for target_id in [
-                proposal.target_id.clone(),
-                format!("f{}", hidden.file.id().get()),
-                "absent".into(),
-            ] {
-                let result = session.apply_resolutions(&[Resolution {
-                    target_id,
-                    ..proposal.clone()
-                }])?;
-                assert_eq!((result.resolved, result.stale), (0, 1));
-            }
-            let result = session.apply_resolutions(&[Resolution {
-                target_id: format!("f{}", source.file.id().get()),
-                ..proposal
-            }])?;
-            assert_eq!((result.resolved, result.stale), (1, 0));
-            Ok(())
-        })
-        .expect("visible resolution session");
-    store.close().expect("close writer");
-}
-
-#[test]
-fn resolution_session_requires_issued_refs_and_a_writable_open_store() {
-    let temporary = tempfile::tempdir().expect("workspace");
-    let store = open(temporary.path(), false);
-    let target = snapshot(&store, "target.rs", &["target"]);
-    let mut source = snapshot(&store, "source.rs", &["caller"]);
-    source
-        .graph
-        .pending_refs
-        .push(reference(&source.entities[0]));
-    write(&store, &target);
-    write(&store, &source);
-    let proposal = Resolution {
-        ref_id: pending(&store)[0].id,
-        target_id: target.entities[0].id().as_str().into(),
-        provenance: EdgeProvenance::ImportScoped,
-    };
-    store
-        .with_resolution_session(|session| {
-            let result = session.apply_resolutions(std::slice::from_ref(&proposal))?;
-            assert_eq!((result.resolved, result.stale), (0, 1));
-            session.list_pending_refs(10, 0)?;
-            let result = session.apply_resolutions(std::slice::from_ref(&proposal))?;
-            assert_eq!((result.resolved, result.stale), (1, 0));
-            let result = session.apply_resolutions(std::slice::from_ref(&proposal))?;
-            assert_eq!((result.resolved, result.stale), (0, 1));
-            Ok(())
-        })
-        .expect("writeback only for issued refs");
-    assert_eq!(callers(&store, &target.entities[0]).len(), 1);
-    store.close().expect("close writer");
-    assert!(
-        store
-            .with_resolution_session::<()>(|_| panic!("closed session"))
-            .is_err()
-    );
-    let reader = open(temporary.path(), true);
-    assert!(
-        reader
-            .with_resolution_session::<()>(|_| panic!("read-only session"))
-            .is_err()
-    );
-    reader.close().expect("close reader");
 }
 
 fn stored_entities(store: &IndexStore, entities: &[Entity]) -> HashMap<EntityId, Entity> {
