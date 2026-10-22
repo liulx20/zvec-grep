@@ -398,29 +398,14 @@ fn graph_and_entities_reopen_together_and_read_only_handles_reject_writes() {
 }
 
 #[test]
-fn missing_graph_rejects_indexed_writers_but_preserves_read_only_access() {
+fn missing_graph_is_created_without_rebuilding_indexed_files() {
     let temporary = tempfile::tempdir().expect("workspace");
     let store = open(temporary.path(), false);
     let source = snapshot(&store, "source.rs", &["canonical record"]);
     write(&store, &source);
-    let embeddings = store.shared().expect("writer").schema.clone();
     store.close().expect("close writer");
     let path = temporary.path().join("graph/graph.sqlite");
     fs::remove_file(&path).expect("simulate pre-graph index");
-
-    for _ in 0..2 {
-        let error = IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
-            storage_path: temporary.path().to_owned(),
-            embeddings: embeddings.clone(),
-        })
-        .err()
-        .expect("missing graph requires reconstruction");
-        assert!(error.message().contains("zg --index --rebuild"));
-        assert!(
-            !path.exists(),
-            "failed opening must not create an empty graph"
-        );
-    }
 
     let reader = open(temporary.path(), true);
     assert!(
@@ -437,6 +422,67 @@ fn missing_graph_rejects_indexed_writers_but_preserves_read_only_access() {
     assert!(!path.exists());
     reader.close().expect("close reader");
     assert!(!path.exists());
+
+    let writer = open(temporary.path(), false);
+    assert!(path.exists());
+    assert_eq!(stored_entities(&writer, &source.entities).len(), 1);
+    assert!(
+        writer.list_files().expect("existing records")[0]
+            .index_status()
+            .is_indexed()
+    );
+    assert!(
+        writer
+            .read(|state| {
+                state
+                    .graph
+                    .as_ref()
+                    .expect("writer graph")
+                    .is_empty()
+                    .map_err(graph_error)
+            })
+            .expect("empty graph")
+    );
+    let replacement = snapshot(&writer, "source.rs", &["updated record"]);
+    write(&writer, &replacement);
+    assert!(stored_entities(&writer, &source.entities).is_empty());
+    assert_eq!(stored_entities(&writer, &replacement.entities).len(), 1);
+    writer
+        .delete_file(replacement.file.id())
+        .expect("incremental deletion");
+    assert!(writer.list_files().expect("deleted records").is_empty());
+    writer.close().expect("close upgraded writer");
+}
+
+#[test]
+fn old_entity_ids_are_only_loaded_when_graph_relationships_exist() {
+    let temporary = tempfile::tempdir().expect("workspace");
+    let store = open(temporary.path(), false);
+    let mut source = snapshot(&store, "source.rs", &["first", "second"]);
+    write(&store, &source);
+    let old_ids = || {
+        store
+            .read(|state| invalidation_entity_ids(state, source.file.id()))
+            .expect("invalidation IDs")
+    };
+    assert!(old_ids().is_empty());
+    source
+        .graph
+        .edges
+        .push(local_call(&source.entities[0], &source.entities[1]));
+    write(&store, &source);
+    let ids = old_ids();
+    assert_eq!(ids.len(), source.entities.len());
+    assert!(
+        source
+            .entities
+            .iter()
+            .all(|entity| ids.iter().any(|id| id == entity.id().as_str()))
+    );
+    source.graph.edges.clear();
+    write(&store, &source);
+    assert!(old_ids().is_empty());
+    store.close().expect("close writer");
 }
 
 #[test]

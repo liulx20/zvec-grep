@@ -59,6 +59,14 @@ pub(crate) struct SqliteGraphStorage {
 }
 
 impl SqliteGraphStorage {
+    pub(crate) fn is_empty(&self) -> Result<bool> {
+        Ok(self
+            .connection
+            .query_row("SELECT NOT EXISTS (SELECT 1 FROM edges)", [], |row| {
+                row.get(0)
+            })?)
+    }
+
     pub(crate) fn validate_snapshot(
         file_id: u32,
         graph: &crate::domain::FileGraphResult,

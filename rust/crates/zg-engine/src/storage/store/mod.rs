@@ -158,18 +158,8 @@ impl IndexStore {
             None
         } else {
             let graph_path = home.join("graph").join("graph.sqlite");
-            if !graph_path
-                .try_exists()
-                .map_err(|error| io_error("inspect graph database", &graph_path, &error))?
-                && files
-                    .list()?
-                    .iter()
-                    .any(|file| file.index_status().is_indexed())
-            {
-                return Err(EngineError::storage_failure(
-                    "graph database is missing for indexed files; rebuild the index with `zg --index --rebuild`",
-                ));
-            }
+            // Current extractors produce no graph, so pre-graph indexes can
+            // initialize an empty database without rebuilding canonical data.
             let graph =
                 SqliteGraphStorage::open(&graph_path, OpenMode::ReadWrite).map_err(graph_error)?;
             sync_directory(&home.join("graph"))?;
@@ -390,7 +380,7 @@ impl IndexStore {
     pub(crate) fn delete_file(&self, file_id: FileId) -> EngineResult<()> {
         self.write(|state| {
             state.needs_optimize = true;
-            let old_ids = state.entities.list_ids_for_file(file_id)?;
+            let old_ids = invalidation_entity_ids(state, file_id)?;
             state.files.mark_deleting(file_id)?;
             state
                 .graph
@@ -473,7 +463,7 @@ fn replace_file(
     // Encode every projection before removing any of the previous file's data.
     let entity_docs = Entities::prepare(entities)?;
     let fragment_docs = Fragments::prepare(file, entities, entries, &directories)?;
-    let old_ids = state.entities.list_ids_for_file(file.id())?;
+    let old_ids = invalidation_entity_ids(state, file.id())?;
     let mut unfinished = file.clone();
     unfinished.set_index_status(FileIndexStatus::NotIndexed)?;
     state.files.put(&unfinished, &directories)?;
@@ -490,6 +480,21 @@ fn replace_file(
     state.fragments.write(&fragment_docs)?;
     // Indexed is the publication marker: all content must already be durable.
     state.files.put(file, &directories)
+}
+
+fn invalidation_entity_ids(state: &StoreState, file_id: FileId) -> EngineResult<Vec<String>> {
+    // An empty graph has no incoming relationships to invalidate. Avoid a
+    // canonical entity scan on every file while extractors produce no graph.
+    if state
+        .graph
+        .as_ref()
+        .expect("writable graph")
+        .is_empty()
+        .map_err(graph_error)?
+    {
+        return Ok(Vec::new());
+    }
+    state.entities.list_ids_for_file(file_id)
 }
 
 fn graph_error(error: graph::Error) -> EngineError {
