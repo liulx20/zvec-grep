@@ -60,7 +60,7 @@ impl Entities {
     /// The caller must hold the store lock throughout this read and the update.
     /// Full query batches are split into disjoint indexed ranges so a retrieval
     /// limit cannot silently omit IDs needed to invalidate incoming graph edges.
-    pub(super) fn list_ids(&self, file_id: FileId) -> EngineResult<Vec<String>> {
+    pub(super) fn list_ids_for_file(&self, file_id: FileId) -> EngineResult<Vec<String>> {
         let mut ranges: Vec<(Option<String>, Option<String>)> = vec![(None, None)];
         let mut result = Vec::new();
         while let Some((lower, upper)) = ranges.pop() {

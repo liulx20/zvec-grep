@@ -148,10 +148,13 @@ fn file_ids_are_complete_isolated_and_preserved_across_reopen() {
         .write(&[indexed_entity("other-file", 2)])
         .expect("write another file");
 
-    assert_eq!(table.list_ids(FileId::new(1)).expect("all IDs"), ids);
+    assert_eq!(
+        table.list_ids_for_file(FileId::new(1)).expect("all IDs"),
+        ids
+    );
     assert!(
         table
-            .list_ids(FileId::new(99))
+            .list_ids_for_file(FileId::new(99))
             .expect("missing file")
             .is_empty()
     );
@@ -159,16 +162,23 @@ fn file_ids_are_complete_isolated_and_preserved_across_reopen() {
     drop(table);
 
     let table = Entities::open(root.path(), false).expect("reopen entities");
-    assert_eq!(table.list_ids(FileId::new(1)).expect("persisted IDs"), ids);
+    assert_eq!(
+        table
+            .list_ids_for_file(FileId::new(1))
+            .expect("persisted IDs"),
+        ids
+    );
     table.delete_file(FileId::new(1)).expect("delete file");
     assert!(
         table
-            .list_ids(FileId::new(1))
+            .list_ids_for_file(FileId::new(1))
             .expect("deleted file")
             .is_empty()
     );
     assert_eq!(
-        table.list_ids(FileId::new(2)).expect("other file retained"),
+        table
+            .list_ids_for_file(FileId::new(2))
+            .expect("other file retained"),
         vec!["other-file".to_owned()]
     );
 }
@@ -190,7 +200,7 @@ fn full_file_id_batch_handles_escaped_range_bounds() {
         .expect("write a full query batch");
     assert_eq!(
         table
-            .list_ids(FileId::new(7))
+            .list_ids_for_file(FileId::new(7))
             .expect("escaped filter bounds"),
         ids
     );
@@ -206,7 +216,7 @@ fn file_id_listing_rejects_inconsistent_indexed_identity() {
         .expect("corrupt indexed identity");
     table.write(&[doc]).expect("write corrupt record");
     let error = table
-        .list_ids(FileId::new(1))
+        .list_ids_for_file(FileId::new(1))
         .expect_err("corruption must not silently drop an old ID");
     assert_eq!(error.code(), EngineError::STORAGE_FAILURE);
     assert_eq!(

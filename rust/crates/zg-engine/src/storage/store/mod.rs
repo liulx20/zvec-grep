@@ -390,7 +390,7 @@ impl IndexStore {
     pub(crate) fn delete_file(&self, file_id: FileId) -> EngineResult<()> {
         self.write(|state| {
             state.needs_optimize = true;
-            let old_ids = state.entities.list_ids(file_id)?;
+            let old_ids = state.entities.list_ids_for_file(file_id)?;
             state.files.mark_deleting(file_id)?;
             state
                 .graph
@@ -473,7 +473,7 @@ fn replace_file(
     // Encode every projection before removing any of the previous file's data.
     let entity_docs = Entities::prepare(entities)?;
     let fragment_docs = Fragments::prepare(file, entities, entries, &directories)?;
-    let old_ids = state.entities.list_ids(file.id())?;
+    let old_ids = state.entities.list_ids_for_file(file.id())?;
     let mut unfinished = file.clone();
     unfinished.set_index_status(FileIndexStatus::NotIndexed)?;
     state.files.put(&unfinished, &directories)?;

@@ -633,7 +633,7 @@ fn retry_replaces_a_committed_graph_when_canonical_entities_are_still_old() {
                 .write_file_graph(
                     original.file.id().get(),
                     &interrupted.graph,
-                    &state.entities.list_ids(original.file.id())?,
+                    &state.entities.list_ids_for_file(original.file.id())?,
                 )
                 .map_err(graph_error)
         })
@@ -691,7 +691,7 @@ fn process_exit_during_canonical_replacement_recovers_from_durable_status() {
                 state.files.flush()?;
                 let old_ids = state
                     .entities
-                    .list_ids(original.file.id())?
+                    .list_ids_for_file(original.file.id())?
                     .into_iter()
                     .map(|id| id.as_str().to_owned())
                     .collect::<Vec<_>>();
