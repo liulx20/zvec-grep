@@ -50,7 +50,6 @@ pub(crate) use graph::FileGraphNode;
 pub(crate) use graph::FileGraphResult;
 #[cfg(test)]
 pub(crate) use graph::GraphEdgeKind;
-#[cfg(test)]
 pub(crate) use graph::PendingRef;
 pub(crate) use graph::PendingRefStatus;
 

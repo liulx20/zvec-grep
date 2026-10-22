@@ -1,16 +1,16 @@
 //! Canonical entities, content, metadata, and fragment selectors.
-use std::{collections::HashMap, fmt::Write, path::Path};
+use std::{collections::HashMap, path::Path};
 
-use zvec_rust::{Collection, CollectionSchema, DataType, Doc, SearchQuery};
+use zvec_rust::{Collection, CollectionSchema, DataType, Doc};
 
 use crate::{
     EngineError, EngineResult,
-    domain::{Entity, EntityId, EntityMetadata, FileId},
+    domain::{CodeMetadata, Entity, EntityId, EntityMetadata, FileId},
 };
 
 use super::zvec::{
-    corrupt, doc_key, fetch_map, native, open_collection, scalar, string_field, u32_field,
-    write_docs,
+    WRITE_BATCH, collect_entity_ids, corrupt, doc_key, fetch_map, native, open_collection, scalar,
+    string_field, u32_field, write_docs,
 };
 
 mod codec;
@@ -56,58 +56,81 @@ impl Entities {
             .collect()
     }
 
+    /// Fetch endpoint identity and ownership without loading content or metadata.
+    pub(super) fn fetch_file_ids(
+        &self,
+        ids: &[EntityId],
+    ) -> EngineResult<HashMap<EntityId, FileId>> {
+        let mut owners = HashMap::with_capacity(ids.len());
+        for batch in ids.chunks(WRITE_BATCH) {
+            let keys: Vec<_> = batch.iter().map(EntityId::as_str).collect();
+            for doc in native(
+                self.collection
+                    .fetch_with_options(&keys, Some(&["entity_id", "file_id"]), false),
+                "fetch entity ownership",
+            )? {
+                let id = string_field(&doc, "entity_id")?;
+                if doc_key(&doc)? != id {
+                    return Err(corrupt("entity identity differs from its index fields"));
+                }
+                owners.insert(
+                    EntityId::from_string(id),
+                    FileId::new(u32_field(&doc, "file_id")?),
+                );
+            }
+        }
+        Ok(owners)
+    }
+
+    /// Read code metadata and ownership without loading canonical bodies.
+    pub(super) fn fetch_code_metadata(
+        &self,
+        ids: &[EntityId],
+    ) -> EngineResult<HashMap<EntityId, (FileId, CodeMetadata)>> {
+        let mut owners = HashMap::new();
+        for batch in ids.chunks(WRITE_BATCH) {
+            let keys: Vec<_> = batch.iter().map(EntityId::as_str).collect();
+            for doc in native(
+                self.collection.fetch_with_options(
+                    &keys,
+                    Some(&["entity_id", "file_id", "metadata"]),
+                    false,
+                ),
+                "fetch symbol metadata",
+            )? {
+                let id = string_field(&doc, "entity_id")?;
+                if doc_key(&doc)? != id {
+                    return Err(corrupt("entity identity differs from its index fields"));
+                }
+                if let Some(EntityMetadata::Code(metadata)) = decode_metadata(&doc)? {
+                    owners.insert(
+                        EntityId::from_string(id),
+                        (FileId::new(u32_field(&doc, "file_id")?), metadata),
+                    );
+                }
+            }
+        }
+        Ok(owners)
+    }
+
     /// Read every canonical ID before replacing or deleting a file's entities.
     /// The caller must hold the store lock throughout this read and the update.
     /// Full query batches are split into disjoint indexed ranges so a retrieval
     /// limit cannot silently omit IDs needed to invalidate incoming graph edges.
     pub(super) fn list_ids_for_file(&self, file_id: FileId) -> EngineResult<Vec<String>> {
-        let mut ranges: Vec<(Option<String>, Option<String>)> = vec![(None, None)];
-        let mut result = Vec::new();
-        while let Some((lower, upper)) = ranges.pop() {
-            let mut filter = format!("file_id = {}", file_id.get());
-            if let Some(lower) = &lower {
-                let _ = write!(filter, " AND entity_id >= {}", literal(lower));
-            }
-            if let Some(upper) = &upper {
-                let _ = write!(filter, " AND entity_id < {}", literal(upper));
-            }
-            let mut query = native(SearchQuery::scalar(1024), "create entity ID query")?;
-            native(query.set_filter(&filter), "filter entity IDs")?;
-            native(
-                query.set_output_fields(&["file_id", "entity_id"]),
-                "project entity IDs",
-            )?;
-            native(query.set_include_vector(false), "omit entity vectors")?;
-            let docs = native(self.collection.query(&query), "query file entity IDs")?;
-            let mut ids = Vec::with_capacity(docs.len());
-            for doc in docs {
-                if u32_field(&doc, "file_id")? != file_id.get() {
+        collect_entity_ids(
+            &self.collection,
+            &format!("file_id = {}", file_id.get()),
+            |doc| {
+                if u32_field(doc, "file_id")? != file_id.get() {
                     return Err(corrupt("entity query returned another file's record"));
                 }
-                let id = string_field(&doc, "entity_id")?;
-                if doc_key(&doc)? != id {
+                if doc_key(doc)? != string_field(doc, "entity_id")? {
                     return Err(corrupt("entity identity differs from its index fields"));
                 }
-                if lower.as_ref().is_some_and(|bound| id < *bound)
-                    || upper.as_ref().is_some_and(|bound| id >= *bound)
-                {
-                    return Err(corrupt(
-                        "entity query returned an ID outside its requested range",
-                    ));
-                }
-                ids.push(id);
-            }
-            ids.sort_unstable();
-            ids.dedup();
-            if ids.len() < 1024 {
-                result.extend(ids);
-            } else {
-                let pivot = ids[ids.len() / 2].clone();
-                ranges.push((Some(pivot.clone()), upper));
-                ranges.push((lower, Some(pivot)));
-            }
-        }
-        Ok(result)
+                Ok(())
+            },
+        )
     }
 
     pub(super) fn validate_ownership(
@@ -144,10 +167,6 @@ impl Entities {
     pub(super) fn optimize(&self) -> EngineResult<()> {
         native(self.collection.optimize(), "optimize entities")
     }
-}
-
-fn literal(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "\\'"))
 }
 
 fn schema() -> EngineResult<CollectionSchema> {

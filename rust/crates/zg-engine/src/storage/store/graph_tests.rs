@@ -191,23 +191,20 @@ fn callers(store: &IndexStore, target: &Entity) -> Vec<FileEdge> {
 }
 
 fn resolve(store: &IndexStore, target: &Entity) -> i64 {
-    store
-        .write(|state| {
-            let graph = state.graph.as_mut().expect("graph is open");
-            let refs = graph.list_pending_refs(100, 0).expect("pending refs");
-            assert_eq!(refs.refs.len(), 1);
-            let id = refs.refs[0].id;
-            let stats = graph
-                .apply_resolutions(&[Resolution {
-                    ref_id: id,
-                    target_id: target.id().as_str().into(),
-                    provenance: EdgeProvenance::ImportScoped,
-                }])
-                .expect("resolve reference under storage lock");
-            assert_eq!(stats.resolved, 1);
-            Ok(id)
-        })
-        .expect("write graph under storage lock")
+    let refs = store
+        .list_pending_refs(100, 0)
+        .expect("visible pending refs");
+    assert_eq!(refs.refs.len(), 1);
+    let id = refs.refs[0].id;
+    let stats = store
+        .apply_resolutions(&[Resolution {
+            ref_id: id,
+            target_id: target.id().as_str().into(),
+            provenance: EdgeProvenance::ImportScoped,
+        }])
+        .expect("resolve reference through IndexStore");
+    assert_eq!(stats.resolved, 1);
+    id
 }
 
 fn stored_entities(store: &IndexStore, entities: &[Entity]) -> HashMap<EntityId, Entity> {
@@ -789,3 +786,5 @@ fn process_exit_during_canonical_replacement_recovers_from_durable_status() {
         "incoming reference survives for re-resolution"
     );
 }
+
+mod resolution_tests;
