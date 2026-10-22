@@ -169,7 +169,6 @@ impl Files {
         Ok(())
     }
 
-    #[cfg(test)]
     pub(super) fn flush(&self) -> EngineResult<()> {
         self.assert_writable()?;
         native(self.collection.flush(), "flush source files")

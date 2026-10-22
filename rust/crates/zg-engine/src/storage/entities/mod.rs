@@ -137,7 +137,6 @@ impl Entities {
         )
     }
 
-    #[cfg(test)]
     pub(super) fn flush(&self) -> EngineResult<()> {
         native(self.collection.flush(), "flush entities")
     }

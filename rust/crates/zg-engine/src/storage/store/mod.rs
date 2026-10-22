@@ -405,7 +405,7 @@ impl IndexStore {
     }
 
     /// Persist an explicitly staged test fixture with the current native backend.
-    /// Production relies on zvec writes being durable without manual flushing.
+    /// Per-file publication relies on zvec writes being durable without manual flushing.
     #[cfg(test)]
     pub(crate) fn checkpoint(&self) -> EngineResult<()> {
         if self.read_only {
@@ -422,7 +422,11 @@ impl IndexStore {
         self.write(|state| {
             // Also finish indexes created by versions that only flushed writes.
             if state.needs_optimize || state.fragments.needs_optimize()? {
-                optimize(state)?;
+                state.directories.optimize()?;
+                state.entities.optimize()?;
+                state.files.optimize()?;
+                state.fragments.optimize()?;
+                state.needs_optimize = false;
             }
             Ok(())
         })
@@ -444,10 +448,12 @@ impl IndexStore {
         // Reject a write that acquired its Arc before close but is still waiting
         // for this lock.
         state.closed = true;
-        state
+        let checkpoint = flush(&state);
+        let graph_close = state
             .graph
             .take()
-            .map_or(Ok(()), |graph| graph.close().map_err(graph_error))
+            .map_or(Ok(()), |graph| graph.close().map_err(graph_error));
+        checkpoint.and(graph_close)
     }
 }
 
@@ -484,15 +490,6 @@ fn replace_file(
     state.fragments.write(&fragment_docs)?;
     // Indexed is the publication marker: all content must already be durable.
     state.files.put(file, &directories)
-}
-
-fn optimize(state: &mut StoreState) -> EngineResult<()> {
-    state.directories.optimize()?;
-    state.entities.optimize()?;
-    state.files.optimize()?;
-    state.fragments.optimize()?;
-    state.needs_optimize = false;
-    Ok(())
 }
 
 fn graph_error(error: graph::Error) -> EngineError {
@@ -556,14 +553,12 @@ fn load_search_hits(
     })
 }
 
-#[cfg(test)]
 fn flush_content(state: &StoreState) -> EngineResult<()> {
     state.directories.flush()?;
     state.entities.flush()?;
     state.fragments.flush()
 }
 
-#[cfg(test)]
 fn flush(state: &StoreState) -> EngineResult<()> {
     flush_content(state)?;
     state.files.flush()
