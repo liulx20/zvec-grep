@@ -44,6 +44,7 @@ pub(crate) fn initialize(connection: &mut Connection) -> Result<()> {
 
 // Direct local edges and references share one table. Resolution fills the target
 // on the existing reference row; invalidation clears it and retains the evidence.
+// `failed` is reserved for resolver integration; no API currently sets it.
 const SCHEMA: &str = "
 CREATE TABLE edges (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

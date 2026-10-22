@@ -12,3 +12,4 @@ pub(crate) mod types;
 mod zvec;
 
 pub(crate) use store::IndexStore;
+pub(crate) use store::resolution::ResolutionSession;
