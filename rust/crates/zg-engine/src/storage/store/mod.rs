@@ -404,9 +404,7 @@ impl IndexStore {
         })
     }
 
-    /// Persist an explicitly staged test fixture with the current native backend.
-    /// Per-file publication relies on zvec writes being durable without manual flushing.
-    #[cfg(test)]
+    /// Flush accepted writes, including any unfinished file's retry state.
     pub(crate) fn checkpoint(&self) -> EngineResult<()> {
         if self.read_only {
             return Ok(());
@@ -414,8 +412,9 @@ impl IndexStore {
         self.write(|state| flush(state))
     }
 
-    /// Build indexes and compact accepted writes after indexing finishes.
+    /// Persist retry state before building indexes and compacting accepted writes.
     pub(crate) fn finalize_writes(&self) -> EngineResult<()> {
+        self.checkpoint()?;
         if self.read_only {
             return Ok(());
         }
@@ -433,7 +432,8 @@ impl IndexStore {
     }
 
     pub(crate) fn close(&self) -> EngineResult<()> {
-        // Serialize closes with writers before releasing the native handles.
+        // Serialize concurrent closes through the final checkpoint as well as
+        // taking the lease, so none can return while its writes are persisting.
         let mut lease = self
             .shared
             .lock()
@@ -446,7 +446,7 @@ impl IndexStore {
         }
         let mut state = lock_state(&shared)?;
         // Reject a write that acquired its Arc before close but is still waiting
-        // for this lock.
+        // for this lock. A successful close commits every accepted write.
         state.closed = true;
         let checkpoint = flush(&state);
         let graph_close = state
@@ -553,14 +553,10 @@ fn load_search_hits(
     })
 }
 
-fn flush_content(state: &StoreState) -> EngineResult<()> {
+fn flush(state: &StoreState) -> EngineResult<()> {
     state.directories.flush()?;
     state.entities.flush()?;
-    state.fragments.flush()
-}
-
-fn flush(state: &StoreState) -> EngineResult<()> {
-    flush_content(state)?;
+    state.fragments.flush()?;
     state.files.flush()
 }
 
