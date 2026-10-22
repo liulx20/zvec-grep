@@ -6,7 +6,7 @@ use std::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use serde_json::json;
@@ -74,7 +74,21 @@ impl Fixture {
     }
 
     fn assert_model(&self, mode: &str, reference: &str) {
-        let output = self.success(&["--status", "--mode", mode, "--no-color"]);
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let output = loop {
+            let output = self.success(&["--status", "--mode", mode, "--no-color"]);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            // Watcher updates can invalidate a server status scan after the build.
+            // Retry only this transient state, retaining the readiness/model checks below.
+            if mode != "server" || !stdout.starts_with("? Workspace index status is unknown\n") {
+                break output;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "server status did not settle after indexing:\n{stdout}"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        };
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(stdout.contains("✓ Workspace index is ready"), "{stdout}");
         assert!(
