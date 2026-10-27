@@ -1,26 +1,7 @@
 //! Common storage fixtures; no production storage behavior lives here.
 use super::{IndexStore, types::WorkspaceIndexStorageOptions};
-use crate::domain::{EntityId, FileGraphNode, SymbolType, model::EmbeddingModelInfo};
+use crate::domain::{EntityId, model::EmbeddingModelInfo};
 use std::path::Path;
-
-pub(crate) fn node(id: &str) -> FileGraphNode {
-    FileGraphNode {
-        id: id.to_owned(),
-        kind: SymbolType::Function,
-        name: Some(id.to_owned()),
-        qualified_name: id.to_owned(),
-        language: "rust".into(),
-        start_line: 1,
-        end_line: 1,
-        start_column: 0,
-        end_column: 1,
-        signature: None,
-        doc: None,
-        arity: None,
-        visibility: None,
-        is_exported: false,
-    }
-}
 
 pub(crate) fn open_store(
     path: &Path,
