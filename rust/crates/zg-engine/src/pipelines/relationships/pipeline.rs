@@ -10,8 +10,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     EngineError, EngineResult,
     api::relationships::{
-        RelationshipEdge, RelationshipOptions, RelationshipResult, RelationshipSymbol,
-        SymbolRelationships,
+        CallSite, RelationshipOptions, RelationshipResult, SymbolDefinition, SymbolRelationships,
     },
     domain::{EntityId, EntityMetadata, GraphEdgeKind, Range},
     storage::{IndexStore, RelationshipReadSession, graph::Direction, types::StoredEntity},
@@ -130,7 +129,7 @@ fn collect_match(
     stored: &StoredEntity,
     limit: usize,
     direction: Direction,
-    symbols: &mut HashMap<EntityId, Option<RelationshipSymbol>>,
+    symbols: &mut HashMap<EntityId, Option<SymbolDefinition>>,
 ) -> EngineResult<Option<SymbolRelationships>> {
     let Some(symbol) = symbols.get(stored.entity.id()).cloned().flatten() else {
         return Ok(None);
@@ -171,7 +170,7 @@ fn collect_match(
         edges: edges
             .into_iter()
             .zip(targets)
-            .map(|((edge, file_path), target)| RelationshipEdge {
+            .map(|((edge, file_path), target)| CallSite {
                 file_path,
                 symbol: symbols.get(&target).cloned().flatten(),
                 line: edge.line,
@@ -181,7 +180,7 @@ fn collect_match(
     }))
 }
 
-fn describe(stored: &StoredEntity) -> Option<RelationshipSymbol> {
+fn describe(stored: &StoredEntity) -> Option<SymbolDefinition> {
     let Some(EntityMetadata::Code(metadata)) = stored.entity.metadata() else {
         return None;
     };
@@ -192,7 +191,7 @@ fn describe(stored: &StoredEntity) -> Option<RelationshipSymbol> {
     let Range::Text(range) = stored.entity.source_range() else {
         return None;
     };
-    Some(RelationshipSymbol {
+    Some(SymbolDefinition {
         name: match metadata.scope.as_deref().filter(|scope| !scope.is_empty()) {
             Some(scope) => format!("{scope}::{name}"),
             None => name.to_owned(),

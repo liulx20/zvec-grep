@@ -137,7 +137,7 @@ pub fn workspace_relative_path(root: &Path, path: &Path) -> crate::EngineResult<
 /// A definition in workspace-relative source coordinates.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct RelationshipSymbol {
+pub struct SymbolDefinition {
     pub name: String,
     pub file_path: PathBuf,
     pub start_line: usize,
@@ -147,10 +147,10 @@ pub struct RelationshipSymbol {
 /// One call site. Unavailable endpoint metadata is represented by `None`.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct RelationshipEdge {
+pub struct CallSite {
     /// Workspace-relative caller file containing this call site, even without a symbol.
     pub file_path: PathBuf,
-    pub symbol: Option<RelationshipSymbol>,
+    pub symbol: Option<SymbolDefinition>,
     /// One-based call-site line.
     pub line: Option<usize>,
     /// Zero-based byte column.
@@ -162,10 +162,10 @@ pub struct RelationshipEdge {
 #[serde(rename_all = "camelCase")]
 pub struct SymbolRelationships {
     #[serde(flatten)]
-    pub symbol: RelationshipSymbol,
+    pub symbol: SymbolDefinition,
     /// Whether additional visible call sites were omitted by the per-symbol limit.
     pub truncated: bool,
-    pub edges: Vec<RelationshipEdge>,
+    pub edges: Vec<CallSite>,
 }
 
 /// Exact relationship matches, or suggestions to retry when no definition matched.
@@ -175,5 +175,5 @@ pub struct RelationshipResult {
     pub matches: Vec<SymbolRelationships>,
     /// No usable exact definition matched; these similarly named definitions carry no edges.
     /// At most five best-effort suggestions, not an exhaustive list of similar symbols.
-    pub suggestions: Vec<RelationshipSymbol>,
+    pub suggestions: Vec<SymbolDefinition>,
 }
