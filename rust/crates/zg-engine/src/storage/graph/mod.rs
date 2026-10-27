@@ -5,7 +5,7 @@
 //! the indexing coordinator owns consistency with zvec.
 //! Callers must serialize reference reads, resolution and writeback with file updates.
 //! This module does not resolve names, run FTS, or manage workspace locks.
-//! `IndexStore` owns the writable connection and coordinates file replacement.
+//! `IndexStore` owns the connection and coordinates file replacement.
 
 mod pending;
 mod reader;

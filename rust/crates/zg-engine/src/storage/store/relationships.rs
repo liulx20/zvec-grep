@@ -1,14 +1,13 @@
 //! Read-only relationship access under the store lock.
 use std::{
     collections::{HashMap, HashSet},
-    fs,
     path::{Path, PathBuf},
 };
 
-use super::{IndexStore, StoreState, assert_usable, graph_error, io_error, lock_state};
+use super::{IndexStore, StoreState, graph_error};
 use crate::storage::{
     fragments::build_filter,
-    graph::{Direction, OpenMode, SqliteGraphStorage},
+    graph::{Direction, SqliteGraphStorage},
     types::{StoragePathFilter, StorageSearchFilter, StoredEntity},
 };
 use crate::{
@@ -29,8 +28,14 @@ impl IndexStore {
         &self,
         operation: impl FnOnce(&RelationshipReadSession<'_>) -> EngineResult<T>,
     ) -> EngineResult<T> {
-        // Opening the graph here also reports a missing graph for unknown symbols.
-        self.read_graph(|graph, state| operation(&RelationshipReadSession { state, graph }))
+        self.read(|state| {
+            let graph = state.graph.as_ref().ok_or_else(|| {
+                EngineError::not_found(
+                    "workspace graph is missing; this index has no persisted relationship data",
+                )
+            })?;
+            operation(&RelationshipReadSession { state, graph })
+        })
     }
 
     #[cfg(test)]
@@ -40,33 +45,6 @@ impl IndexStore {
         scope: Option<&str>,
     ) -> EngineResult<Vec<StoredEntity>> {
         self.with_relationship_read(|session| session.find_symbols(name, scope, None))
-    }
-
-    fn read_graph<T>(
-        &self,
-        operation: impl FnOnce(&SqliteGraphStorage, &StoreState) -> EngineResult<T>,
-    ) -> EngineResult<T> {
-        let shared = self.shared()?;
-        let state = lock_state(&shared)?;
-        assert_usable(&state)?;
-        match fs::metadata(&state.graph_path) {
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Err(EngineError::not_found(
-                    "workspace graph is missing; this index has no persisted relationship data",
-                ));
-            }
-            Err(error) => {
-                return Err(io_error(
-                    "inspect workspace graph",
-                    &state.graph_path,
-                    &error,
-                ));
-            }
-        }
-        let graph =
-            SqliteGraphStorage::open(&state.graph_path, OpenMode::ReadOnly).map_err(graph_error)?;
-        operation(&graph, &state)
     }
 }
 

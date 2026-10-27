@@ -56,7 +56,6 @@ struct StoreState {
     fragments: Fragments,
     graph: Option<SqliteGraphStorage>,
     optimize_marker: PathBuf,
-    graph_path: PathBuf,
     needs_optimize: bool,
     closed: bool,
 }
@@ -178,11 +177,20 @@ impl IndexStore {
         let directories = Directories::open(&path, read_only)?;
         let entities = Entities::open(&path, read_only)?;
         let fragments = Fragments::open(&path, &schema, read_only)?;
-        // Ordinary readers do not depend on the graph's availability.
-        let graph = if read_only || !graph_enabled {
+        let graph_path = path.join("graph").join("graph.sqlite");
+        let graph = if read_only {
+            match fs::metadata(&graph_path) {
+                Ok(_) => Some(
+                    SqliteGraphStorage::open(&graph_path, OpenMode::ReadOnly)
+                        .map_err(graph_error)?,
+                ),
+                // Pre-graph indexes remain readable without creating SQLite in a reader.
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => return Err(io_error("inspect workspace graph", &graph_path, &error)),
+            }
+        } else if !graph_enabled {
             None
         } else {
-            let graph_path = path.join("graph").join("graph.sqlite");
             // Current extractors produce no graph, so pre-graph indexes can
             // initialize an empty database without rebuilding canonical data.
             let graph =
@@ -209,7 +217,6 @@ impl IndexStore {
                 graph,
                 optimize_marker,
                 needs_optimize,
-                graph_path: home.join("graph/graph.sqlite"),
                 closed: false,
             }),
             schema,

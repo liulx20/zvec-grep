@@ -187,34 +187,28 @@ async fn truncation_skips_invisible_edges_in_both_directions() {
 async fn limited_queries_skip_unneeded_endpoint_metadata_and_bodies() {
     for corruption in ["endpoint metadata", "caller body"] {
         let fixture = Fixture::new();
-        let (direction, symbol) = match corruption {
-            "endpoint metadata" => {
-                let extra = fixture.add_symbols("extra.rs", &[("extra", None, 1, "fn extra() {}")]);
-                let caller = fixture.find_symbol("invoke", None);
-                insert_call(
-                    &fixture,
-                    caller.file_id().get(),
-                    caller.id().as_str(),
-                    extra[0].id().as_str(),
-                );
-                corrupt_entity_identity(
-                    fixture.storage_home(),
-                    std::slice::from_ref(extra[0].id()),
-                );
-                (RelationshipDirection::Callees, "invoke")
-            }
-            _ => {
-                let target = fixture.find_symbol("run", Some("red"));
-                let caller = fixture.find_symbol("helper", Some("red"));
-                insert_call(
-                    &fixture,
-                    caller.file_id().get(),
-                    caller.id().as_str(),
-                    target.id().as_str(),
-                );
-                corrupt_entity_bodies(fixture.storage_home(), std::slice::from_ref(caller.id()));
-                (RelationshipDirection::Callers, "red::run")
-            }
+        let (direction, symbol) = if corruption == "endpoint metadata" {
+            let extra = fixture.add_symbols("extra.rs", &[("extra", None, 1, "fn extra() {}")]);
+            let caller = fixture.find_symbol("invoke", None);
+            insert_call(
+                &fixture,
+                caller.file_id().get(),
+                caller.id().as_str(),
+                extra[0].id().as_str(),
+            );
+            corrupt_entity_identity(fixture.storage_home(), std::slice::from_ref(extra[0].id()));
+            (RelationshipDirection::Callees, "invoke")
+        } else {
+            let target = fixture.find_symbol("run", Some("red"));
+            let caller = fixture.find_symbol("helper", Some("red"));
+            insert_call(
+                &fixture,
+                caller.file_id().get(),
+                caller.id().as_str(),
+                target.id().as_str(),
+            );
+            corrupt_entity_bodies(fixture.storage_home(), std::slice::from_ref(caller.id()));
+            (RelationshipDirection::Callers, "red::run")
         };
         for limit in [1, 1000] {
             let result = fixture
