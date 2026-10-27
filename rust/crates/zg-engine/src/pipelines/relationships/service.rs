@@ -5,7 +5,10 @@ use std::path::Path;
 use crate::{
     EngineError, EngineResult,
     api::relationships::{RelationshipDirection, RelationshipOptions, RelationshipResult},
-    pipelines::indexing::service::{WorkspaceIndexService, is_indexed},
+    pipelines::{
+        indexing::service::{WorkspaceIndexService, is_indexed},
+        read_access::{ReadSource, acquire_read_source},
+    },
     storage::{
         IndexStore,
         graph::Direction,
@@ -15,8 +18,6 @@ use crate::{
         layout::find_nearest_workspace, lock::LockWait, manifest::read_workspace_manifest,
     },
 };
-
-use super::super::read_access::{ReadSource, acquire_read_source};
 
 use super::pipeline::{normalize, query_symbols};
 
