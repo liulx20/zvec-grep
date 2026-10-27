@@ -119,17 +119,17 @@ async fn truncation_counts_only_visible_edges_and_handles_exact_limits() {
 }
 
 #[tokio::test]
-async fn paged_relationships_skip_invisible_pages_in_both_directions() {
+async fn truncation_skips_invisible_edges_in_both_directions() {
     let fixture = Fixture::new();
     let entities = fixture.add_symbols(
-        "paged.rs",
+        "visibility.rs",
         &[
-            ("paged_caller", None, 1, "fn paged_caller() {}"),
-            ("paged_target", None, 2, "fn paged_target() {}"),
+            ("visible_caller", None, 1, "fn visible_caller() {}"),
+            ("visible_target", None, 2, "fn visible_target() {}"),
         ],
     );
     let graph = rusqlite::Connection::open(&fixture.graph_path).expect("graph fixture");
-    // More than one full page has no visible endpoint. Query cursors must still advance.
+    // Invisible edges must not consume the limit before later visible calls.
     for (source, target) in [
         (entities[0].id().as_str(), "missing"),
         ("missing", entities[1].id().as_str()),
@@ -141,7 +141,7 @@ async fn paged_relationships_skip_invisible_pages_in_both_directions() {
              SELECT ?1, ?2, ?3, 'calls', 'resolved', 'file_local', x FROM n",
                 rusqlite::params![entities[0].file_id().get(), source, target],
             )
-            .expect("invisible pages");
+            .expect("invisible edges");
     }
     for _ in 0..3 {
         insert_call(
@@ -158,9 +158,9 @@ async fn paged_relationships_skip_invisible_pages_in_both_directions() {
             let options = RelationshipOptions {
                 limit: Some(limit),
                 ..fixture.options(if incoming {
-                    "paged_target"
+                    "visible_target"
                 } else {
-                    "paged_caller"
+                    "visible_caller"
                 })
             };
             let reply = if incoming {
@@ -168,7 +168,7 @@ async fn paged_relationships_skip_invisible_pages_in_both_directions() {
             } else {
                 engine.callees(options).await
             }
-            .expect("advance across invisible pages");
+            .expect("advance across invisible edges");
             assert_eq!(
                 (reply.matches[0].edges.len(), reply.matches[0].truncated),
                 (count, truncated)
@@ -184,23 +184,10 @@ async fn paged_relationships_skip_invisible_pages_in_both_directions() {
 }
 
 #[tokio::test]
-async fn limited_queries_skip_unneeded_pages_metadata_and_bodies() {
-    for corruption in ["later edge page", "endpoint metadata", "caller body"] {
+async fn limited_queries_skip_unneeded_endpoint_metadata_and_bodies() {
+    for corruption in ["endpoint metadata", "caller body"] {
         let fixture = Fixture::new();
         let (direction, symbol) = match corruption {
-            "later edge page" => {
-                let graph = rusqlite::Connection::open(&fixture.graph_path).expect("graph fixture");
-                graph.execute_batch(
-                    "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x + 1 FROM n WHERE x < 300)
-                     INSERT INTO edges (file_id, source, target, kind, status, line, col, provenance)
-                     SELECT e.file_id, e.source, e.target, 'calls', 'resolved', 1000 + x, 4, 'file_local'
-                     FROM n CROSS JOIN (SELECT file_id, source, target FROM edges
-                         WHERE kind = 'calls' AND provenance = 'file_local' ORDER BY id LIMIT 1) e;
-                     PRAGMA ignore_check_constraints = ON;
-                     UPDATE edges SET metadata = 'not JSON' WHERE id = (SELECT max(id) FROM edges);"
-                ).expect("corruption beyond first page");
-                (RelationshipDirection::Callees, "invoke")
-            }
             "endpoint metadata" => {
                 let extra = fixture.add_symbols("extra.rs", &[("extra", None, 1, "fn extra() {}")]);
                 let caller = fixture.find_symbol("invoke", None);

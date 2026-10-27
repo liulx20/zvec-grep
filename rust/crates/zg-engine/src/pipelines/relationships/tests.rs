@@ -30,5 +30,5 @@ use fixture::*;
 mod admission;
 mod fixture;
 mod lookup;
-mod pagination;
 mod suggestions;
+mod truncation;

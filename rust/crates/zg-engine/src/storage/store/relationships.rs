@@ -20,7 +20,7 @@ use crate::{
 };
 
 const MAX_SYMBOL_SUGGESTIONS: usize = 5;
-const EDGE_BATCH_SIZE: usize = 256;
+const ENDPOINT_BATCH_SIZE: usize = 256;
 
 impl IndexStore {
     /// Keep symbol lookup, edge selection and endpoint hydration on one snapshot.
@@ -66,9 +66,7 @@ impl IndexStore {
         }
         let graph =
             SqliteGraphStorage::open(&state.graph_path, OpenMode::ReadOnly).map_err(graph_error)?;
-        graph
-            .with_read_snapshot(|graph| operation(graph, &state))
-            .map_err(graph_error)?
+        operation(&graph, &state)
     }
 }
 
@@ -249,7 +247,7 @@ impl RelationshipReadSession<'_> {
         get_entities(self.state, ids)
     }
 
-    /// Collect up to `limit` visible edges and their caller paths, advancing across invisible pages.
+    /// Filter resolved edges by endpoint visibility before applying the limit.
     pub(crate) fn neighborhood(
         &self,
         id: &str,
@@ -257,61 +255,47 @@ impl RelationshipReadSession<'_> {
         kinds: Option<&[GraphEdgeKind]>,
         limit: usize,
     ) -> EngineResult<Vec<(FileEdge, PathBuf)>> {
+        let mut rows = self
+            .graph
+            .neighborhood(id, direction, kinds)
+            .map_err(graph_error)?
+            .into_iter();
         let mut edges = Vec::new();
-        let mut cursor = 0;
-        let mut hydration_size = limit.clamp(1, EDGE_BATCH_SIZE);
+        let mut hydration_size = limit.clamp(1, ENDPOINT_BATCH_SIZE);
         let mut checked = HashSet::new();
         let mut visible = HashMap::new();
         while edges.len() < limit {
-            // Scan full pages even when only a few visible edges are still needed.
-            let page = self
-                .graph
-                .neighborhood_page(id, direction, kinds, cursor, EDGE_BATCH_SIZE)
-                .map_err(graph_error)?;
-            let Some((last_id, _)) = page.last() else {
+            let batch: Vec<_> = rows.by_ref().take(hydration_size).collect();
+            if batch.is_empty() {
                 break;
-            };
-            // Advance by scanned rows even when the entire page is invisible.
-            cursor = *last_id;
-            let exhausted = page.len() < EDGE_BATCH_SIZE;
+            }
             // SQLite can be ahead of zvec after a failed write. Filter both
             // endpoints before counting a row toward the requested limit.
-            let mut rows = page.into_iter();
-            while edges.len() < limit {
-                let batch: Vec<_> = rows.by_ref().take(hydration_size).collect();
-                if batch.is_empty() {
-                    break;
-                }
-                let ids: Vec<_> = batch
-                    .iter()
-                    .flat_map(|(_, edge)| [&edge.source, &edge.target])
-                    .map(|id| EntityId::from_string(id.clone()))
-                    .filter(|id| checked.insert(id.clone()))
-                    .collect();
-                visible.extend(endpoint_paths(self.state, &ids)?);
-                let before = edges.len();
-                let remaining = limit - before;
-                edges.extend(
-                    batch
-                        .into_iter()
-                        .filter_map(|(_, edge)| {
-                            let path = visible.get(&EntityId::from_string(edge.source.clone()))?;
-                            visible.get(&EntityId::from_string(edge.target.clone()))?;
-                            Some((edge, path.clone()))
-                        })
-                        .take(remaining),
-                );
-                // Small hydration batches serve ordinary queries without decoding unused
-                // endpoints. Grow across invisible stretches without shrinking SQLite pages.
-                hydration_size = if edges.len() == before {
-                    hydration_size.saturating_mul(2).min(EDGE_BATCH_SIZE)
-                } else {
-                    (limit - edges.len()).clamp(1, EDGE_BATCH_SIZE)
-                };
-            }
-            if exhausted {
-                break;
-            }
+            let ids: Vec<_> = batch
+                .iter()
+                .flat_map(|edge| [&edge.source, &edge.target])
+                .map(|id| EntityId::from_string(id.clone()))
+                .filter(|id| checked.insert(id.clone()))
+                .collect();
+            visible.extend(endpoint_paths(self.state, &ids)?);
+            let before = edges.len();
+            let remaining = limit - before;
+            edges.extend(
+                batch
+                    .into_iter()
+                    .filter_map(|edge| {
+                        let path = visible.get(&EntityId::from_string(edge.source.clone()))?;
+                        visible.get(&EntityId::from_string(edge.target.clone()))?;
+                        Some((edge, path.clone()))
+                    })
+                    .take(remaining),
+            );
+            // Avoid reading unused endpoints, but grow batches across invisible stretches.
+            hydration_size = if edges.len() == before {
+                hydration_size.saturating_mul(2).min(ENDPOINT_BATCH_SIZE)
+            } else {
+                (limit - edges.len()).clamp(1, ENDPOINT_BATCH_SIZE)
+            };
         }
         Ok(edges)
     }
