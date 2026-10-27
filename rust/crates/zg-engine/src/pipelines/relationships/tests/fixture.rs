@@ -1,5 +1,6 @@
 //! Shared workspace, canonical symbols and persisted edge fixtures.
 use super::*;
+use std::path::Path;
 
 pub(super) struct Fixture {
     pub(super) engine: ZvecGrep,
@@ -84,7 +85,11 @@ impl Fixture {
     }
 
     pub(super) fn open_store(&self) -> IndexStore {
-        crate::storage::test_support::open_store(self.storage_home(), false, schema())
+        IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
+            storage_path: self.storage_home().to_owned(),
+            embeddings: vec![schema()],
+        })
+        .expect("open test storage")
     }
 
     pub(super) fn add_symbols(
@@ -326,4 +331,30 @@ pub(super) fn insert_call(fixture: &Fixture, file_id: u32, source: &str, target:
          VALUES (?, ?, ?, 'calls', 'resolved', 'run', 7, 4, 'import_scoped')",
         rusqlite::params![file_id, source, target],
     ).expect("persist call fixture");
+}
+
+pub(super) fn corrupt_entity_bodies(home: &Path, ids: &[EntityId]) {
+    corrupt_entity_field(home, ids, "payload");
+}
+
+pub(super) fn corrupt_entity_metadata(home: &Path, ids: &[EntityId]) {
+    corrupt_entity_field(home, ids, "metadata");
+}
+
+pub(super) fn corrupt_entity_identity(home: &Path, ids: &[EntityId]) {
+    corrupt_entity_field(home, ids, "entity_id");
+}
+
+fn corrupt_entity_field(home: &Path, ids: &[EntityId], field: &str) {
+    let path = home.join("storage/entities");
+    #[cfg(windows)]
+    let path = dunce::simplified(&path);
+    let entities = zvec_rust::Collection::open(path.to_str().expect("UTF-8 fixture path"), None)
+        .expect("entities");
+    for id in ids {
+        let mut doc = entities.fetch(&[id.as_str()]).expect("entity").remove(0);
+        doc.add_string(field, "not JSON").expect("corrupt field");
+        assert_eq!(entities.upsert(&[&doc]).expect("write body").error_count, 0);
+    }
+    entities.flush().expect("persist bodies");
 }

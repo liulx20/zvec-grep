@@ -197,7 +197,7 @@ async fn limited_queries_skip_unneeded_endpoint_metadata_and_bodies() {
                     caller.id().as_str(),
                     extra[0].id().as_str(),
                 );
-                crate::storage::test_support::corrupt_entity_identity(
+                corrupt_entity_identity(
                     fixture.storage_home(),
                     std::slice::from_ref(extra[0].id()),
                 );
@@ -212,10 +212,7 @@ async fn limited_queries_skip_unneeded_endpoint_metadata_and_bodies() {
                     caller.id().as_str(),
                     target.id().as_str(),
                 );
-                crate::storage::test_support::corrupt_entity_bodies(
-                    fixture.storage_home(),
-                    std::slice::from_ref(caller.id()),
-                );
+                corrupt_entity_bodies(fixture.storage_home(), std::slice::from_ref(caller.id()));
                 (RelationshipDirection::Callers, "red::run")
             }
         };

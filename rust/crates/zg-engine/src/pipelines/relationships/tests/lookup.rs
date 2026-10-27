@@ -254,10 +254,7 @@ async fn path_filters_exclude_other_files_before_loading_symbol_metadata() {
         "keepers/other.rs",
         &[("localize", None, 1, "fn localize() {}")],
     );
-    crate::storage::test_support::corrupt_entity_metadata(
-        fixture.storage_home(),
-        &[outside[0].id().clone()],
-    );
+    corrupt_entity_metadata(fixture.storage_home(), &[outside[0].id().clone()]);
     let engine = &fixture.engine;
     assert!(
         engine.callers(fixture.options("localize")).await.is_err(),

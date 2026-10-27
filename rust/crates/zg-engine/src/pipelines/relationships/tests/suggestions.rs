@@ -205,7 +205,7 @@ async fn malformed_fts_and_unreadable_suggestions_do_not_fail_exact_misses() {
     let fixture = Fixture::new();
     let home = fixture.storage_home();
     let candidate = fixture.add_symbols("frob.rs", &[("frob", None, 1, "fn frob() {}")]);
-    crate::storage::test_support::corrupt_entity_bodies(home, &[candidate[0].id().clone()]);
+    corrupt_entity_bodies(home, &[candidate[0].id().clone()]);
     let engine = &fixture.engine;
     for symbol in ["wrong::frob", "FROB", "operator()", "\"", "frob AND ("] {
         let result = fixture.callers(symbol).await;
