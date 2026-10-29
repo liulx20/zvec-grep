@@ -218,7 +218,7 @@ async fn waiting_relationship_reads_leave_the_async_worker_free_and_retain_the_w
     let blocking_writer = std::thread::spawn(move || {
         session
             .storage
-            .with_relationship_read(|_| {
+            .read_snapshot(|_| {
                 ready_tx.send(()).expect("signal locked store");
                 let _ = release_rx.recv_timeout(Duration::from_secs(3));
                 Ok(())

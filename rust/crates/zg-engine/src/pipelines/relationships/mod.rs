@@ -2,6 +2,7 @@
 
 mod pipeline;
 pub(crate) mod service;
+mod storage;
 
 #[cfg(test)]
 mod tests;

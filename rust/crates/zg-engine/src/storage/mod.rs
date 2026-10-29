@@ -5,11 +5,10 @@ mod files;
 mod fragments;
 pub(crate) mod graph;
 mod path;
-pub(crate) mod path_filter;
 pub(crate) mod read_session;
 mod record;
 mod store;
 pub(crate) mod types;
 mod zvec;
 
-pub(crate) use store::{IndexStore, RelationshipReadSession};
+pub(crate) use store::{IndexStore, ReadView};

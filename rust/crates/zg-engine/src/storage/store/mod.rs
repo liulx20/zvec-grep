@@ -34,9 +34,9 @@ use super::{
 use crate::domain::FileGraphResult;
 use crate::domain::model::EmbeddingModelInfo;
 
-mod relationships;
+mod read;
 mod resolution;
-pub(crate) use relationships::RelationshipReadSession;
+pub(crate) use read::ReadView;
 
 type StoreRegistry = Mutex<HashMap<PathBuf, Weak<SharedStore>>>;
 static STORES: OnceLock<StoreRegistry> = OnceLock::new();
@@ -322,13 +322,7 @@ impl IndexStore {
         limit: usize,
         filter: Option<&StorageSearchFilter>,
     ) -> EngineResult<Vec<StorageSearchHit>> {
-        self.read(|state| {
-            if limit == 0 || fragments::empty_filter(filter) {
-                return Ok(Vec::new());
-            }
-            let filter = fragments::build_filter(filter, &|path| state.directories.get(path))?;
-            state.fragments.search_fts(query, limit, filter.as_deref())
-        })
+        self.read_snapshot(|view| view.search_fts(query, limit, filter))
     }
 
     pub(crate) fn search_vector(

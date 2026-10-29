@@ -238,7 +238,9 @@ async fn file_level_callers_keep_their_paths_without_symbol_metadata() {
     let fixture = Fixture::new();
     let store = fixture.open_store();
     let target = store
-        .find_symbols("run", Some("red"))
+        .read_snapshot(|view| {
+            crate::pipelines::relationships::pipeline::find_symbols(view, "run", Some("red"), None)
+        })
         .expect("target")
         .remove(0);
     let sources: Vec<_> = store

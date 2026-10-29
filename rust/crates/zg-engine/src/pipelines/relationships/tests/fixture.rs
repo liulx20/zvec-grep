@@ -139,7 +139,9 @@ impl Fixture {
     pub(super) fn find_symbol(&self, name: &str, scope: Option<&str>) -> Entity {
         let store = self.open_store();
         let symbol = store
-            .find_symbols(name, scope)
+            .read_snapshot(|view| {
+                crate::pipelines::relationships::pipeline::find_symbols(view, name, scope, None)
+            })
             .expect("fixture symbol")
             .remove(0)
             .entity;

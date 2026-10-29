@@ -27,7 +27,7 @@ use crate::{
 };
 
 use super::format_filter::{compile_format_filter, matches_file_name};
-use crate::storage::path_filter::{all, compile_path_filter};
+use super::path_filter::{all, compile_path_filter};
 
 const DEFAULT_LIMIT: usize = 7;
 const RRF_K: f64 = 60.0;
