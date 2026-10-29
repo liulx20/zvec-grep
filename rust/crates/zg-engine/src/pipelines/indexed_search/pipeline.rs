@@ -26,8 +26,10 @@ use crate::{
     storage::types::{StoragePathFilter, StorageSearchFilter, StorageSearchHit, StoredSearchData},
 };
 
-use super::format_filter::{compile_format_filter, matches_file_name};
-use super::path_filter::{all, compile_path_filter};
+use super::{
+    format_filter::{compile_format_filter, matches_file_name},
+    path_filter::{all, compile_path_filter},
+};
 
 const DEFAULT_LIMIT: usize = 7;
 const RRF_K: f64 = 60.0;

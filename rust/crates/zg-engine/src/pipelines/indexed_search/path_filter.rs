@@ -129,7 +129,7 @@ fn literal_name(name: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
 }
 
-pub(crate) fn any(predicates: Vec<StoragePathFilter>) -> StoragePathFilter {
+pub(super) fn any(predicates: Vec<StoragePathFilter>) -> StoragePathFilter {
     let mut result = Vec::new();
     for predicate in predicates {
         match predicate {
@@ -145,7 +145,7 @@ pub(crate) fn any(predicates: Vec<StoragePathFilter>) -> StoragePathFilter {
     }
 }
 
-pub(crate) fn all(predicates: Vec<StoragePathFilter>) -> StoragePathFilter {
+pub(super) fn all(predicates: Vec<StoragePathFilter>) -> StoragePathFilter {
     let mut result = Vec::new();
     for predicate in predicates {
         match predicate {
@@ -161,7 +161,7 @@ pub(crate) fn all(predicates: Vec<StoragePathFilter>) -> StoragePathFilter {
     }
 }
 
-pub(crate) fn negate(predicate: StoragePathFilter) -> StoragePathFilter {
+pub(super) fn negate(predicate: StoragePathFilter) -> StoragePathFilter {
     match predicate {
         StoragePathFilter::All => StoragePathFilter::None,
         StoragePathFilter::None => StoragePathFilter::All,
