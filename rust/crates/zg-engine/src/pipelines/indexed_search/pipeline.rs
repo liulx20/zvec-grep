@@ -26,10 +26,8 @@ use crate::{
     storage::types::{StoragePathFilter, StorageSearchFilter, StorageSearchHit, StoredSearchData},
 };
 
-use super::{
-    format_filter::{compile_format_filter, matches_file_name},
-    path_filter::{all, compile_path_filter},
-};
+use super::format_filter::{compile_format_filter, matches_file_name};
+use crate::storage::path_filter::{all, compile_path_filter};
 
 const DEFAULT_LIMIT: usize = 7;
 const RRF_K: f64 = 60.0;
@@ -718,7 +716,7 @@ fn search_plan_to_storage_filter(
         !plan.filter.file_types.is_empty() || !plan.filter.excluded_file_types.is_empty();
     let has_globs = !plan.filter.globs.is_empty();
     let glob_path = if has_globs {
-        compile_path_filter(&plan.filter.globs, storage)?
+        compile_path_filter(&plan.filter.globs, || storage.has_non_unicode_file_names())?
     } else {
         None
     };
@@ -1991,9 +1989,10 @@ mod tests {
             };
             let matcher =
                 GlobMatcher::new(Path::new("/workspace"), &filter.globs).expect("valid fixture");
-            let predicate = compile_path_filter(&filter.globs, &storage)
-                .expect("valid fixture")
-                .expect("pushdown");
+            let predicate =
+                compile_path_filter(&filter.globs, || storage.has_non_unicode_file_names())
+                    .expect("valid fixture")
+                    .expect("pushdown");
             for path in paths {
                 assert_eq!(
                     predicate_matches(&predicate, Path::new(path)),
@@ -2052,9 +2051,10 @@ mod tests {
                         ..QueryFilter::default()
                     };
                     let matcher = GlobMatcher::new(root.path(), &filter.globs).expect("globs");
-                    let predicate = compile_path_filter(&filter.globs, &storage)
-                        .expect("planner")
-                        .expect("pushdown");
+                    let predicate =
+                        compile_path_filter(&filter.globs, || storage.has_non_unicode_file_names())
+                            .expect("planner")
+                            .expect("pushdown");
                     let mut overrides = ignore::overrides::OverrideBuilder::new(root.path());
                     for pattern in &patterns {
                         overrides.add(pattern).expect("override");
@@ -2144,9 +2144,10 @@ mod tests {
             let mut plan = plan(Vec::new());
             plan.filter.globs = glob_rules(&patterns);
             assert!(
-                compile_path_filter(&plan.filter.globs, &pushdown_storage())
-                    .expect("valid fixture")
-                    .is_none(),
+                compile_path_filter(&plan.filter.globs, || pushdown_storage()
+                    .has_non_unicode_file_names())
+                .expect("valid fixture")
+                .is_none(),
                 "{patterns:?}"
             );
             let actual = super::resolve_filtered_file_ids(Path::new("/workspace"), &plan, &files)
@@ -2179,9 +2180,10 @@ mod tests {
             GlobMatcher::new(Path::new("/workspace"), &filter.globs).expect("valid fixture");
         assert!(insensitive.matches_path(Path::new("src/main.rs")));
         assert!(
-            compile_path_filter(&filter.globs, &pushdown_storage())
-                .expect("planner")
-                .is_none()
+            compile_path_filter(&filter.globs, || pushdown_storage()
+                .has_non_unicode_file_names())
+            .expect("planner")
+            .is_none()
         );
 
         filter.globs.extend(glob_rules(&["!main.rs"]));
@@ -2215,13 +2217,14 @@ mod tests {
         storage.files = vec![source.clone()];
         let name_patterns = glob_rules(&["*.rs"]);
         assert!(
-            compile_path_filter(&name_patterns, &storage)
+            compile_path_filter(&name_patterns, || storage.has_non_unicode_file_names())
                 .expect("planner")
                 .is_none()
         );
         let directory_patterns = glob_rules(&["src/**"]);
         assert_eq!(
-            compile_path_filter(&directory_patterns, &storage).expect("planner"),
+            compile_path_filter(&directory_patterns, || storage.has_non_unicode_file_names())
+                .expect("planner"),
             Some(StoragePathFilter::Directory(
                 crate::domain::SourcePath::new("src").expect("directory")
             ))
