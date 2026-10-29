@@ -15,24 +15,22 @@ impl Fixture {
         let directory = tempfile::tempdir().expect("workspace");
         let root = directory.path().canonicalize().expect("canonical root");
         let home = root.join(".zvec-grep");
-        let mut manifest = WorkspaceManifest::new(
-            Workspace {
-                root: root.clone(),
-                scan: ScanRules::default(),
-                index: IndexState::Enabled(Box::new(
-                    IndexDescriptor::new(schema(), BTreeMap::new(), FTS_CONFIG)
-                        .expect("index descriptor"),
-                )),
-                created_epoch_ms: 1,
-                updated_epoch_ms: 1,
-            },
-            home.clone(),
+        let layout = WorkspaceLayout::new(home.clone()).expect("layout");
+        let manifest = Workspace::new(
+            &root,
+            layout.clone(),
+            ScanRules::default(),
             Some(CURRENT_INDEX_VERSION),
-            BTreeMap::new(),
+            Some(uuid::Uuid::new_v4().to_string()),
+            1,
+            1,
+            IndexState::Enabled(Box::new(
+                IndexDescriptor::new(schema(), BTreeMap::new(), BTreeMap::new(), FTS_CONFIG)
+                    .expect("index descriptor"),
+            )),
         )
-        .expect("manifest");
-        manifest.storage_generation = Some(uuid::Uuid::new_v4().to_string());
-        let storage_home = manifest.storage_home();
+        .expect("workspace");
+        let storage_home = layout.index_dir().to_path_buf();
         fs::create_dir_all(&storage_home).expect("generation");
         let storage = IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
             storage_path: storage_home.clone(),
@@ -66,7 +64,7 @@ impl Fixture {
         storage.close().expect("persist index before reading");
         let graph_path = storage_home.join("graph/graph.sqlite");
         write_graph(&graph_path, &local, &remote[0]);
-        write_workspace_manifest(&home, &manifest).expect("publish manifest");
+        write_workspace_manifest(layout.manifest_path(), &manifest).expect("publish manifest");
         Self {
             engine: ZvecGrep::new(),
             _directory: directory,
@@ -74,6 +72,10 @@ impl Fixture {
             home,
             graph_path,
         }
+    }
+
+    pub(super) fn layout(&self) -> WorkspaceLayout {
+        WorkspaceLayout::new(self.home.clone()).expect("workspace layout")
     }
 
     pub(super) fn storage_home(&self) -> &std::path::Path {
@@ -145,15 +147,16 @@ impl Fixture {
         symbol
     }
 
-    pub(super) fn manifest(&self) -> WorkspaceManifest {
-        read_workspace_manifest(&self.home)
+    pub(super) fn manifest(&self) -> Workspace {
+        read_workspace_manifest(&self.root, &self.layout())
             .expect("manifest")
             .expect("index")
     }
 
     pub(super) fn writer_session(&self) -> WriterSession {
         let lock = Arc::new(
-            acquire_home_lock(&self.home, LockMode::Write, "test index").expect("writer lock"),
+            acquire_workspace_lock(&self.layout(), LockMode::Exclusive, "test index")
+                .expect("writer lock"),
         );
         WriterSession::new(self.open_store(), Vec::new(), self.manifest(), lock)
     }
@@ -346,7 +349,7 @@ pub(super) fn corrupt_entity_identity(home: &Path, ids: &[EntityId]) {
 }
 
 fn corrupt_entity_field(home: &Path, ids: &[EntityId], field: &str) {
-    let path = home.join("storage/entities");
+    let path = home.join("entities");
     #[cfg(windows)]
     let path = dunce::simplified(&path);
     let entities = zvec_rust::Collection::open(path.to_str().expect("UTF-8 fixture path"), None)

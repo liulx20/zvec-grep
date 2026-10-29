@@ -95,7 +95,7 @@ pub fn workspace_relative_path(root: &Path, path: &Path) -> crate::EngineResult<
             "relationship path must be absolute before conversion",
         ));
     }
-    let location = crate::workspace::layout::find_nearest_workspace(root)?.ok_or_else(|| {
+    let (source_root, _) = crate::workspace::find_nearest_workspace(root)?.ok_or_else(|| {
         crate::EngineError::not_found("workspace index is unavailable; run `zg --index` first")
     })?;
     let mut ancestor = path;
@@ -124,11 +124,11 @@ pub fn workspace_relative_path(root: &Path, path: &Path) -> crate::EngineResult<
             component => resolved.push(component.as_os_str()),
         }
     }
-    let relative = resolved.strip_prefix(&location.root).map_err(|_| {
+    let relative = resolved.strip_prefix(&source_root).map_err(|_| {
         crate::EngineError::invalid_argument(format!(
             "relationship path {} is outside workspace {}",
             path.display(),
-            location.root.display()
+            source_root.display()
         ))
     })?;
     Ok((!relative.as_os_str().is_empty()).then(|| relative.to_path_buf()))

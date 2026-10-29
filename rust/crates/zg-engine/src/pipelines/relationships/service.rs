@@ -1,12 +1,10 @@
 //! Open the indexed workspace and read a consistent relationship snapshot off the async workers.
 
-use std::path::Path;
-
 use crate::{
     EngineError, EngineResult,
     api::relationships::{RelationshipDirection, RelationshipOptions, RelationshipResult},
     pipelines::{
-        indexing::service::{WorkspaceIndexService, is_indexed},
+        indexing::service::WorkspaceIndexService,
         read_access::{ReadSource, acquire_read_source},
     },
     storage::{
@@ -14,9 +12,8 @@ use crate::{
         graph::Direction,
         read_session::{ReadSessionCache, ReadSessionLease},
     },
-    workspace::{
-        layout::find_nearest_workspace, lock::LockWait, manifest::read_workspace_manifest,
-    },
+    utils::{directory_exists, resolve_directory},
+    workspace::{find_nearest_workspace, lock::LockWait, manifest::read_workspace_manifest},
 };
 
 use super::pipeline::{normalize, query_symbols};
@@ -30,14 +27,15 @@ pub(crate) async fn query(
     let (name, scope) = normalize(options)?;
     let wait = LockWait::new(options.signal.as_ref(), options.lock_timeout_ms)?;
     wait.check_cancelled()?;
-    let requested = options.root.as_deref().unwrap_or_else(|| Path::new("."));
-    let location = find_nearest_workspace(requested)?.ok_or_else(missing_index)?;
+    let requested = resolve_directory(options.root.as_deref())?;
+    let (source_root, layout) = find_nearest_workspace(&requested)?.ok_or_else(missing_index)?;
     let direction = match direction {
         RelationshipDirection::Callers => Direction::In,
         RelationshipDirection::Callees => Direction::Out,
     };
     let source = acquire_read_source(
-        &location.home,
+        &source_root,
+        &layout,
         &wait,
         "relationships",
         Some(&indexing.writers),
@@ -56,14 +54,22 @@ pub(crate) async fn query(
             ReadSource::Writer { lease, .. } => return run(&lease.session.storage),
             ReadSource::Read(lock) => lock,
         };
-        let manifest = read_workspace_manifest(&location.home)?.ok_or_else(missing_index)?;
-        if !is_indexed(&manifest) || !IndexStore::exists(&manifest.storage_home())? {
+        let workspace =
+            read_workspace_manifest(&source_root, &layout)?.ok_or_else(missing_index)?;
+        if !workspace.index_enabled() || !directory_exists(workspace.layout().index_dir())? {
             return Err(missing_index());
         }
         let storage = match read_sessions {
-            Some(cache) => cache.acquire(&location.home, &manifest.storage_home())?,
-            None => ReadSessionLease::open(&manifest.storage_home())?,
+            Some(cache) => cache.acquire(
+                &layout,
+                workspace.layout().index_dir(),
+                workspace
+                    .storage_generation()
+                    .expect("published index generation"),
+            )?,
+            None => ReadSessionLease::open(workspace.layout().index_dir())?,
         };
+        storage.verify_source_root(&source_root)?;
         let result = run(storage.storage());
         let close = storage.close();
         let result = result?;

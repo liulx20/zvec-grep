@@ -28,8 +28,9 @@ async fn missing_graph_errors_without_creating_a_database() {
 async fn lock_timeouts_cancellation_and_closed_engines_reject_reads() {
     let fixture = Fixture::new();
     let engine = &fixture.engine;
-    let writer = acquire_home_lock(&fixture.home, LockMode::Write, "relationships.test")
-        .expect("hold writer lock");
+    let writer =
+        acquire_workspace_lock(&fixture.layout(), LockMode::Exclusive, "relationships.test")
+            .expect("hold writer lock");
     let blocked = engine
         .callers(RelationshipOptions {
             lock_timeout_ms: Some(0),
@@ -166,14 +167,25 @@ async fn relationship_queries_never_borrow_unpublished_generations() {
     let indexing = WorkspaceIndexService::new();
     let manifest = fixture.manifest();
     let lock = Arc::new(
-        acquire_home_lock(&fixture.home, LockMode::Write, "rebuild").expect("writer lock"),
+        acquire_workspace_lock(&fixture.layout(), LockMode::Exclusive, "rebuild")
+            .expect("writer lock"),
     );
     for registered in [false, true] {
-        let mut unpublished = manifest.clone();
-        unpublished.storage_generation = Some(uuid::Uuid::new_v4().to_string());
-        fs::create_dir_all(unpublished.storage_home()).expect("rebuild directory");
+        let unpublished = Workspace::new(
+            &fixture.root,
+            fixture.layout(),
+            manifest.scan().clone(),
+            Some(CURRENT_INDEX_VERSION),
+            Some(uuid::Uuid::new_v4().to_string()),
+            1,
+            1,
+            manifest.index().clone(),
+        )
+        .expect("unpublished workspace");
+        let storage_home = fixture.layout().staged_index_dir().to_path_buf();
+        fs::create_dir_all(&storage_home).expect("rebuild directory");
         let storage = IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
-            storage_path: unpublished.storage_home(),
+            storage_path: storage_home,
             embeddings: vec![schema()],
         })
         .expect("unpublished storage");

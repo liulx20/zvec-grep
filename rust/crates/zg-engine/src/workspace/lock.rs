@@ -180,26 +180,69 @@ pub(crate) fn try_acquire_workspace_read(
     layout: &WorkspaceLayout,
     operation: &str,
 ) -> Result<Option<LockGuard>, EngineError> {
-    check_workspace_parent(layout.storage_dir(), operation)?;
-    let intent = open_lock_file(layout.write_intent_lock_path(), operation)?;
-    if !try_lock_handle(&intent, LockMode::Exclusive)? {
-        return Ok(None);
+    WorkspaceReadProbe::new(source_root, layout, operation)?.try_acquire()
+}
+
+/// Retain admission handles while a query waits for a lock or an active writer.
+pub(crate) struct WorkspaceReadProbe<'a> {
+    source_root: &'a Path,
+    layout: &'a WorkspaceLayout,
+    operation: &'a str,
+    intent: File,
+    file: Option<File>,
+}
+
+impl<'a> WorkspaceReadProbe<'a> {
+    pub(crate) fn new(
+        source_root: &'a Path,
+        layout: &'a WorkspaceLayout,
+        operation: &'a str,
+    ) -> Result<Self, EngineError> {
+        check_workspace_parent(layout.storage_dir(), operation)?;
+        Ok(Self {
+            source_root,
+            layout,
+            operation,
+            intent: open_lock_file(layout.write_intent_lock_path(), operation)?,
+            file: Some(open_lock_file(layout.workspace_lock_path(), operation)?),
+        })
     }
-    let file = open_lock_file(layout.workspace_lock_path(), operation)?;
-    if !try_lock_handle(&file, LockMode::Shared)? {
-        return Ok(None);
+
+    pub(crate) fn try_acquire(&mut self) -> Result<Option<LockGuard>, EngineError> {
+        if !try_lock_handle(&self.intent, LockMode::Exclusive)? {
+            return Ok(None);
+        }
+        let result = self.try_read();
+        self.intent
+            .unlock()
+            .map_err(|error| EngineError::from_io("release read admission", &error))?;
+        let (lock, recover) = result?;
+        if recover {
+            try_recover_publication(self.source_root, self.layout, self.operation)?;
+        }
+        Ok(lock)
     }
-    if index::needs_recovery(layout)? {
-        drop(file);
-        drop(intent);
-        try_recover_publication(source_root, layout, operation)?;
-        return Ok(None);
+
+    fn try_read(&mut self) -> Result<(Option<LockGuard>, bool), EngineError> {
+        let file = self.file.as_ref().expect("unconsumed read probe");
+        if !try_lock_handle(file, LockMode::Shared)? {
+            return Ok((None, false));
+        }
+        let recovery = index::needs_recovery(self.layout);
+        if !matches!(recovery, Ok(false)) {
+            file.unlock()
+                .map_err(|error| EngineError::from_io("release workspace read lock", &error))?;
+            return recovery.map(|recover| (None, recover));
+        }
+        Ok((
+            Some(LockGuard {
+                _read_cache: None,
+                _file: self.file.take().expect("acquired read lock"),
+                _intent: None,
+            }),
+            false,
+        ))
     }
-    Ok(Some(LockGuard {
-        _read_cache: None,
-        _file: file,
-        _intent: None,
-    }))
 }
 
 /// Probe without creating paths that may have been removed with the workspace.

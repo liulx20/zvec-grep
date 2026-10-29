@@ -10,6 +10,7 @@ use crate::{
         CodeMetadata, Content, ContentKind, Entity, EntityFragment, EntityId, EntityMetadata,
         FTS_CONFIG, FileIndexStatus, FileRecord, FileSnapshot, FragmentId, IndexDescriptor,
         IndexState, Range, ScanRules, SourcePath, SymbolType, TextRange, Workspace,
+        WorkspaceLayout,
         model::{EmbeddingMetric, EmbeddingModelInfo, ModelInfo},
     },
     pipelines::{indexed_search::writer::WriterSession, indexing::service::WorkspaceIndexService},
@@ -19,8 +20,8 @@ use crate::{
     },
     workspace::{
         CURRENT_INDEX_VERSION,
-        lock::{LockMode, acquire_home_lock},
-        manifest::{WorkspaceManifest, read_workspace_manifest, write_workspace_manifest},
+        lock::{LockMode, acquire_workspace_lock},
+        manifest::{read_workspace_manifest, write_workspace_manifest},
     },
 };
 
