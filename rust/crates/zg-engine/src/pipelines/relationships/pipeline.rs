@@ -1,9 +1,6 @@
 //! Match canonical symbols, read call edges, and assemble bounded result groups.
 
-use std::{
-    collections::{HashMap, HashSet},
-    path::{Component, Path},
-};
+use std::collections::{HashMap, HashSet};
 
 use tokio_util::sync::CancellationToken;
 
@@ -40,16 +37,12 @@ pub(super) fn query_symbols(
     options: &RelationshipOptions,
     direction: Direction,
 ) -> EngineResult<RelationshipResult> {
-    let path: Option<std::path::PathBuf> = options.path.as_ref().map(|path| {
-        path.components()
-            .filter(|part| *part != Component::CurDir)
-            .collect()
-    });
     check_cancelled(options.signal.as_ref())?;
     // All definitions, edges and endpoints belong to the same store snapshot.
     // Sorting the owned result does not need to keep the store locked.
     let mut result = storage.with_relationship_read(|session| {
-        query_session(session, name, scope, path.as_deref(), options, direction)
+        let filter = session.glob_filter(&options.globs)?;
+        query_session(session, name, scope, filter.as_deref(), options, direction)
     })?;
     result.matches.sort_by(|a, b| {
         a.symbol
@@ -65,12 +58,12 @@ fn query_session(
     storage: &RelationshipReadSession<'_>,
     name: &str,
     scope: Option<&str>,
-    path: Option<&Path>,
+    filter: Option<&str>,
     options: &RelationshipOptions,
     direction: Direction,
 ) -> EngineResult<RelationshipResult> {
     check_cancelled(options.signal.as_ref())?;
-    let definitions = storage.find_symbols(name, scope, path)?;
+    let definitions = storage.find_symbols(name, scope, filter)?;
     let mut symbols: HashMap<_, _> = definitions
         .iter()
         .map(|stored| (stored.entity.id().clone(), describe(stored)))
@@ -94,7 +87,7 @@ fn query_session(
     if matches.is_empty() {
         if scope.is_some() {
             suggestions = storage
-                .suggest_exact_symbols(name, path)
+                .suggest_exact_symbols(name, filter)
                 .unwrap_or_default()
                 .iter()
                 .filter_map(describe)
@@ -104,7 +97,7 @@ fn query_session(
             // Suggestions are optional: FTS syntax/storage errors must not turn
             // a successful exact lookup with no usable matches into a failed query.
             suggestions = storage
-                .suggest_symbols(name, path)
+                .suggest_symbols(name, filter)
                 .unwrap_or_default()
                 .iter()
                 .filter_map(describe)

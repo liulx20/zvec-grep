@@ -1,9 +1,8 @@
 //! Symbol-based incoming and outgoing call queries.
 
-use std::{
-    fs,
-    path::{Component, Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
+
+pub use crate::domain::GlobRule;
 
 use serde::{Deserialize, Serialize};
 
@@ -30,12 +29,11 @@ pub struct RelationshipOptions {
     /// `::name` selects only top-level definitions; plain `name` matches any scope.
     /// Absolute qualified paths such as `::ns::name` are equivalent to `ns::name`.
     /// Missing or unrepresentable exact definitions may return similarly named suggestions without edges.
-    /// Exact definitions without text locations fail if no usable matches or suggestions remain.
-    /// Queries exceeding [`MAX_SYMBOL_MATCHES`] indexed definitions fail; narrow the scope or use `path`.
+    /// Queries exceeding [`MAX_SYMBOL_MATCHES`] indexed definitions fail; narrow the scope or use `globs`.
     pub symbol: String,
-    /// Restrict definitions and suggestions to this workspace-relative file or directory.
-    /// Directory matches respect path components; this does not filter call-site files.
-    pub path: Option<PathBuf>,
+    /// Ordered workspace-relative glob rules, using the same semantics as indexed search.
+    /// Filter definitions and suggestions; call-site files remain unrestricted.
+    pub globs: Vec<GlobRule>,
     /// Maximum returned call sites per matched symbol; defaults to 20.
     pub limit: Option<usize>,
     /// Maximum workspace lock wait in milliseconds; defaults to 30 seconds.
@@ -49,7 +47,7 @@ impl RelationshipOptions {
     /// Validate query parameters before opening storage or contacting a daemon.
     ///
     /// # Errors
-    /// Returns an invalid-argument error for an empty/overlong symbol, invalid relative path, or zero limit.
+    /// Returns an invalid-argument error for an empty/overlong symbol, invalid glob, or zero limit.
     pub fn validate(&self) -> crate::EngineResult<()> {
         let symbol = self.symbol.trim();
         if symbol.is_empty() || symbol.chars().count() > MAX_RELATIONSHIP_SYMBOL_CHARS {
@@ -62,18 +60,7 @@ impl RelationshipOptions {
                 "symbol name must not be empty",
             ));
         }
-        if let Some(path) = &self.path {
-            let mut components = path.components();
-            if !components
-                .clone()
-                .any(|part| matches!(part, Component::Normal(_)))
-                || !components.all(|part| matches!(part, Component::Normal(_) | Component::CurDir))
-            {
-                return Err(crate::EngineError::invalid_argument(
-                    "relationship path must be a nonempty workspace-relative file or directory without '..'",
-                ));
-            }
-        }
+        crate::file_selection::GlobMatcher::new(Path::new(""), &self.globs)?;
         if self.limit == Some(0) {
             return Err(crate::EngineError::invalid_argument(
                 "relationship limit must be positive",
@@ -81,57 +68,6 @@ impl RelationshipOptions {
         }
         Ok(())
     }
-}
-
-/// Convert an absolute CLI path to a filter relative to the nearest workspace at `root`.
-/// Existing ancestors are canonicalized, so symlinks and missing indexed files work.
-/// Selecting the workspace root itself returns `None` (no path restriction).
-///
-/// # Errors
-/// Rejects relative input paths, missing workspaces, filesystem errors and paths outside the workspace.
-pub fn workspace_relative_path(root: &Path, path: &Path) -> crate::EngineResult<Option<PathBuf>> {
-    if !path.is_absolute() {
-        return Err(crate::EngineError::invalid_argument(
-            "relationship path must be absolute before conversion",
-        ));
-    }
-    let (source_root, _) = crate::workspace::find_nearest_workspace(root)?.ok_or_else(|| {
-        crate::EngineError::not_found("workspace index is unavailable; run `zg --index` first")
-    })?;
-    let mut ancestor = path;
-    let mut resolved = loop {
-        match fs::canonicalize(ancestor) {
-            Ok(resolved) => break resolved,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                ancestor = ancestor.parent().ok_or_else(|| {
-                    crate::EngineError::from_io("resolve relationship path", &error)
-                })?;
-            }
-            Err(error) => {
-                return Err(crate::EngineError::from_io(
-                    "resolve relationship path",
-                    &error,
-                ));
-            }
-        }
-    };
-    for component in path.components().skip(ancestor.components().count()) {
-        match component {
-            Component::ParentDir => {
-                resolved.pop();
-            }
-            Component::CurDir => {}
-            component => resolved.push(component.as_os_str()),
-        }
-    }
-    let relative = resolved.strip_prefix(&source_root).map_err(|_| {
-        crate::EngineError::invalid_argument(format!(
-            "relationship path {} is outside workspace {}",
-            path.display(),
-            source_root.display()
-        ))
-    })?;
-    Ok((!relative.as_os_str().is_empty()).then(|| relative.to_path_buf()))
 }
 
 /// A definition in workspace-relative source coordinates.

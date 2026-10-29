@@ -1,21 +1,23 @@
 //! Read-only relationship access under the store lock.
 use std::{
     collections::{HashMap, HashSet},
-    path::{Path, PathBuf},
+    path::PathBuf,
 };
 
 use super::{IndexStore, StoreState, graph_error};
 use crate::storage::{
     fragments::build_filter,
     graph::{Direction, SqliteGraphStorage},
-    types::{StoragePathFilter, StorageSearchFilter, StoredEntity},
+    path_filter::compile_path_filter,
+    types::{StorageSearchFilter, StoredEntity},
 };
 use crate::{
     EngineError, EngineResult,
     api::relationships::MAX_SYMBOL_MATCHES,
     domain::{
-        Entity, EntityId, FileEdge, FileId, FileIndexStatus, FileRecord, GraphEdgeKind, SourcePath,
+        Entity, EntityId, FileEdge, FileId, FileIndexStatus, FileRecord, GlobRule, GraphEdgeKind,
     },
+    file_selection::GlobMatcher,
 };
 
 const MAX_SYMBOL_SUGGESTIONS: usize = 5;
@@ -60,14 +62,10 @@ impl RelationshipReadSession<'_> {
     pub(crate) fn suggest_symbols(
         &self,
         name: &str,
-        path: Option<&Path>,
+        filter: Option<&str>,
     ) -> EngineResult<Vec<StoredEntity>> {
         let query = name.to_lowercase();
-        let path_filter = self.native_path_filter(path)?;
-        let hits = self
-            .state
-            .fragments
-            .search_fts(&query, 100, path_filter.as_deref())?;
+        let hits = self.state.fragments.search_fts(&query, 100, filter)?;
         let mut seen = HashSet::new();
         let ids: Vec<_> = hits
             .into_iter()
@@ -97,7 +95,7 @@ impl RelationshipReadSession<'_> {
             .into_iter()
             .filter_map(|(id, file_id, _)| {
                 let file = files.get(&file_id)?;
-                visible_in_path(file, path).then(|| (id, file.clone()))
+                file.index_status().is_indexed().then(|| (id, file.clone()))
             })
             .take(MAX_SYMBOL_SUGGESTIONS)
             .collect();
@@ -109,12 +107,12 @@ impl RelationshipReadSession<'_> {
         &self,
         name: &str,
         scope: Option<&str>,
-        path: Option<&Path>,
+        filter: Option<&str>,
     ) -> EngineResult<Vec<StoredEntity>> {
-        let selected = self.select_symbols(name, scope, path, MAX_SYMBOL_MATCHES + 1)?;
+        let selected = self.select_symbols(name, scope, filter, MAX_SYMBOL_MATCHES + 1)?;
         if selected.len() > MAX_SYMBOL_MATCHES {
             return Err(EngineError::invalid_argument(format!(
-                "symbol query matches more than {MAX_SYMBOL_MATCHES} indexed definitions; use a narrower scope::name or path filter",
+                "symbol query matches more than {MAX_SYMBOL_MATCHES} indexed definitions; use a narrower scope::name or glob filter",
             )));
         }
         self.load_symbols(selected)
@@ -124,25 +122,36 @@ impl RelationshipReadSession<'_> {
     pub(crate) fn suggest_exact_symbols(
         &self,
         name: &str,
-        path: Option<&Path>,
+        filter: Option<&str>,
     ) -> EngineResult<Vec<StoredEntity>> {
-        let selected = self.select_symbols(name, None, path, MAX_SYMBOL_SUGGESTIONS)?;
+        let selected = self.select_symbols(name, None, filter, MAX_SYMBOL_SUGGESTIONS)?;
         self.load_symbols(selected)
     }
 
-    /// Narrow native retrieval before loading any symbol metadata or applying caps.
-    /// Check the exact file first: directory identities can outlive their files.
-    fn native_path_filter(&self, path: Option<&Path>) -> EngineResult<Option<String>> {
-        let Some(path) = path else { return Ok(None) };
-        let path = SourcePath::new(path)?;
-        let filter = if let Some(file_id) = self.state.files.find_id(&path)? {
+    /// Use the same glob pushdown and fallback matcher as ordinary indexed search.
+    pub(crate) fn glob_filter(&self, rules: &[GlobRule]) -> EngineResult<Option<String>> {
+        if rules.is_empty() {
+            return Ok(None);
+        }
+        let matcher = GlobMatcher::new(std::path::Path::new(""), rules)?;
+        let filter = if let Some(path) =
+            compile_path_filter(rules, || self.state.files.has_non_unicode_file_names())?
+        {
             StorageSearchFilter {
-                file_ids: Some(vec![file_id]),
+                path: Some(path),
                 ..StorageSearchFilter::default()
             }
         } else {
+            let file_ids = self
+                .state
+                .files
+                .list_paths()?
+                .into_iter()
+                .filter(|(_, path)| matcher.matches_path(path))
+                .map(|(id, _)| id)
+                .collect();
             StorageSearchFilter {
-                path: Some(StoragePathFilter::Directory(path)),
+                file_ids: Some(file_ids),
                 ..StorageSearchFilter::default()
             }
         };
@@ -153,7 +162,7 @@ impl RelationshipReadSession<'_> {
         &self,
         name: &str,
         scope: Option<&str>,
-        path: Option<&Path>,
+        filter: Option<&str>,
         limit: usize,
     ) -> EngineResult<Vec<(EntityId, FileRecord)>> {
         if name.is_empty() {
@@ -162,10 +171,7 @@ impl RelationshipReadSession<'_> {
             ));
         }
         let state = self.state;
-        let path_filter = self.native_path_filter(path)?;
-        let ids = state
-            .fragments
-            .find_symbol_entity_ids(name, path_filter.as_deref())?;
+        let ids = state.fragments.find_symbol_entity_ids(name, filter)?;
         let mut selected = Vec::new();
         'batches: for batch in ids.chunks(128) {
             let mut owners: HashMap<_, _> = state
@@ -189,7 +195,7 @@ impl RelationshipReadSession<'_> {
             let files = state.files.fetch(&file_ids)?;
             for id in batch {
                 if let Some(file) = owners.remove(id).and_then(|file_id| files.get(&file_id))
-                    && visible_in_path(file, path)
+                    && file.index_status().is_indexed()
                 {
                     selected.push((id.clone(), file.clone()));
                     if selected.len() == limit {
@@ -277,11 +283,6 @@ impl RelationshipReadSession<'_> {
         }
         Ok(edges)
     }
-}
-
-fn visible_in_path(file: &FileRecord, path: Option<&Path>) -> bool {
-    file.index_status().is_indexed()
-        && path.is_none_or(|path| file.relative_path().as_path().starts_with(path))
 }
 
 /// Smaller ranks are better; reverse containment needs a meaningful name length.

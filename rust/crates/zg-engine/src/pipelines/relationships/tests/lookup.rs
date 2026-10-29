@@ -181,7 +181,7 @@ async fn symbol_spellings_select_expected_scopes() {
 }
 
 #[tokio::test]
-async fn path_filters_disambiguate_common_scoped_and_top_level_names_before_the_cap() {
+async fn glob_filters_disambiguate_common_scoped_and_top_level_names_before_the_cap() {
     let fixture = Fixture::new();
     let store = fixture.open_store();
     for index in 0..=100 {
@@ -201,10 +201,10 @@ async fn path_filters_disambiguate_common_scoped_and_top_level_names_before_the_
             .callers(fixture.options(name))
             .await
             .expect_err("ambiguous across files");
-        assert!(error.message().contains("path filter"));
-        for path in ["pkg1", "pkg1/main.rs", "./pkg1"] {
+        assert!(error.message().contains("glob filter"));
+        for path in ["pkg1/**", "pkg1/main.rs", "/pkg1/**"] {
             let options = RelationshipOptions {
-                path: Some(path.into()),
+                globs: vec![path.into()],
                 ..fixture.options(name)
             };
             let result = engine
@@ -224,7 +224,7 @@ async fn path_filters_disambiguate_common_scoped_and_top_level_names_before_the_
     }
     let suggestions = engine
         .callers(RelationshipOptions {
-            path: Some("pkg99".into()),
+            globs: vec!["pkg99/**".into()],
             ..fixture.options("wrong::setup")
         })
         .await
@@ -234,20 +234,20 @@ async fn path_filters_disambiguate_common_scoped_and_top_level_names_before_the_
         suggestions.suggestions[0].file_path,
         PathBuf::from("pkg99/main.rs")
     );
-    for path in ["", "/tmp/main.rs", "../main.rs", "pkg1/../pkg2", "."] {
+    for path in ["", "!", "["] {
         let error = engine
             .callers(RelationshipOptions {
-                path: Some(path.into()),
+                globs: vec![path.into()],
                 ..fixture.options("main")
             })
             .await
-            .expect_err("invalid relative filter");
+            .expect_err("invalid glob filter");
         assert_eq!(error.code(), EngineError::INVALID_ARGUMENT);
     }
 }
 
 #[tokio::test]
-async fn path_filters_exclude_other_files_before_loading_symbol_metadata() {
+async fn glob_filters_exclude_other_files_before_loading_symbol_metadata() {
     let fixture = Fixture::new();
     fixture.add_symbols("keep/main.rs", &[("localize", None, 1, "fn localize() {}")]);
     let outside = fixture.add_symbols(
@@ -260,7 +260,7 @@ async fn path_filters_exclude_other_files_before_loading_symbol_metadata() {
         engine.callers(fixture.options("localize")).await.is_err(),
         "unfiltered metadata is corrupt"
     );
-    for path in ["keep", "keep/main.rs", "missing"] {
+    for path in ["keep/**", "keep/main.rs", "missing/**"] {
         for (name, exact) in [
             ("localize", true),
             ("wrong::localize", false),
@@ -268,12 +268,12 @@ async fn path_filters_exclude_other_files_before_loading_symbol_metadata() {
         ] {
             let result = engine
                 .callers(RelationshipOptions {
-                    path: Some(path.into()),
+                    globs: vec![path.into()],
                     ..fixture.options(name)
                 })
                 .await
                 .expect("outside metadata must not be fetched");
-            let count = usize::from(path != "missing");
+            let count = usize::from(path != "missing/**");
             assert_eq!(
                 result.matches.len(),
                 if exact { count } else { 0 },
@@ -285,5 +285,49 @@ async fn path_filters_exclude_other_files_before_loading_symbol_metadata() {
                 "{path}: {name}"
             );
         }
+    }
+}
+
+#[tokio::test]
+async fn ordered_and_insensitive_globs_filter_definitions_but_not_call_sites() {
+    use crate::domain::GlobRule;
+    let fixture = Fixture::new();
+    for globs in [
+        vec!["*.rs".into(), "!z.rs".into()],
+        vec!["*.rs".into(), "!a.rs".into(), "a.rs".into(), "!z.rs".into()],
+        vec![GlobRule {
+            pattern: "A.RS".into(),
+            case_insensitive: true,
+        }],
+    ] {
+        let result = fixture
+            .engine
+            .callers(RelationshipOptions {
+                globs: globs.clone(),
+                ..fixture.options("run")
+            })
+            .await
+            .expect("filtered definitions");
+        assert_eq!(result.matches.len(), 2);
+        assert!(
+            result
+                .matches
+                .iter()
+                .all(|m| m.symbol.file_path == std::path::Path::new("a.rs"))
+        );
+        let result = fixture
+            .engine
+            .callees(RelationshipOptions {
+                globs,
+                limit: Some(100),
+                ..fixture.options("invoke")
+            })
+            .await
+            .expect("unrestricted callees");
+        assert!(result.matches[0].edges.iter().any(|edge| {
+            edge.symbol
+                .as_ref()
+                .is_some_and(|symbol| symbol.file_path == std::path::Path::new("z.rs"))
+        }));
     }
 }
