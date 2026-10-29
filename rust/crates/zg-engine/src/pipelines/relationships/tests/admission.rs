@@ -25,6 +25,89 @@ async fn missing_graph_errors_without_creating_a_database() {
 }
 
 #[tokio::test]
+async fn unreadable_graphs_do_not_break_search_but_relationships_report_the_error() {
+    use crate::api::context::{
+        ContextOptions,
+        options::{ContextRoute, ContextRouteMode, RefreshPolicy},
+    };
+    for damage in ["empty", "schema", "corrupt", "directory"] {
+        let fixture = Fixture::new();
+        match damage {
+            "empty" => fs::write(&fixture.graph_path, []).expect("empty database"),
+            "schema" => rusqlite::Connection::open(&fixture.graph_path)
+                .expect("graph")
+                .pragma_update(None, "user_version", 999)
+                .expect("unsupported schema"),
+            "corrupt" => {
+                fs::write(&fixture.graph_path, b"not a SQLite database").expect("corrupt database");
+            }
+            "directory" => {
+                fs::remove_file(&fixture.graph_path).expect("remove graph");
+                fs::create_dir(&fixture.graph_path).expect("unopenable SQLite path");
+            }
+            _ => unreachable!(),
+        }
+        let before = fs::read(&fixture.graph_path).ok();
+        fixture
+            .engine
+            .enable_read_session_cache()
+            .expect("cache read errors with the handle");
+        let search = ContextOptions {
+            root: Some(fixture.root.clone()),
+            routes: vec![ContextRoute {
+                mode: ContextRouteMode::Fts,
+                query: "run".into(),
+            }],
+            refresh: Some(RefreshPolicy::Off),
+            ..ContextOptions::default()
+        };
+        let result = fixture
+            .engine
+            .context(search.clone())
+            .await
+            .expect("normal search ignores graph failures");
+        assert!(!result.items.is_empty(), "{damage}");
+        // Even an exact miss must report an unreadable graph rather than silently return no edges.
+        for name in ["run", "unknown_symbol"] {
+            for direction in [
+                RelationshipDirection::Callers,
+                RelationshipDirection::Callees,
+            ] {
+                let error = fixture
+                    .engine
+                    .relationships(direction, fixture.options(name))
+                    .await
+                    .expect_err("graph error is retained");
+                assert_eq!(
+                    error.code(),
+                    EngineError::STORAGE_FAILURE,
+                    "{damage}: {error}"
+                );
+                assert!(
+                    error.message().contains("workspace graph operation failed"),
+                    "{damage}: {error}"
+                );
+            }
+        }
+        assert!(
+            !fixture
+                .engine
+                .context(search)
+                .await
+                .expect("search still works after graph query")
+                .items
+                .is_empty()
+        );
+        assert_eq!(
+            fs::read(&fixture.graph_path).ok(),
+            before,
+            "readers must not repair {damage}"
+        );
+        fixture.engine.close();
+    }
+}
+
+#[tokio::test]
 async fn lock_timeouts_cancellation_and_closed_engines_reject_reads() {
     let fixture = Fixture::new();
     let engine = &fixture.engine;

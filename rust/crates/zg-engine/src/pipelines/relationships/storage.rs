@@ -27,7 +27,7 @@ pub(super) trait RelationshipStorage {
     fn fetch_entities(&self, ids: &[EntityId]) -> EngineResult<HashMap<EntityId, Entity>>;
     fn fetch_entity_file_ids(&self, ids: &[EntityId]) -> EngineResult<HashMap<EntityId, FileId>>;
     fn fetch_files(&self, ids: &[FileId]) -> EngineResult<HashMap<FileId, FileRecord>>;
-    fn has_graph(&self) -> bool;
+    fn has_graph(&self) -> EngineResult<bool>;
     fn graph_neighborhood(
         &self,
         id: &str,
@@ -71,7 +71,7 @@ impl RelationshipStorage for ReadView<'_> {
     fn fetch_files(&self, ids: &[FileId]) -> EngineResult<HashMap<FileId, FileRecord>> {
         self.fetch_files(ids)
     }
-    fn has_graph(&self) -> bool {
+    fn has_graph(&self) -> EngineResult<bool> {
         self.has_graph()
     }
     fn graph_neighborhood(

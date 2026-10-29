@@ -55,7 +55,7 @@ pub(super) fn query_symbols(
     direction: Direction,
 ) -> EngineResult<RelationshipResult> {
     check_cancelled(options.signal.as_ref())?;
-    if !storage.has_graph() {
+    if !storage.has_graph()? {
         return Err(EngineError::not_found(
             "workspace graph is missing; this index has no persisted relationship data",
         ));

@@ -56,6 +56,8 @@ struct StoreState {
     fragments: Fragments,
     graph: Option<SqliteGraphStorage>,
     optimize_marker: PathBuf,
+    // A failed graph reader must not prevent canonical text/vector reads.
+    graph_open_error: Option<crate::ErrorReport>,
     needs_optimize: bool,
     closed: bool,
 }
@@ -180,13 +182,12 @@ impl IndexStore {
         let graph_path = path.join("graph").join("graph.sqlite");
         let graph = if read_only {
             match fs::metadata(&graph_path) {
-                Ok(_) => Some(
-                    SqliteGraphStorage::open(&graph_path, OpenMode::ReadOnly)
-                        .map_err(graph_error)?,
-                ),
+                Ok(_) => SqliteGraphStorage::open(&graph_path, OpenMode::ReadOnly)
+                    .map(Some)
+                    .map_err(graph_error),
                 // Pre-graph indexes remain readable without creating SQLite in a reader.
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-                Err(error) => return Err(io_error("inspect workspace graph", &graph_path, &error)),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(error) => Err(io_error("inspect workspace graph", &graph_path, &error)),
             }
         } else if !graph_enabled {
             None
@@ -196,7 +197,11 @@ impl IndexStore {
             let graph =
                 SqliteGraphStorage::open(&graph_path, OpenMode::ReadWrite).map_err(graph_error)?;
             sync_directory(&path.join("graph"))?;
-            Some(graph)
+            Ok(Some(graph))
+        };
+        let (graph, graph_open_error) = match graph {
+            Ok(graph) => (graph, None),
+            Err(error) => (None, Some(error.into_report())),
         };
         if !read_only {
             directories.load()?;
@@ -217,6 +222,7 @@ impl IndexStore {
                 graph,
                 optimize_marker,
                 needs_optimize,
+                graph_open_error,
                 closed: false,
             }),
             schema,
