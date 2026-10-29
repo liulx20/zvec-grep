@@ -304,25 +304,24 @@ fn glob_filter(
         return Ok(None);
     }
     let matcher = GlobMatcher::new(std::path::Path::new(""), rules)?;
-    let filter = if let Some(path) = compile_path_filter(rules, || {
-        storage.read_snapshot(|view| view.has_non_unicode_file_names())
-    })? {
-        StorageSearchFilter {
-            path: Some(path),
-            ..StorageSearchFilter::default()
-        }
-    } else {
-        let file_ids = storage
-            .read_snapshot(|view| view.list_file_paths())?
-            .into_iter()
-            .filter(|(_, path)| matcher.matches_path(path))
-            .map(|(id, _)| id)
-            .collect();
-        StorageSearchFilter {
-            file_ids: Some(file_ids),
-            ..StorageSearchFilter::default()
-        }
-    };
+    let filter =
+        if let Some(path) = compile_path_filter(rules, || storage.has_non_unicode_file_names())? {
+            StorageSearchFilter {
+                path: Some(path),
+                ..StorageSearchFilter::default()
+            }
+        } else {
+            let file_ids = storage
+                .list_file_paths()?
+                .into_iter()
+                .filter(|(_, path)| matcher.matches_path(path))
+                .map(|(id, _)| id)
+                .collect();
+            StorageSearchFilter {
+                file_ids: Some(file_ids),
+                ..StorageSearchFilter::default()
+            }
+        };
     Ok(Some(filter))
 }
 

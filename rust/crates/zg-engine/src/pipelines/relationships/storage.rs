@@ -14,6 +14,8 @@ use crate::{
 
 /// The pipeline chooses which reads must share a snapshot; each call releases the lock.
 pub(super) trait RelationshipStorage {
+    fn list_file_paths(&self) -> EngineResult<Vec<(FileId, PathBuf)>>;
+    fn has_non_unicode_file_names(&self) -> EngineResult<bool>;
     fn read_snapshot<T>(
         &self,
         operation: impl FnOnce(&dyn RelationshipRead) -> EngineResult<T>,
@@ -21,6 +23,12 @@ pub(super) trait RelationshipStorage {
 }
 
 impl RelationshipStorage for IndexStore {
+    fn list_file_paths(&self) -> EngineResult<Vec<(FileId, PathBuf)>> {
+        self.list_file_paths()
+    }
+    fn has_non_unicode_file_names(&self) -> EngineResult<bool> {
+        self.has_non_unicode_file_names()
+    }
     fn read_snapshot<T>(
         &self,
         operation: impl FnOnce(&dyn RelationshipRead) -> EngineResult<T>,
@@ -30,8 +38,6 @@ impl RelationshipStorage for IndexStore {
 }
 
 pub(super) trait RelationshipRead {
-    fn list_file_paths(&self) -> EngineResult<Vec<(FileId, PathBuf)>>;
-    fn has_non_unicode_file_names(&self) -> EngineResult<bool>;
     fn find_symbol_entity_ids(
         &self,
         name: &str,
@@ -60,12 +66,6 @@ pub(super) trait RelationshipRead {
 }
 
 impl RelationshipRead for ReadView<'_> {
-    fn list_file_paths(&self) -> EngineResult<Vec<(FileId, PathBuf)>> {
-        self.list_file_paths()
-    }
-    fn has_non_unicode_file_names(&self) -> EngineResult<bool> {
-        self.has_non_unicode_file_names()
-    }
     fn find_symbol_entity_ids(
         &self,
         name: &str,

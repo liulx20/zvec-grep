@@ -43,6 +43,12 @@ impl<'a> ObservedStore<'a> {
 }
 
 impl RelationshipStorage for ObservedStore<'_> {
+    fn list_file_paths(&self) -> EngineResult<Vec<(FileId, PathBuf)>> {
+        self.store.list_file_paths()
+    }
+    fn has_non_unicode_file_names(&self) -> EngineResult<bool> {
+        self.store.has_non_unicode_file_names()
+    }
     fn read_snapshot<T>(
         &self,
         operation: impl FnOnce(&dyn RelationshipRead) -> EngineResult<T>,
@@ -66,12 +72,6 @@ struct ObservedRead<'a> {
 }
 
 impl RelationshipRead for ObservedRead<'_> {
-    fn list_file_paths(&self) -> EngineResult<Vec<(FileId, PathBuf)>> {
-        self.view.list_file_paths()
-    }
-    fn has_non_unicode_file_names(&self) -> EngineResult<bool> {
-        self.view.has_non_unicode_file_names()
-    }
     fn has_graph(&self) -> EngineResult<bool> {
         self.view.has_graph()
     }

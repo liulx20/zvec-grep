@@ -1,6 +1,6 @@
 //! Storage read primitives, optionally grouped under one store lock.
 
-use std::{collections::HashMap, path::PathBuf};
+use std::collections::HashMap;
 
 use super::{IndexStore, StoreState, graph_error};
 use crate::{
@@ -33,14 +33,6 @@ pub(crate) struct ReadView<'a> {
 }
 
 impl ReadView<'_> {
-    pub(crate) fn list_file_paths(&self) -> EngineResult<Vec<(FileId, PathBuf)>> {
-        self.state.files.list_paths()
-    }
-
-    pub(crate) fn has_non_unicode_file_names(&self) -> EngineResult<bool> {
-        self.state.files.has_non_unicode_file_names()
-    }
-
     pub(crate) fn find_symbol_entity_ids(
         &self,
         name: &str,
