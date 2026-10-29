@@ -15,6 +15,8 @@ use crate::{
 
 impl IndexStore {
     /// Read several tables without an in-process write between operations.
+    /// Callers choose bounded groups of dependent reads, not an entire multi-result
+    /// query. A graph edge and all of its endpoint reads must stay in one callback.
     /// The caller retains the workspace lock or writer lease for cross-process protection.
     /// Use only the view inside the callback: `IndexStore` methods would reacquire its mutex.
     pub(crate) fn read_snapshot<T>(

@@ -48,9 +48,7 @@ pub(crate) async fn query(
     // caller must not release them while native reads are still running.
     let result = tokio::task::spawn_blocking(move || {
         let run = |storage: &IndexStore| {
-            storage.read_snapshot(|view| {
-                query_symbols(view, &name, scope.as_deref(), &request, direction)
-            })
+            query_symbols(storage, &name, scope.as_deref(), &request, direction)
         };
         let _lock = match source {
             ReadSource::Writer { lease, .. } => return run(&lease.session.storage),

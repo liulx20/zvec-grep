@@ -6,13 +6,30 @@ use crate::{
     EngineResult,
     domain::{CodeMetadata, Entity, EntityId, FileEdge, FileId, FileRecord, GraphEdgeKind},
     storage::{
-        ReadView,
+        IndexStore, ReadView,
         graph::Direction,
         types::{StorageSearchFilter, StorageSearchHit},
     },
 };
 
+/// The pipeline chooses which reads must share a snapshot; each call releases the lock.
 pub(super) trait RelationshipStorage {
+    fn read_snapshot<T>(
+        &self,
+        operation: impl FnOnce(&dyn RelationshipRead) -> EngineResult<T>,
+    ) -> EngineResult<T>;
+}
+
+impl RelationshipStorage for IndexStore {
+    fn read_snapshot<T>(
+        &self,
+        operation: impl FnOnce(&dyn RelationshipRead) -> EngineResult<T>,
+    ) -> EngineResult<T> {
+        self.read_snapshot(|view| operation(view))
+    }
+}
+
+pub(super) trait RelationshipRead {
     fn list_file_paths(&self) -> EngineResult<Vec<(FileId, PathBuf)>>;
     fn has_non_unicode_file_names(&self) -> EngineResult<bool>;
     fn find_symbol_entity_ids(
@@ -42,7 +59,7 @@ pub(super) trait RelationshipStorage {
     ) -> EngineResult<Vec<StorageSearchHit>>;
 }
 
-impl RelationshipStorage for ReadView<'_> {
+impl RelationshipRead for ReadView<'_> {
     fn list_file_paths(&self) -> EngineResult<Vec<(FileId, PathBuf)>> {
         self.list_file_paths()
     }

@@ -31,5 +31,6 @@ use fixture::*;
 mod admission;
 mod fixture;
 mod lookup;
+mod snapshots;
 mod suggestions;
 mod truncation;

@@ -5,7 +5,7 @@ use std::{
     path::PathBuf,
 };
 
-use super::storage::RelationshipStorage;
+use super::storage::{RelationshipRead, RelationshipStorage};
 
 use tokio_util::sync::CancellationToken;
 
@@ -48,18 +48,13 @@ pub(super) fn normalize(options: &RelationshipOptions) -> EngineResult<(String, 
 }
 
 pub(super) fn query_symbols(
-    storage: &dyn RelationshipStorage,
+    storage: &impl RelationshipStorage,
     name: &str,
     scope: Option<&str>,
     options: &RelationshipOptions,
     direction: Direction,
 ) -> EngineResult<RelationshipResult> {
     check_cancelled(options.signal.as_ref())?;
-    if !storage.has_graph()? {
-        return Err(EngineError::not_found(
-            "workspace graph is missing; this index has no persisted relationship data",
-        ));
-    }
     let filter = glob_filter(storage, &options.globs)?;
     let mut result =
         collect_relationships(storage, name, scope, filter.as_ref(), options, direction)?;
@@ -74,7 +69,7 @@ pub(super) fn query_symbols(
 }
 
 fn collect_relationships(
-    storage: &dyn RelationshipStorage,
+    storage: &impl RelationshipStorage,
     name: &str,
     scope: Option<&str>,
     filter: Option<&StorageSearchFilter>,
@@ -82,21 +77,27 @@ fn collect_relationships(
     direction: Direction,
 ) -> EngineResult<RelationshipResult> {
     check_cancelled(options.signal.as_ref())?;
-    let definitions = find_symbols(storage, name, scope, filter)?;
-    let mut symbols: HashMap<_, _> = definitions
-        .iter()
-        .map(|stored| (stored.entity.id().clone(), describe(stored)))
-        .collect();
+    // Selection reads metadata, file records and bodies together: file_id alone
+    // cannot detect a same-ID rewrite between these steps.
+    let definitions = storage.read_snapshot(|view| {
+        check_cancelled(options.signal.as_ref())?;
+        if !view.has_graph()? {
+            return Err(EngineError::not_found(
+                "workspace graph is missing; this index has no persisted relationship data",
+            ));
+        }
+        find_symbols(view, name, scope, filter)
+    })?;
     let mut matches = Vec::new();
     for stored in &definitions {
         check_cancelled(options.signal.as_ref())?;
-        if let Some(group) = collect_match(
-            storage,
-            stored,
-            options.limit.unwrap_or(20),
-            direction,
-            &mut symbols,
-        )? {
+        // Keep the root recheck, edges, every visibility batch and endpoint
+        // descriptions together. Writers may run between definitions, never
+        // between reading an edge and checking its endpoints.
+        if let Some(group) = storage.read_snapshot(|view| {
+            check_cancelled(options.signal.as_ref())?;
+            collect_match(view, stored, options.limit.unwrap_or(20), direction)
+        })? {
             matches.push(group);
         }
     }
@@ -105,7 +106,8 @@ fn collect_relationships(
     let mut suggestions = Vec::new();
     if matches.is_empty() {
         if scope.is_some() {
-            suggestions = suggest_exact_symbols(storage, name, filter)
+            suggestions = storage
+                .read_snapshot(|view| suggest_exact_symbols(view, name, filter))
                 .unwrap_or_default()
                 .iter()
                 .filter_map(describe)
@@ -114,7 +116,8 @@ fn collect_relationships(
         if suggestions.is_empty() {
             // Suggestions are optional: FTS syntax/storage errors must not turn
             // a successful exact lookup with no usable matches into a failed query.
-            suggestions = suggest_symbols(storage, name, filter)
+            suggestions = storage
+                .read_snapshot(|view| suggest_symbols(view, name, filter))
                 .unwrap_or_default()
                 .iter()
                 .filter_map(describe)
@@ -135,16 +138,24 @@ fn check_cancelled(signal: Option<&CancellationToken>) -> EngineResult<()> {
 }
 
 fn collect_match(
-    storage: &dyn RelationshipStorage,
+    storage: &dyn RelationshipRead,
     stored: &StoredEntity,
     limit: usize,
     direction: Direction,
-    symbols: &mut HashMap<EntityId, Option<SymbolDefinition>>,
 ) -> EngineResult<Option<SymbolRelationships>> {
-    let Some(symbol) = symbols.get(stored.entity.id()).cloned().flatten() else {
+    let id = stored.entity.id();
+    let current = get_entities(storage, std::slice::from_ref(id))?.remove(id);
+    // Entity IDs do not encode metadata or the containing file's revision.
+    // Skip roots changed since selection rather than mix their old description
+    // with newer edges. A later query can select the updated definition.
+    if current.as_ref() != Some(stored) {
+        return Ok(None);
+    }
+    let Some(symbol) = describe(stored) else {
         return Ok(None);
     };
-    let id = stored.entity.id();
+    // Cache only within this definition's snapshot, including recursive calls.
+    let mut symbols = HashMap::from([(id.clone(), Some(symbol.clone()))]);
     let mut edges = neighborhood(
         storage,
         id.as_str(),
@@ -216,7 +227,7 @@ fn describe(stored: &StoredEntity) -> Option<SymbolDefinition> {
 /// Bounded best-effort suggestions, never relationship query roots.
 /// Do not require the requested scope: a misspelled scope is a useful retry case.
 fn suggest_symbols(
-    storage: &dyn RelationshipStorage,
+    storage: &dyn RelationshipRead,
     name: &str,
     filter: Option<&StorageSearchFilter>,
 ) -> EngineResult<Vec<StoredEntity>> {
@@ -260,7 +271,7 @@ fn suggest_symbols(
 
 /// Resolve bounded roots and reuse their checked file records while hydrating.
 pub(super) fn find_symbols(
-    storage: &dyn RelationshipStorage,
+    storage: &dyn RelationshipRead,
     name: &str,
     scope: Option<&str>,
     filter: Option<&StorageSearchFilter>,
@@ -276,7 +287,7 @@ pub(super) fn find_symbols(
 
 /// Exact bare-name candidates for a wrong scope, bounded without an overflow error.
 fn suggest_exact_symbols(
-    storage: &dyn RelationshipStorage,
+    storage: &dyn RelationshipRead,
     name: &str,
     filter: Option<&StorageSearchFilter>,
 ) -> EngineResult<Vec<StoredEntity>> {
@@ -286,36 +297,37 @@ fn suggest_exact_symbols(
 
 /// Plan the same glob predicates and fallback file IDs as ordinary indexed search.
 fn glob_filter(
-    storage: &dyn RelationshipStorage,
+    storage: &impl RelationshipStorage,
     rules: &[GlobRule],
 ) -> EngineResult<Option<StorageSearchFilter>> {
     if rules.is_empty() {
         return Ok(None);
     }
     let matcher = GlobMatcher::new(std::path::Path::new(""), rules)?;
-    let filter =
-        if let Some(path) = compile_path_filter(rules, || storage.has_non_unicode_file_names())? {
-            StorageSearchFilter {
-                path: Some(path),
-                ..StorageSearchFilter::default()
-            }
-        } else {
-            let file_ids = storage
-                .list_file_paths()?
-                .into_iter()
-                .filter(|(_, path)| matcher.matches_path(path))
-                .map(|(id, _)| id)
-                .collect();
-            StorageSearchFilter {
-                file_ids: Some(file_ids),
-                ..StorageSearchFilter::default()
-            }
-        };
+    let filter = if let Some(path) = compile_path_filter(rules, || {
+        storage.read_snapshot(|view| view.has_non_unicode_file_names())
+    })? {
+        StorageSearchFilter {
+            path: Some(path),
+            ..StorageSearchFilter::default()
+        }
+    } else {
+        let file_ids = storage
+            .read_snapshot(|view| view.list_file_paths())?
+            .into_iter()
+            .filter(|(_, path)| matcher.matches_path(path))
+            .map(|(id, _)| id)
+            .collect();
+        StorageSearchFilter {
+            file_ids: Some(file_ids),
+            ..StorageSearchFilter::default()
+        }
+    };
     Ok(Some(filter))
 }
 
 fn select_symbols(
-    storage: &dyn RelationshipStorage,
+    storage: &dyn RelationshipRead,
     name: &str,
     scope: Option<&str>,
     filter: Option<&StorageSearchFilter>,
@@ -362,7 +374,7 @@ fn select_symbols(
 }
 
 fn load_symbols(
-    storage: &dyn RelationshipStorage,
+    storage: &dyn RelationshipRead,
     selected: Vec<(EntityId, FileRecord)>,
 ) -> EngineResult<Vec<StoredEntity>> {
     let ids: Vec<_> = selected.iter().map(|(id, _)| id.clone()).collect();
@@ -379,7 +391,7 @@ fn load_symbols(
 
 /// Filter resolved edges by endpoint visibility before applying the limit.
 fn neighborhood(
-    storage: &dyn RelationshipStorage,
+    storage: &dyn RelationshipRead,
     id: &str,
     direction: Direction,
     kinds: Option<&[GraphEdgeKind]>,
@@ -447,7 +459,7 @@ fn suggestion_rank(query: &str, candidate: &str) -> Option<u8> {
 }
 
 fn get_entities(
-    storage: &dyn RelationshipStorage,
+    storage: &dyn RelationshipRead,
     ids: &[EntityId],
 ) -> EngineResult<HashMap<EntityId, StoredEntity>> {
     let entities = storage.fetch_entities(ids)?;
@@ -477,7 +489,7 @@ fn get_entities(
 }
 
 fn endpoint_paths(
-    storage: &dyn RelationshipStorage,
+    storage: &dyn RelationshipRead,
     ids: &[EntityId],
 ) -> EngineResult<HashMap<EntityId, PathBuf>> {
     let mut owners = storage.fetch_entity_file_ids(ids)?;
