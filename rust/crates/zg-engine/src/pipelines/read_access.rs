@@ -6,7 +6,7 @@ use crate::{
     EngineResult,
     domain::WorkspaceLayout,
     workspace::{
-        lock::{LockGuard, LockWait, WorkspaceReadProbe},
+        lock::{LockGuard, LockWait, try_acquire_workspace_read},
         manifest::read_workspace_manifest,
     },
 };
@@ -26,7 +26,6 @@ pub(super) async fn acquire_read_source<T>(
     writers: Option<&WriterContexts>,
     mut prepare: impl FnMut(&WriterSession) -> EngineResult<Option<T>>,
 ) -> EngineResult<ReadSource<T>> {
-    let mut probe = WorkspaceReadProbe::new(source_root, layout, operation)?;
     loop {
         wait.check_cancelled()?;
         if let Some(writers) = writers
@@ -38,7 +37,7 @@ pub(super) async fn acquire_read_source<T>(
         {
             return Ok(ReadSource::Writer { lease, context });
         }
-        if let Some(lock) = probe.try_acquire()? {
+        if let Some(lock) = try_acquire_workspace_read(source_root, layout, operation)? {
             return Ok(ReadSource::Read(lock));
         }
         // A writer can become available after indexing has opened its storage.
