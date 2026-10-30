@@ -1,12 +1,48 @@
 //! Compile path globs into storage predicates only when they preserve file-selection semantics.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::{
     EngineError,
-    domain::{GlobRule, SourcePath},
-    storage::types::StoragePathFilter,
+    domain::{FileId, GlobRule, SourcePath},
+    file_selection::GlobMatcher,
+    storage::types::{StoragePathFilter, StorageSearchFilter},
 };
+
+/// Share glob validation, pushdown and native-path fallback across indexed queries.
+/// Other file filters may require enumeration even when the glob can be pushed down;
+/// `list_paths` supplies their surviving files without a second storage scan.
+pub(crate) fn resolve_glob_filter(
+    root: &Path,
+    rules: &[GlobRule],
+    has_non_unicode_file_names: impl FnOnce() -> Result<bool, EngineError>,
+    require_file_ids: bool,
+    list_paths: impl FnOnce() -> Result<Vec<(FileId, PathBuf)>, EngineError>,
+) -> Result<StorageSearchFilter, EngineError> {
+    // Validate even when pushdown is available, so both paths reject invalid rules.
+    let matcher = GlobMatcher::new(root, rules)?;
+    let path = if rules.is_empty() {
+        None
+    } else {
+        compile_path_filter(rules, has_non_unicode_file_names)?
+    };
+    let file_ids = if require_file_ids || (!rules.is_empty() && path.is_none()) {
+        Some(
+            list_paths()?
+                .into_iter()
+                .filter(|(_, path)| matcher.matches_path(path))
+                .map(|(id, _)| id)
+                .collect(),
+        )
+    } else {
+        None
+    };
+    Ok(StorageSearchFilter {
+        path,
+        file_ids,
+        ..StorageSearchFilter::default()
+    })
+}
 
 pub(crate) fn compile_path_filter(
     rules: &[GlobRule],

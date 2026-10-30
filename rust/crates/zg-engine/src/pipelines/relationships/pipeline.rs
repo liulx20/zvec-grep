@@ -16,11 +16,10 @@ use crate::{
         SymbolRelationships,
     },
     domain::{
-        Entity, EntityId, EntityMetadata, FileEdge, FileId, FileIndexStatus, FileRecord, GlobRule,
+        Entity, EntityId, EntityMetadata, FileEdge, FileId, FileIndexStatus, FileRecord,
         GraphEdgeKind, Range,
     },
-    file_selection::GlobMatcher,
-    pipelines::indexed_search::path_filter::compile_path_filter,
+    pipelines::indexed_search::path_filter::resolve_glob_filter,
     storage::{
         graph::Direction,
         types::{StorageSearchFilter, StoredEntity},
@@ -55,9 +54,15 @@ pub(super) fn query_symbols(
     direction: Direction,
 ) -> EngineResult<RelationshipResult> {
     check_cancelled(options.signal.as_ref())?;
-    let filter = glob_filter(storage, &options.globs)?;
+    let filter = resolve_glob_filter(
+        std::path::Path::new(""),
+        &options.globs,
+        || storage.has_non_unicode_file_names(),
+        false,
+        || storage.list_file_paths(),
+    )?;
     let mut result =
-        collect_relationships(storage, name, scope, filter.as_ref(), options, direction)?;
+        collect_relationships(storage, name, scope, Some(&filter), options, direction)?;
     result.matches.sort_by(|a, b| {
         a.symbol
             .file_path
@@ -293,36 +298,6 @@ fn suggest_exact_symbols(
 ) -> EngineResult<Vec<StoredEntity>> {
     let selected = select_symbols(storage, name, None, filter, MAX_SYMBOL_SUGGESTIONS)?;
     load_symbols(storage, selected)
-}
-
-/// Plan the same glob predicates and fallback file IDs as ordinary indexed search.
-fn glob_filter(
-    storage: &impl RelationshipStorage,
-    rules: &[GlobRule],
-) -> EngineResult<Option<StorageSearchFilter>> {
-    if rules.is_empty() {
-        return Ok(None);
-    }
-    let matcher = GlobMatcher::new(std::path::Path::new(""), rules)?;
-    let filter =
-        if let Some(path) = compile_path_filter(rules, || storage.has_non_unicode_file_names())? {
-            StorageSearchFilter {
-                path: Some(path),
-                ..StorageSearchFilter::default()
-            }
-        } else {
-            let file_ids = storage
-                .list_file_paths()?
-                .into_iter()
-                .filter(|(_, path)| matcher.matches_path(path))
-                .map(|(id, _)| id)
-                .collect();
-            StorageSearchFilter {
-                file_ids: Some(file_ids),
-                ..StorageSearchFilter::default()
-            }
-        };
-    Ok(Some(filter))
 }
 
 fn select_symbols(
