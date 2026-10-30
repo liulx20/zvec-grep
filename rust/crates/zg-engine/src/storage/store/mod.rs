@@ -134,7 +134,7 @@ impl IndexStore {
         Self::open_with_graph(options, false)
     }
 
-    fn open_with_graph(
+    pub(crate) fn open_with_graph(
         options: WorkspaceIndexStorageOptions,
         graph_enabled: bool,
     ) -> EngineResult<Self> {
@@ -190,7 +190,7 @@ impl IndexStore {
                 Err(error) => Err(io_error("inspect workspace graph", &graph_path, &error)),
             }
         } else if !graph_enabled {
-            None
+            Ok(None)
         } else {
             // Current extractors produce no graph, so pre-graph indexes can
             // initialize an empty database without rebuilding canonical data.

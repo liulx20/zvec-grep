@@ -32,10 +32,13 @@ impl Fixture {
         .expect("workspace");
         let storage_home = layout.index_dir().to_path_buf();
         fs::create_dir_all(&storage_home).expect("generation");
-        let storage = IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
-            storage_path: storage_home.clone(),
-            embeddings: vec![schema()],
-        })
+        let storage = IndexStore::open_with_graph(
+            WorkspaceIndexStorageOptions::ReadWrite {
+                storage_path: storage_home.clone(),
+                embeddings: vec![schema()],
+            },
+            true,
+        )
         .expect("writable index");
         let local = write_symbols(
             &storage,
@@ -87,10 +90,13 @@ impl Fixture {
     }
 
     pub(super) fn open_store(&self) -> IndexStore {
-        IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
-            storage_path: self.storage_home().to_owned(),
-            embeddings: vec![schema()],
-        })
+        IndexStore::open_with_graph(
+            WorkspaceIndexStorageOptions::ReadWrite {
+                storage_path: self.storage_home().to_owned(),
+                embeddings: vec![schema()],
+            },
+            true,
+        )
         .expect("open test storage")
     }
 
