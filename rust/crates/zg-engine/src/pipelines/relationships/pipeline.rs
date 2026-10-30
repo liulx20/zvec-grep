@@ -86,11 +86,7 @@ fn collect_relationships(
     // cannot detect a same-ID rewrite between these steps.
     let definitions = storage.read_snapshot(|view| {
         check_cancelled(options.signal.as_ref())?;
-        if !view.has_graph()? {
-            return Err(EngineError::not_found(
-                "workspace graph is missing; this index has no persisted relationship data",
-            ));
-        }
+        view.ensure_graph()?;
         find_symbols(view, name, scope, filter)
     })?;
     let mut matches = Vec::new();

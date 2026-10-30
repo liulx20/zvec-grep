@@ -536,8 +536,10 @@ fn missing_graph_is_created_without_rebuilding_indexed_files() {
     let reader = open(temporary.path(), true);
     assert!(
         reader
-            .read(|state| Ok(state.graph.is_none()))
-            .expect("optional graph")
+            .read(|state| {
+                Ok(matches!(&state.graph, Err(error) if error.code == EngineError::NOT_FOUND))
+            })
+            .expect("missing graph")
     );
     assert_eq!(stored_entities(&reader, &source.entities).len(), 1);
     assert!(

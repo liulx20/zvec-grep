@@ -72,11 +72,12 @@ impl ReadView<'_> {
         self.state.files.fetch(ids)
     }
 
-    pub(crate) fn has_graph(&self) -> EngineResult<bool> {
-        if let Some(error) = &self.state.graph_open_error {
-            return Err(EngineError::from_report(error.clone()));
-        }
-        Ok(self.state.graph.is_some())
+    pub(crate) fn ensure_graph(&self) -> EngineResult<()> {
+        self.state
+            .graph
+            .as_ref()
+            .map(|_| ())
+            .map_err(|error| EngineError::from_report(error.clone()))
     }
 
     pub(crate) fn graph_neighborhood(
@@ -85,11 +86,10 @@ impl ReadView<'_> {
         direction: Direction,
         kinds: Option<&[GraphEdgeKind]>,
     ) -> EngineResult<Vec<FileEdge>> {
-        self.has_graph()?;
         self.state
             .graph
             .as_ref()
-            .ok_or_else(|| EngineError::not_found("workspace graph is missing"))?
+            .map_err(|error| EngineError::from_report(error.clone()))?
             .neighborhood(id, direction, kinds)
             .map_err(graph_error)
     }

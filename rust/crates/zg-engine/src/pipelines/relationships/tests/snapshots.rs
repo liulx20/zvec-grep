@@ -72,8 +72,8 @@ struct ObservedRead<'a> {
 }
 
 impl RelationshipRead for ObservedRead<'_> {
-    fn has_graph(&self) -> EngineResult<bool> {
-        self.view.has_graph()
+    fn ensure_graph(&self) -> EngineResult<()> {
+        self.view.ensure_graph()
     }
     fn find_symbol_entity_ids(
         &self,
